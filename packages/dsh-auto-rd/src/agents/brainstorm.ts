@@ -1,28 +1,22 @@
 /**
- * BrainstormAgent — Propose 2-3 design approaches with trade-offs.
+ * BrainstormAgent — produces ONE concrete proposal per invocation.
  *
  * Patterns borrowed (from src/agents/AGENT-SKILL-MAPPING.md):
- * - B-5: Propose 2-3 Approaches With Trade-offs (obra/brainstorming)
+ * - B-5: Propose 2–3 Approaches with Trade-offs (obra/brainstorming)
  * - B-6: Lead With Recommended (obra/brainstorming)
  * - B-7: YAGNI Ruthlessly (obra/brainstorming)
  *
- * Three Brainstorm agents run in parallel with different biases
- * (minimal-change / clean-rewrite / novel-approach). The persona template
- * is in personas/brainstorm.md.tmpl; per-instance variation is interpolated
- * into {VARIATION} and {INDEX} placeholders.
+ * The orchestrator dispatches this agent THREE times in parallel, once
+ * per variation (minimal / clean / novel) — matches the design doc
+ * auto-rd-native-plugin-design.md §6.6. Each invocation commits to its
+ * variation; the agent does not produce all three internally.
+ *
+ * Tool surface: read-only. Implementation is the implementing agent's job.
  */
 import type { AgentSpec } from './base'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { loadPersona } from './persona-loader'
 
-export type BrainstormVariation = 'minimal-change' | 'clean-rewrite' | 'novel-approach'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
-const TEMPLATE_PATH = resolve(__dirname, 'personas', 'brainstorm.md.tmpl')
-
-const TEMPLATE = readFileSync(TEMPLATE_PATH, 'utf-8')
+export type BrainstormVariation = 'minimal' | 'clean' | 'novel'
 
 export class BrainstormAgent implements AgentSpec {
   readonly name = 'brainstorm'
@@ -34,17 +28,13 @@ export class BrainstormAgent implements AgentSpec {
   ) {}
 
   get persona(): string {
-    return TEMPLATE
-      .replaceAll('{VARIATION}', this.variation)
-      .replaceAll('{INDEX}', String(this.index))
+    // Load the base persona once per instance. The persona body describes
+    // the agent's role in general terms; the variation parameter is carried
+    // in the dispatch request bag, not interpolated into the persona.
+    return loadPersona('brainstorm')
   }
 
   readonly toolFilter = {
-    allow: [
-      'fs_read',
-      'fs_search',
-      'fs_glob',
-      'web_fetch',
-    ],
+    allow: ['fs_read', 'fs_search', 'fs_glob', 'web_fetch'],
   }
 }

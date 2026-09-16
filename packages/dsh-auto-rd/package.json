@@ -19,7 +19,8 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run copy:personas",
+    "copy:personas": "node -e \"const fs=require('fs');const path=require('path');const src=path.join('src','agents','personas');const dst=path.join('lib','agents','personas');fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src))if(f.endsWith('.md'))fs.copyFileSync(path.join(src,f),path.join(dst,f));\"",
     "watch": "tsc -p tsconfig.json --watch",
     "lint": "tsc --noEmit -p tsconfig.json",
     "test": "echo 'No tests yet'",
