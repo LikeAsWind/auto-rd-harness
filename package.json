@@ -31,8 +31,11 @@
     "test:route": "node scripts/test-panel-route.mjs",
     "test:client": "node scripts/test-client-half.mjs",
     "test:reasons": "node scripts/test-reason-codes.mjs",
+    "test:install-to-dsh": "node scripts/test-install-to-dsh.mjs",
     "test:all": "node scripts/test-all.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
+    "install:dsh": "node scripts/install-to-dsh.mjs",
+    "uninstall:dsh": "node scripts/install-to-dsh.mjs --uninstall",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },
   "engines": {

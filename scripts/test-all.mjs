@@ -36,6 +36,7 @@ const SUITES = [
   ['panel route', 'scripts/test-panel-route.mjs'],
   ['client half', 'scripts/test-client-half.mjs'],
   ['reason codes', 'scripts/test-reason-codes.mjs'],
+  ['install-to-dsh', 'scripts/test-install-to-dsh.mjs'],
 ]
 
 const results = []

@@ -38,7 +38,7 @@ auto-rd-harness/
 ├── docs/
 │   └── architecture/             # Design docs
 ├── examples/                     # cordis.patch.yml snippets
-├── scripts/                      # Test suites and the pattern audit
+├── scripts/                      # Test suites and the install-to-dsh helper
 ├── .github/workflows/            # CI
 ├── README.md
 ├── LICENSE (MIT)
@@ -53,14 +53,15 @@ npm run lint           # tsc --noEmit
 npm run test:all       # every suite, with a summary table
 ```
 
-`test:all` runs 20 suites / 903 assertions: the pipeline state machine and
+`test:all` runs 21 suites / 925 assertions: the pipeline state machine and
 tools, the real subprocess test runner, the real git diff reader and
 committer, the project probe, the plan/spec/clarify/design generators, the
 storage adapter against the verified `KvTable` contract, the DSH host
 contracts, a full `apply()` mount against a faithful fake host, the panel
-HTTP route, the client bundle, and a bidirectional audit of the Agent
-pattern mapping. Individual suites are exposed as `test:m5`, `test:probe`,
-`test:mount`, and so on.
+HTTP route, the client bundle, a bidirectional audit of the Agent
+pattern mapping, and the `install-to-dsh` lifecycle (idempotent install,
+header preservation, dry-run, uninstall). Individual suites are exposed as
+`test:m5`, `test:probe`, `test:mount`, `test:install-to-dsh`, and so on.
 
 Four things need a real environment and are listed with concrete
 verification steps in
@@ -71,28 +72,13 @@ browser, and the TAPD/GitLab round trips.
 ## Installation
 
 ```bash
-# Install into your DSH profile
-cd ~/.dsh/profiles/web
-pnpm add @yangzhitong/dsh-auto-rd
+# One command, from the repo root
+npm run install:dsh
 ```
 
-Add to `~/.dsh/profiles/web/cordis.patch.yml`:
+That script wires the plugin into your local DSH profile (writes the managed block in `cordis.patch.yml`, runs the package-manager add) and prints the next step (set `DSH_TAPD_API_TOKEN` / `DSH_GITLAB_API_TOKEN` in the shell that launches DSH, then restart DSH).
 
-```yaml
-- id: auto-rd
-  name: '@yangzhitong/dsh-auto-rd'
-  config:
-    tapdApiToken: '<your-tapd-api-token>'
-    gitlabApiToken: '<your-gitlab-api-token>'
-    workspaceRoot: 'C:/work'
-    modules:
-      - id: payment
-        title: 'Payment Service'
-        repoUrl: 'https://gitlab.example.com/payment/payment-service.git'
-        defaultBranch: 'main'
-```
-
-Restart DSH. The plugin mounts automatically.
+For the full guide — including uninstall, `--dry-run`, non-default profiles, and a bilingual walkthrough — see **[`docs/installation.md`](./docs/installation.md)**. (中文 / English; 中文在前)
 
 ## Acknowledgements
 

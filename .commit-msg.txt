@@ -1,0 +1,26 @@
+feat(install): npm run install:dsh — one-command install into a local DSH profile
+
+- scripts/install-to-dsh.mjs: idempotent helper that runs pnpm/npm/yarn
+  add and upserts a marker-delimited managed block in
+  $DSH_HOME/profiles/web/cordis.patch.yml. Tokens are referenced via
+  `!js "process.env.<name> || ''"` and never appear in the file or the
+  script's output. Supports --dry-run and --uninstall.
+
+- scripts/test-install-to-dsh.mjs: full lifecycle test (install + header
+  preservation + idempotent re-run + dry-run + uninstall + second
+  uninstall), using AUTORD_FAKE_PM=1 to no-op real package-manager
+  calls. 22 assertions.
+
+- package.json: npm run install:dsh, uninstall:dsh, test:install-to-dsh.
+
+- scripts/test-all.mjs: install-to-dsh suite included; 21 suites total.
+
+- docs/installation.md: bilingual (中文 default, English follows) install
+  guide with troubleshooting.
+
+- README.md: installation section now points at the new docs and the
+  npm script.
+
+No tracked code under packages/dsh-auto-rd/ changed. No tokens are
+written to any tracked file. The plugin's cordis.yml still ships empty
+strings for tokens, so the repo stays credential-free.
