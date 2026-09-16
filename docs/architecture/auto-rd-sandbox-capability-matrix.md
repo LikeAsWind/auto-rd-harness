@@ -1,9 +1,21 @@
 # Dynamic Cordis Plugin Sandbox 能力矩阵
 
+> ⚠️ **状态：历史文档（已弃用 / Superseded）**
+>
 > 本文档基于对 DeepSeek Harness cordis-host-runner 源码的精读，以及通过 `cordis_define`/`cordis_run` 进行的多次动态探测。
 > 探测受 cordis 错误吞咽机制所限，部分能力未能从外部观察到完整行为，只能从源码推断。
+>
+> **auto-rd 已于 M1 决策走 native plugin 形态**（详见 `auto-rd-native-plugin-design.md` 附录 A.1），**不再使用 dynamic plugin**。本文档描述的 sandbox 限制 / 注入模型 / HOST_BUILTIN_INSPECTION 等**与 auto-rd 当前架构无关**。
+>
+> 本文档**保留**作为：
+> - Cordis dynamic plugin sandbox 内部行为的参考
+> - 与 native plugin 形态做对比：理解为什么 auto-rd 选择不走 dynamic
+>
+> **请勿按本文档设计 auto-rd 新功能**。所有 auto-rd 实施请参考主设计文档。
 
 ---
+
+## 1. Sandbox 的硬性边界（源码确认）
 
 ## 1. Sandbox 的硬性边界（源码确认）
 

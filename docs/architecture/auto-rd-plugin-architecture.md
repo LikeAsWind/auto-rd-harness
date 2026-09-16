@@ -1,9 +1,24 @@
 # 自动研发插件架构探索报告
 
+> ⚠️ **状态：历史文档（已弃用 / Superseded）**
+>
 > 本报告基于对 DeepSeek Harness 当前能力（2025 年初版本）的 Inspect 查询结果。
-> 目的是评估“以 Cordis 动态插件承载整套 TAPD 驱动的自动研发流水线”在当前 Harness 上的可行性。
+> 目的是评估"以 Cordis **动态插件**承载整套 TAPD 驱动的自动研发流水线"在当前 Harness 上的可行性。
+>
+> **结论已被 M1 决策推翻**：auto-rd 决定走 **native plugin（部署级真插件）** 形态，不走 dynamic plugin。详见：
+> - 主设计文档 `auto-rd-native-plugin-design.md` 附录 A.1
+> - 决策理由：Dynamic plugin 不跨 DSH 重启持久，auto-rd 是长跑服务
+>
+> 本报告**保留**作为：
+> - 早期可行性分析的存档
+> - Cordis dynamic plugin 形态如何工作的参考（与 native plugin 形态对比）
+> - M1 决策时引用的 §1 核心结论
+>
+> **当前实现不再遵循本报告**。请勿按本报告的设计实现新功能。
 
 ---
+
+## 1. 核心结论（历史）
 
 ## 1. 核心结论
 
