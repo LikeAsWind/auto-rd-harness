@@ -23,10 +23,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config'
 import type { AutoRdStorage } from '../domain/storage'
-import type { StoryRecord, StoryState } from '../domain/schema'
+import type { StoryRecord, StoryState, TaskRecord } from '../domain/schema'
 import type { Logger } from '../utils/logger'
 import { WorkspaceManager } from './workspace-manager'
 import { AgentProvider } from './agent-provider'
+import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage
@@ -59,30 +62,19 @@ const STAGE_HANDLERS: Record<StoryState, StageHandler | null> = {
   decision: runDecisionAgent,
   spec: runSpecAgent,
 
-  planning: notInM2Yet,
-  implementing: notInM2Yet,
-  testing: notInM2Yet,
-  fixing: notInM2Yet,
-  verifying: notInM2Yet,
-  reviewing: notInM2Yet,
-  final_verifying: notInM2Yet,
-  mr_creating: notInM2Yet,
-  tapd_syncing: notInM2Yet,
+  planning: runPlanningStage,
+  implementing: runImplementingStage,
+  testing: runTestingStage,
+  fixing: runFixingStage,
+  verifying: runVerifyingStage,
+  reviewing: runReviewingStage,
+  final_verifying: runFinalVerifyingStage,
+  mr_creating: runMrCreatingStage,
+  tapd_syncing: runTapdSyncingStage,
 
   completed: async (s) => s.state,
   failed: async (s) => s.state,
   blocked: async (s) => s.state,
-}
-
-/**
- * M2 short-circuit: stages beyond `spec` are not in scope yet. Rather than
- * failing the story, we end the pipeline at `completed` once `spec` is done
- * so a single story can validate the full M2 surface end to end.
- *
- * M3 will replace this with real handlers.
- */
-async function notInM2Yet(_story: StoryRecord): Promise<StoryState> {
-  return 'completed'
 }
 
 export class StoryRunner {
@@ -415,7 +407,517 @@ async function runSpecAgent(
 
   recordArtifact(story, 'spec', '06-spec.md', result.summary ?? '')
   deps.logger.info(`SpecAgent wrote artifact for story ${story.id}`)
-  // M2 boundary: spec is the last stage wired up; later stages short-circuit
-  // to `completed` via notInM2Yet. M3 will replace that stub.
   return 'planning'
+}
+
+// ---- Post-Spec Stages (M3) ----
+
+/**
+ * planning — parse the Planner's 07-tasks.md into structured TaskRecords
+ * persisted in the `tasks` table, then advance to `implementing`.
+ *
+ * If parsing fails entirely (no tasks found, malformed markdown), the story
+ * goes to `blocked` so the user can intervene — we don't guess.
+ */
+async function runPlanningStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+
+  const result = await deps.agentProvider.dispatch({
+    agentName: 'planner',
+    label: `Planner: ${story.id}`,
+    worktreePath: story.worktreePath!,
+    artifactsDir,
+    inputs: storyInput(story),
+  })
+
+  if (result.status !== 'success') {
+    deps.logger.warn(`Planner returned status=${result.status} for story ${story.id}`)
+    return 'failed'
+  }
+  recordArtifact(story, 'plan', '07-tasks.md', result.summary ?? '')
+
+  // Parse the freshly written 07-tasks.md into structured task records.
+  const tasksPath = join(artifactsDir, '07-tasks.md')
+  let parsed: ParsedPlannerTask[]
+  try {
+    const markdown = readFileSync(tasksPath, 'utf-8')
+    parsed = parsePlannerMarkdown(markdown)
+  } catch (err) {
+    story.blockedReason = `Planning: failed to read 07-tasks.md: ${(err as Error).message}`
+    deps.logger.error(`Planning: cannot read 07-tasks.md for story ${story.id}: ${story.blockedReason}`)
+    return 'blocked'
+  }
+
+  if (parsed.length === 0) {
+    story.blockedReason = `Planning: planner produced zero tasks in 07-tasks.md`
+    deps.logger.error(`Planning: zero tasks for story ${story.id}`)
+    return 'blocked'
+  }
+
+  // Pre-create per-task ImplementationAgent specs so SD-2 dispatch works.
+  for (const t of parsed) {
+    deps.agentProvider.ensureImplementationSpec(t.taskId)
+  }
+
+  // Persist TaskRecords. Each task starts at status='pending'. The
+  // orchestrator's `implementing` stage filters by deps before dispatching.
+  const tasks = deps.storage.tasks()
+  const now = new Date().toISOString()
+  for (const t of parsed) {
+    const record: TaskRecord = {
+      id: t.taskId,
+      storyId: story.id,
+      title: t.title,
+      description: t.title, // payload carries the structured shape
+      payload: {
+        taskId: t.taskId,
+        title: t.title,
+        files: t.files,
+        dependsOn: t.dependsOn,
+        estimatedMinutes: t.estimatedMinutes,
+        red: t.red,
+        green: t.green,
+        verify: t.verify,
+        commit: t.commit,
+      },
+      status: 'pending',
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await tasks.put(t.taskId, record)
+  }
+
+  deps.logger.info(`Planning: created ${parsed.length} tasks for story ${story.id}`)
+  return 'implementing'
+}
+
+/**
+ * implementing — for each pending task whose deps are satisfied, dispatch
+ * a fresh ImplementationAgent. Iterate until either every task is
+ * `completed` / `blocked` or none of the remaining `pending` tasks have
+ * their deps satisfied (which shouldn't happen in a valid plan but we
+ * guard against cycles).
+ *
+ * SD-2 + SD-3:
+ *   - SD-2: each task gets a fresh AgentSpec via ensureImplementationSpec
+ *   - SD-3: the ImplementationAgent spec itself declares no subagent tool
+ *     permission, and the AgentProvider does not expose a "spawn another
+ *     subagent" method to its handlers — Implementers can't go sideways.
+ */
+async function runImplementingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const tasks = deps.storage.tasks()
+  const allTasks = [...tasks.values()].filter((t) => t.storyId === story.id)
+  if (allTasks.length === 0) {
+    deps.logger.warn(`Implementing: no tasks found for story ${story.id}`)
+    return 'failed'
+  }
+
+  // Filter to tasks that are ready: pending AND every dependsOn task is
+  // completed. Tasks already done / blocked are skipped.
+  const byId = new Map(allTasks.map((t) => [t.id, t]))
+  const ready = allTasks.filter((t) => {
+    if (t.status !== 'pending') return false
+    return t.payload?.dependsOn.every((dep) => byId.get(dep)?.status === 'completed') ?? true
+  })
+
+  if (ready.length === 0) {
+    // Either all done, or none are ready (cycle or all-blocked).
+    const anyBlocked = allTasks.some((t) => t.status === 'blocked')
+    const anyFailed = allTasks.some((t) => t.status === 'failed')
+    if (anyBlocked || anyFailed) {
+      // Surface upstream blocker.
+      const blockedTask = allTasks.find((t) => t.status === 'blocked' || t.status === 'failed')
+      story.blockedReason = `Implementing: task ${blockedTask?.id} ${blockedTask?.status}: ${blockedTask?.blockedReason ?? 'unknown'}`
+      return 'blocked'
+    }
+    // All completed.
+    deps.logger.info(`Implementing: all ${allTasks.length} tasks completed for story ${story.id}`)
+    return 'testing'
+  }
+
+  // Dispatch each ready task (sequential — the Plan's "Execution Order"
+  // section is the source of truth; we preserve the order tasks appear in
+  // the table). Parallel dispatch would require per-task worktrees, which
+  // is a later milestone.
+  let didAdvance = false
+  for (const task of ready) {
+    deps.agentProvider.ensureImplementationSpec(task.id)
+    const result = await deps.agentProvider.dispatch({
+      agentName: 'implementation',
+      label: `Implementation ${task.id}: ${story.id}`,
+      worktreePath: story.worktreePath!,
+      artifactsDir,
+      inputs: { story: storyInput(story).story, task: task.payload },
+      taskId: task.id,
+    })
+
+    task.attemptCount += 1
+    task.updatedAt = new Date().toISOString()
+    if (result.status === 'success') {
+      task.status = 'completed'
+      task.implementationResult = result.summary
+      didAdvance = true
+    } else if (result.status === 'blocked') {
+      task.status = 'blocked'
+      task.blockedReason = result.reason
+      story.blockedReason = `Implementing: task ${task.id} blocked — ${result.reason}`
+      await tasks.put(task.id, task)
+      return 'blocked'
+    } else {
+      task.status = 'failed'
+      task.blockedReason = result.reason
+    }
+    await tasks.put(task.id, task)
+  }
+
+  // Re-enter the loop on the next runner tick to pick up newly unblocked
+  // tasks. We return 'implementing' here — StoryRunner's outer while-loop
+  // will re-dispatch this stage until no progress is possible.
+  return didAdvance || ready.length > 0 ? 'implementing' : 'testing'
+}
+
+/**
+ * testing — dispatch TestAgent. The stub emits [TEST_PASS] unconditionally;
+ * a real model would inspect the test suite. The orchestrator transitions
+ * to `verifying` on PASS or to `fixing` on FAIL.
+ */
+async function runTestingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const result = await deps.agentProvider.dispatch({
+    agentName: 'test',
+    label: `Test: ${story.id}`,
+    worktreePath: story.worktreePath!,
+    artifactsDir,
+    inputs: storyInput(story),
+  })
+
+  if (result.status === 'blocked' || result.status === 'failed') {
+    deps.logger.warn(`TestAgent returned ${result.status} for story ${story.id}: ${result.reason}`)
+    return 'fixing'
+  }
+  recordArtifact(story, 'test', '09-test-report.md', result.summary ?? '')
+  return 'verifying'
+}
+
+/**
+ * fixing — dispatch FixAgent against the most-recent test failure, then
+ * loop back to `testing`. The 5-round breaker (SD-4) is enforced via the
+ * SUM of attemptCount across all the story's tasks: if any task has
+ * attemptCount > 5, the story is parked in `blocked`.
+ *
+ * Stub behaviour: every dispatch returns success, attemptCount climbs on
+ * each invocation, and after 5 invocations of this stage the breaker
+ * trips. This is the path that lets M3 demonstrate the breaker without
+ * needing a real model.
+ */
+async function runFixingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const tasks = deps.storage.tasks()
+  const storyTasks = [...tasks.values()].filter((t) => t.storyId === story.id)
+  // Find the most-recently-failed task to address.
+  const target = storyTasks
+    .filter((t) => t.status === 'failed' || t.status === 'in_progress')
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+
+  if (!target) {
+    deps.logger.warn(`Fixing: no failed task to address for story ${story.id}`)
+    return 'testing'
+  }
+
+  // SD-4 5-round breaker: if any task has tried >= 5 times, park the story.
+  const totalAttempts = storyTasks.reduce((acc, t) => acc + t.attemptCount, 0)
+  if (totalAttempts >= 5) {
+    story.blockedReason = `Fixing: 5-round breaker tripped after ${totalAttempts} attempts on task ${target.id}`
+    deps.logger.warn(`Fixing: breaker tripped for story ${story.id}`)
+    return 'blocked'
+  }
+
+  const attempt = target.attemptCount + 1
+  const result = await deps.agentProvider.dispatch({
+    agentName: 'fix',
+    label: `Fix attempt ${attempt} on ${target.id}: ${story.id}`,
+    worktreePath: story.worktreePath!,
+    artifactsDir,
+    inputs: {
+      story: storyInput(story).story,
+      task: target.payload,
+      fix: { attempt, failureId: `F-${target.id}-${attempt}` },
+    },
+    taskId: target.id,
+  })
+
+  target.attemptCount = attempt
+  target.updatedAt = new Date().toISOString()
+  if (result.status === 'blocked') {
+    target.status = 'blocked'
+    target.blockedReason = result.reason
+    await tasks.put(target.id, target)
+    story.blockedReason = `Fixing: task ${target.id} blocked — ${result.reason}`
+    return 'blocked'
+  }
+  if (result.status !== 'success') {
+    target.status = 'failed'
+    target.blockedReason = result.reason
+  } else {
+    // Stub success — flip status back to in_progress so testing can re-run.
+    target.status = 'in_progress'
+  }
+  await tasks.put(target.id, target)
+  recordArtifact(
+    story,
+    'fix',
+    '10-fix-report.md',
+    result.status === 'success' ? result.summary ?? '' : `attempt ${attempt} failed: ${result.reason}`,
+  )
+  return 'testing'
+}
+
+/**
+ * verifying — dispatch VerificationAgent on the integration tree. PASS →
+ * `reviewing`; PARTIAL → `fixing`; REJECT → blocked (architectural issue).
+ */
+async function runVerifyingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const result = await deps.agentProvider.dispatch({
+    agentName: 'verification',
+    label: `Verification: ${story.id}`,
+    worktreePath: story.worktreePath!,
+    artifactsDir,
+    inputs: storyInput(story),
+  })
+
+  if (result.status === 'blocked' || result.status === 'failed') {
+    story.blockedReason = `Verifying: ${result.reason}`
+    return 'blocked'
+  }
+  recordArtifact(story, 'verification', '11-verify-report.md', result.summary ?? '')
+  return 'reviewing'
+}
+
+/**
+ * reviewing — two-axis parallel review (CR-1). The orchestrator dispatches
+ * ReviewAgent twice (standards + spec) and only advances to
+ * `final_verifying` if BOTH axes return APPROVE. Either axis returning
+ * CHANGES rolls the story back to `fixing` with the failing axis in the
+ * blockedReason.
+ */
+async function runReviewingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const axes = ['standards', 'spec'] as const
+
+  // One task per axis. In a real pipeline, each axis is one subagent per
+  // task — here we route to the same TaskRecord's latest task id.
+  const tasks = [...deps.storage.tasks().values()].filter((t) => t.storyId === story.id)
+  const targetTaskId = tasks[tasks.length - 1]?.id ?? 'T001'
+
+  const results = await Promise.allSettled(
+    axes.map((axis) =>
+      deps.agentProvider.dispatch({
+        agentName: 'review',
+        label: `Review ${axis}: ${story.id}`,
+        worktreePath: story.worktreePath!,
+        artifactsDir,
+        inputs: { story: storyInput(story).story, axis },
+        axis,
+        taskId: targetTaskId,
+      }),
+    ),
+  )
+
+  const verdicts: Array<{ axis: string; status: string; summary?: string }> = []
+  let rejected = false
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]
+    const axis = axes[i]
+    if (r.status === 'fulfilled') {
+      const v = r.value
+      verdicts.push({
+        axis,
+        status: v.status,
+        summary: v.status === 'success' ? v.summary : v.reason,
+      })
+      if (v.status !== 'success') rejected = true
+    } else {
+      verdicts.push({ axis, status: 'failed', summary: r.reason?.message })
+      rejected = true
+    }
+  }
+
+  const summary = verdicts.map((v) => `${v.axis}:${v.status}`).join(' | ')
+  recordArtifact(story, 'review', `12-review-${targetTaskId}-{standards,spec}.md`, summary)
+
+  if (rejected) {
+    deps.logger.warn(`Review: rejected by ${verdicts.find((v) => v.status !== 'success')?.axis}`)
+    return 'fixing'
+  }
+  return 'final_verifying'
+}
+
+/**
+ * final_verifying — same two-axis pattern but whole-branch (SD-6).
+ * DP-1 + DP-2: two parallel dispatch calls, one per axis.
+ */
+async function runFinalVerifyingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const axes = ['standards', 'spec'] as const
+
+  const results = await Promise.allSettled(
+    axes.map((axis) =>
+      deps.agentProvider.dispatch({
+        agentName: 'final-verify',
+        label: `Final verify ${axis}: ${story.id}`,
+        worktreePath: story.worktreePath!,
+        artifactsDir,
+        inputs: { story: storyInput(story).story, axis },
+        axis,
+      }),
+    ),
+  )
+
+  let rejected = false
+  const verdicts: string[] = []
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]
+    const axis = axes[i]
+    const status = r.status === 'fulfilled' ? r.value.status : 'failed'
+    verdicts.push(`${axis}:${status}`)
+    if (status !== 'success') rejected = true
+  }
+
+  recordArtifact(
+    story,
+    'final_verify',
+    '13-final-verify-{standards,spec}.md',
+    verdicts.join(' | '),
+  )
+
+  if (rejected) {
+    deps.logger.warn(`FinalVerify: rejected (${verdicts.filter((v) => !v.endsWith(':success')).join(', ')})`)
+    return 'fixing'
+  }
+  return 'mr_creating'
+}
+
+/**
+ * mr_creating — write a 99-mr.md describing what the real MR call would do.
+ * We do NOT actually push or call GitLab in M3; that lands in M4.
+ */
+async function runMrCreatingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const now = new Date().toISOString()
+
+  const mrDoc = [
+    `# MR Stub — ${story.id}`,
+    ``,
+    `**Story**: ${story.title}`,
+    `**Branch**: \`${story.branch}\``,
+    `**Module**: ${story.moduleId}`,
+    `**Generated**: ${now}`,
+    ``,
+    `## What a real GitLab MR call would do`,
+    ``,
+    `1. \`git push origin ${story.branch}\` from \`${story.worktreePath ?? '<worktree>'}\``,
+    `2. \`POST /api/v4/projects/:id/merge_requests\` with:`,
+    `   - source_branch: \`${story.branch}\``,
+    `   - target_branch: \`${story.moduleId}/main\` (resolved via Module record)`,
+    `   - title: \`[Auto-RD] ${story.title} (TAPD-${story.tapdId})\``,
+    `   - description: rendered from 06-spec.md + 11-verify-report.md + 13-final-verify-*.md`,
+    `3. Persist returned \`web_url\` into \`story.mrUrl\``,
+    ``,
+    `## Why this is a stub in M3`,
+    ``,
+    `M3 hardens the state machine through \`final_verifying\`. The real`,
+    `GitLab API integration (push, project lookup, MR creation, webhook)`,
+    `lands in M4 alongside the \`gitlabMerger\` service. This file is the`,
+    `seam: a later M4 commit will replace this stub with a real call.`,
+    ``,
+    `## State transition`,
+    `This artifact's existence marks the story as having cleared`,
+    `final_verifying. Story advances to \`tapd_syncing\`.`,
+    ``,
+  ].join('\n')
+
+  writeFileSyncOrLog(artifactsDir, '99-mr.md', mrDoc, deps.logger)
+  story.mrUrl = `<stub>:${story.branch}`
+  deps.logger.info(`mr_creating stub wrote 99-mr.md for story ${story.id}`)
+  return 'tapd_syncing'
+}
+
+/**
+ * tapd_syncing — write a 98-tapd-sync.md describing what the real TAPD
+ * sync would do. No network call in M3.
+ */
+async function runTapdSyncingStage(
+  story: StoryRecord,
+  deps: StoryRunnerDeps,
+): Promise<StoryState> {
+  const artifactsDir = await ensureArtifacts(story, deps)
+  const now = new Date().toISOString()
+
+  const tapdDoc = [
+    `# TAPD Sync Stub — ${story.id}`,
+    ``,
+    `**Story**: ${story.title}`,
+    `**TAPD id**: ${story.tapdId}`,
+    `**MR url**: ${story.mrUrl ?? '<stub>'}`,
+    `**Generated**: ${now}`,
+    ``,
+    `## What a real TAPD sync would do`,
+    ``,
+    `1. \`PATCH /v1/stories/${story.tapdId}\` with:`,
+    `   - status: \`completed\``,
+    `   - mr_url: \`${story.mrUrl ?? '<stub>'}\``,
+    `   - git_branch: \`${story.branch}\``,
+    `   - story_actor: auto-rd`,
+    `2. Optionally add a comment with the artifact summary`,
+    ``,
+    `## Why this is a stub in M3`,
+    ``,
+    `M4 will introduce the real \`tapdPoller.syncTapd\` service that`,
+    `consumes the GitLab URL and posts back to TAPD. The orchestrator`,
+    `will replace this stub with that service call.`,
+    ``,
+    `## State transition`,
+    `Story advances to \`completed\` after this artifact is written.`,
+    ``,
+  ].join('\n')
+
+  writeFileSyncOrLog(artifactsDir, '98-tapd-sync.md', tapdDoc, deps.logger)
+  deps.logger.info(`tapd_syncing stub wrote 98-tapd-sync.md for story ${story.id}`)
+  return 'completed'
+}
+
+function writeFileSyncOrLog(dir: string, name: string, body: string, logger: Logger): void {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs')
+    fs.writeFileSync(join(dir, name), body, 'utf-8')
+  } catch (err) {
+    logger.error(`Failed to write ${name}: ${(err as Error).message}`)
+  }
 }
