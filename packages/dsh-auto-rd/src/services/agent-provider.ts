@@ -39,6 +39,7 @@ import { ReviewAgent } from '../agents/review.js'
 import { FinalVerifyAgent } from '../agents/final-verify.js'
 import type { AgentSpec } from '../agents/base.js'
 import type { TrajectoryRecorder } from './trajectory.js'
+import { runWorktreeTests } from './test-executor.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -739,43 +740,89 @@ async function runTestStub(
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string; acceptanceCriteria?: string }
-  deps.logger.info(`TestAgent stub running for story ${story.id}`)
+  deps.logger.info(`TestAgent running for story ${story.id}`)
+
+  // ---- Real test execution ----
+  //
+  // The M2 stub always emitted PASS, which masked real failures and
+  // hid the fix breaker. This handler now invokes the RealTestExecutor
+  // against the worktree. The result drives the [TEST_PASS] /
+  // [TEST_FAIL] sentinel the runner parses.
+  let result: import('./test-executor.js').TestRunResult
+  try {
+    result = await runWorktreeTests(req.worktreePath)
+  } catch (err) {
+    deps.logger.error(`TestAgent: executor threw for story ${story.id}: ${(err as Error).message}`)
+    return { status: 'failed', reason: `test executor threw: ${(err as Error).message}` }
+  }
+
+  const acRow = story.acceptanceCriteria
+    ? `| ${story.acceptanceCriteria.slice(0, 60)} | ${result.command || '<skipped>'} | ${result.passed ? '✅' : '❌'} | exit=${result.exitCode ?? 'n/a'} |`
+    : `| (no AC) | ${result.command || '<skipped>'} | ${result.passed ? '✅' : '❌'} | exit=${result.exitCode ?? 'n/a'} |`
+
+  const verdict = result.passed ? 'PASS' : 'FAIL'
+  const sentinel = result.passed ? '[TEST_PASS]' : '[TEST_FAIL]'
 
   const report = [
     `# Test Report — ${story.title}`,
     ``,
     `## Run Command`,
-    `<stub>`,
+    result.skippedReason ? `_Skipped: ${result.skippedReason}_` : `\`${result.command}\``,
     ``,
     `## Suite Summary`,
-    `- Total: 0`,
-    `- Pass: 0`,
-    `- Fail: 0`,
-    `- Warnings: 0`,
-    `- Duration: 0s`,
+    result.skippedReason
+      ? `- Skipped (no recognised test manifest)`
+      : [
+          `- Total: ${(result.counts.pass ?? 0) + (result.counts.fail ?? 0)}`,
+          `- Pass: ${result.counts.pass ?? '?'}`,
+          `- Fail: ${result.counts.fail ?? '?'}`,
+          `- Warnings: ${result.counts.warn ?? 0}`,
+          `- Duration: ${result.durationMs}ms`,
+          `- Exit code: ${result.exitCode ?? 'n/a'}${result.signal ? ` (signal ${result.signal})` : ''}`,
+        ].join('\n'),
     ``,
     `## AC Coverage`,
     `| AC | Test | Result | Evidence |`,
     `|----|------|--------|----------|`,
-    story.acceptanceCriteria
-      ? `| ${story.acceptanceCriteria.slice(0, 60)}... | <stub> | ✅ | stub |`
-      : `| (stub) | <stub> | ✅ | stub |`,
+    acRow,
     ``,
     `## Failures`,
-    `_None._`,
+    result.passed || result.skippedReason
+      ? `_None._`
+      : [
+          '```',
+          // Trim to 60 lines max to keep the artifact readable.
+          result.tail.stdout.split('\n').slice(0, 60).join('\n'),
+          '```',
+        ].join('\n'),
+    ``,
+    `## Tail (stderr)`,
+    '```',
+    result.tail.stderr.split('\n').slice(0, 40).join('\n') || '_empty_',
+    '```',
     ``,
     `## Claim`,
-    `I claim: PASS`,
-    `Because: stub emits PASS when no failure is recorded.`,
-    `Evidence: stub run, no actual test output.`,
-    `Sufficient because: no ACs observed failing.`,
+    `I claim: ${verdict}`,
+    result.skippedReason
+      ? `Because: no test manifest was detected in the worktree.`
+      : `Because: \`${result.command}\` exited with ${result.exitCode ?? 'n/a'} in ${result.durationMs}ms.`,
+    `Evidence: ${result.skippedReason ? 'no run' : `${result.counts.pass ?? 0} passed / ${result.counts.fail ?? 0} failed (tail truncated=${result.truncated.stdout || result.truncated.stderr})`}.`,
+    `Sufficient because: ${result.passed ? 'no failures recorded' : 'failures are surfaced in the Failures section above'}.`,
     ``,
-    `[TEST_PASS]`,
+    sentinel,
   ].join('\n')
 
   writeFileSync(join(req.artifactsDir, '09-test-report.md'), report, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Test report (PASS).' }
+  if (result.passed) {
+    return { status: 'success', summary: `Test report (PASS, ${result.counts.pass ?? '?'} passed in ${result.durationMs}ms).` }
+  }
+  return {
+    status: 'failed',
+    reason: result.skippedReason
+      ? `test manifest missing: ${result.skippedReason}`
+      : `tests failed: ${result.counts.fail ?? '?'} failure(s), exit=${result.exitCode ?? 'n/a'}`,
+  }
 }
 
 async function runFixStub(
