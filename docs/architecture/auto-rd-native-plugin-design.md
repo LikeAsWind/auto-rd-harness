@@ -1220,65 +1220,193 @@ ${agentCtx.inputArtifact ? formatArtifact(agentCtx.inputArtifact) : 'None'}
 
 ---
 
-## 7. Event 桥接与 UI
+## 7. UI 表面（M4-UI 落地）
 
-### 7.1 Sidebar 面板 (UI Surface)
+> 本章与 first commit draft **显著不同**：
+> - Sidebar 用 **JSON tree renderer**（不依赖 React runtime）
+> - Notifier 用 **5s 轮询 storage**（不是 Cordis event）
+> - 加 **System Prompt section**（让模型知道 auto-rd 工具）
+> - 加 **3 个 model-callable tool**：`auto_rd_status` / `auto_rd_trigger` / `auto_rd_retry`
+> - 所有 DSH UI 服务**best-effort** —— `ctx.get('slots')` 拿不到就 warn + skip
 
-挂在 `sidebar.worktable.project` slot 上，**list 类型**：
+### 7.1 Sidebar 面板（真实实现）
+
+代码：`packages/dsh-auto-rd/src/services/ui-panel.ts`，在 `services/ui-panel.ts: registerAutoRdPanel()` 注册到 `sidebar.worktable.project` slot。
+
+**关键设计点**：
+
+1. **Renderer 返回 JSON tree，不依赖 React**：
+   ```typescript
+   type PanelNode =
+     | { type: 'div' | 'span' | 'h4' | 'ul' | 'li' | 'small'; props?: ...; children: PanelNode[] }
+     | { type: 'a'; props: { href: string; target?: string }; children: PanelNode[] }
+     | string
+   ```
+   DSH client side 拿到这个树后转译成 React.createElement 调用，**plugin host 进程不需要 React**——避免在 Node 进程跑 React 的开销
+
+2. **Pure function over storage read**：每次 DSH 重渲染时都重新读 storage，**不缓存**（DSH storage 已经提供变化通知）
+
+3. **State badge 字符**：
+   - `\u2713` ✓ completed
+   - `\u2717` ✗ failed
+   - `\u26A0` ⚠ blocked
+   - `\u21BB` ↻ active (implementing/testing/fixing/...)
+   - `\u00B7` · pending
+
+4. **最多 10 stories per module**：溢出显示 `+N more (use auto_rd_status to query)`，sidebar 不无限滚
+
+5. **每行可点击 MR link**：mrUrl 非空时渲染 `<a href={mrUrl} target="_blank">[MR]</a>`
+
+6. **Best-effort 容错**：
+   ```typescript
+   const slots = ctx.get('slots') as SlotsService | undefined
+   if (!slots) {
+     ctx.logger('auto-rd').warn('slots service not available; sidebar will not register')
+     return false
+   }
+   ```
+   standalone build（无 DSH）下，sidebar 不渲染但 plugin 其余功能全活
+
+### 7.2 StoryNotifier（轮询模式）
+
+代码：`packages/dsh-auto-rd/src/services/story-notifier.ts`
+
+**真实实现不是 event-driven**——是 **5s 轮询**：
 
 ```typescript
-import type { Context } from '@deepseek-ai/cordis'
-import { defineSlot } from '@deepseek-ai/dsh-client-ui-tool'  // 假设
+const POLL_INTERVAL_MS = 5_000
 
-export function autoRdSidebarPanel(
-  ctx: Context,
-  config: { domain: Domain<any> }
-) {
-  ctx.slots.register('sidebar.worktable.project', {
-    id: 'auto-rd-modules',
-    order: 100,
-    label: () => 'Auto-RD Modules',
-  }, () => {
-    const modules = [...config.domain.table('modules').values()]
-    const stories = [...config.domain.table('stories').values()]
-    
-    return React.createElement('div', { className: 'auto-rd-panel' },
-      modules.map(m => 
-        React.createElement(ModuleSection, { 
-          module: m, 
-          stories: stories.filter(s => s.moduleId === m.id) 
-        })
-      )
-    )
-  })
+class StoryNotifierService {
+  private notifiedStories = new Set<string>()
+  
+  async tick(): Promise<void> {
+    for (const story of storage.stories().values()) {
+      if (story.state !== 'blocked') continue
+      if (notifiedStories.has(story.id)) continue
+      await notify(story)
+      notifiedStories.add(story.id)
+    }
+    // 全清空时重置 Set —— story 可被重新 block
+  }
 }
 ```
 
-### 7.2 StoryNotifier 推送 blocked 通知
+**为什么不用 Cordis event**：Cordis 没提供 storage-changed event；runner 在 transition 时确实 emit 事件，但那是 runner 内部 emit，**外部 subscriber 拿不到**。轮询是最轻的解耦——runner 不必知道 notifier 存在
 
+**消息格式**：
+```
+🔔 Auto-RD: Story <id> ("<title>") is blocked in state=<state>.
+
+Reason: <blockedReason>
+
+Use the `auto_rd_retry` or `auto_rd_trigger` tool to recover. Common actions:
+`action="mark_reviewed", decision="approve"` to release the block;
+`action="advance_story"` to wake the queue.
+```
+
+priority: 'background'——不打断用户当前对话
+
+**Best-effort**：subagents service 拿不到就 warn 跳过，story 仍在 storage 里，auto_rd_status 仍能查
+
+### 7.3 3 个 Model-Callable Tools
+
+#### 7.3.1 `auto_rd_status`
+
+文件：`tools/auto-rd-status.ts`，注册名：`'auto_rd_status'`
+
+参数（zod 校验）：
 ```typescript
-export function storyNotifier(
-  ctx: Context,
-  config: { domain: Domain<any> }
-) {
-  ctx.on('story-blocked', async (story: Story, reason: string) => {
-    // 找出用户当前的主 session
-    const userSession = await findActiveUserSession(ctx)
-    if (!userSession) return
-    
-    // 向用户 session 发送 prompt
-    await ctx.subagents.sendMessage(
-      ctx.agents.requireInitiator(),
-      userSession.id,
-      [{
-        type: 'text',
-        text: `🔔 Auto-RD: Story ${story.id} 在 "${story.state}" 阶段被 block。\n\n原因: ${reason}\n\n请使用 auto_rd_retry 工具处理。`,
-      }],
-      { /* options */ }
-    )
-  })
+{
+  scope?: 'stories' | 'tasks' | 'summary'   // default: 'summary'
+  moduleId?: string                          // filter
+  state?: StoryState                         // filter
+  limit?: number                             // default 50, max 500
 }
 ```
+
+返回：
+- `summary`：总故事数 + 按 state 计数 + 模块数 + 待处理 task 数
+- `stories`：每条 story 的 id / title / state / moduleId / branch / updatedAt / mrUrl
+- `tasks`：每条 task 的 id / storyId / status / attemptCount / blockedReason
+
+#### 7.3.2 `auto_rd_trigger`
+
+文件：`tools/auto-rd-trigger.ts`
+
+参数（discriminatedUnion）：
+```typescript
+{ action: 'poll_now' }
+| { action: 'advance_story', storyId: string }
+| { action: 'mark_reviewed', storyId: string, decision: 'approve' | 'request_changes' | 'skip', note?: string }
+```
+
+返回：`{ ok: boolean, ... }`，不抛错（DSH 处理 throw 差）
+
+`mark_reviewed` 行为：
+- `approve`：state → `pending`，retryCount → 0，blockedReason 清除
+- `request_changes`：append 到 blockedReason，state 不变
+- `skip`：state → `failed`，record decision
+
+#### 7.3.3 `auto_rd_retry`
+
+文件：`tools/auto-rd-retry.ts`
+
+参数：
+```typescript
+{ storyId: string, action: 'retry' | 'skip' | 'reset_to_pending', note?: string }
+```
+
+`action` 区别：
+- `retry`：state → pending，retryCount = 0（vs `reset_to_pending` 不重置 retryCount）
+- `skip`：terminal failed
+- `reset_to_pending`：state → pending，retryCount 不变（breaker trip 后想保留计数）
+
+### 7.4 System Prompt Section
+
+文件：`services/system-prompt-section.ts`，id `auto-rd-overview`，order 50
+
+注入内容（截短）：
+
+```
+## Auto-RD Pipeline
+You have access to an auto-rd plugin that drives a 19-state pipeline...
+The plugin runs in the background; you can observe and control it via
+three tools:
+- auto_rd_status: query what stories and tasks are in flight
+- auto_rd_trigger: take an out-of-band action
+- auto_rd_retry: recover a blocked or failed story
+
+When a story is in state 'blocked', the user is the human-in-the-loop
+checkpoint. Use auto_rd_status to see which stories are blocked and
+their blockedReason; use auto_rd_retry to recover.
+
+Do NOT proactively call these tools unless the user has asked about
+auto-rd or a story has just transitioned to blocked.
+```
+
+明确**禁止**模型主动调除非用户问 —— 避免污染正常对话
+
+### 7.5 真实 DSH Service 接口（本地 narrow 类型）
+
+Cordis 包**不**暴露 slots / tools / systemPrompt / sessions —— 这些是 DSH 进程注入。代码用**本地 narrow 类型**（`src/types/dsh-services.ts`）+ `ctx.get('xxx') as Service | undefined`，避免 import `@deepseek-ai/dsh-*` 包
+
+```typescript
+// src/types/dsh-services.ts
+export interface SlotsService {
+  register(slot: string, entry: {...}, renderer: SlotRenderer): () => void
+}
+export interface ToolsService {
+  register(tool: ToolDefinition): () => void
+}
+export interface SystemPromptService {
+  section(section: SystemPromptSection): void
+}
+export interface SubagentsService {
+  sendMessage(agentName: string, sessionId: string, content: ..., options?: ...): Promise<unknown>
+}
+```
+
+**为什么不 import DSH 包**：plugin 在 standalone build（CI / 测试）下也需要编译通过。DSH 是私有部署包，import 会失败。窄类型**保留 local compile + runtime contract enforcement by DSH service**
 
 ---
 
