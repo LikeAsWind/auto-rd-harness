@@ -937,6 +937,141 @@ function makeConsoleSpy() {
     existsSync(join(artifactsDir, '10-fix-report-attempt-1.md')),
   )
 }
+// 28. VerificationAgent — real verdicts.
+//     PASS  -> success  (non-empty diff + green suite)
+//     PARTIAL -> failed (suite red, recoverable via fixing)
+//     REJECT -> blocked (nothing to verify, or suite not runnable)
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { AgentProvider } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'agent-provider.js')).href
+  )
+  const provider = new AgentProvider({}, { logger, config: defaultConfig() })
+
+  /** Repo on `feat` with one content commit beyond main. */
+  function mkFeatRepo(testScript) {
+    const dir = mkTmpDir()
+    git(dir, ['init', '--quiet', '--initial-branch', 'main'])
+    git(dir, ['config', 'user.email', 't@e.com'])
+    git(dir, ['config', 'user.name', 'T'])
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', scripts: testScript ? { test: testScript } : {} }),
+      'utf-8',
+    )
+    writeFileSync(join(dir, 'main.ts'), 'export const a = 1\n', 'utf-8')
+    git(dir, ['add', '.'])
+    git(dir, ['commit', '--quiet', '-m', 'base'])
+    git(dir, ['checkout', '--quiet', '-b', 'feat'])
+    writeFileSync(join(dir, 'feat.ts'), 'export const b = 2\n', 'utf-8')
+    git(dir, ['add', '.'])
+    git(dir, ['commit', '--quiet', '-m', 'add feat'])
+    return dir
+  }
+
+  // --- PASS: non-empty diff + green suite ---
+  {
+    const repo = mkFeatRepo('node -e "process.exit(0)"')
+    const artifactsDir = mkTmpDir()
+    const r = await provider.dispatch({
+      agentName: 'verification',
+      label: 'Verification',
+      worktreePath: repo,
+      artifactsDir,
+      inputs: { story: { id: 'V-PASS', title: 't', description: 'd' } },
+    })
+    check('verify PASS -> status success', r.status === 'success', JSON.stringify(r))
+    const report = readFileSync(join(artifactsDir, '11-verify-report.md'), 'utf-8')
+    check('verify report contains [VERIFY_PASS]', report.includes('[VERIFY_PASS]'))
+    check('verify report has a real commit sha', /[0-9a-f]{40}/.test(report))
+    check('verify report lists feat.ts', report.includes('feat.ts'))
+    check('verify report does NOT say stub', !/\bstub\b/i.test(report), report.slice(0, 200))
+  }
+
+  // --- PARTIAL: suite red -> failed (runner maps this to `fixing`) ---
+  {
+    const repo = mkFeatRepo('node -e "process.exit(1)"')
+    const artifactsDir = mkTmpDir()
+    const r = await provider.dispatch({
+      agentName: 'verification',
+      label: 'Verification',
+      worktreePath: repo,
+      artifactsDir,
+      inputs: { story: { id: 'V-PARTIAL', title: 't', description: 'd' } },
+    })
+    check('verify PARTIAL -> status failed', r.status === 'failed', JSON.stringify(r))
+    check(
+      'verify PARTIAL reason names the failing check',
+      /PARTIAL/.test(r.reason ?? ''),
+      String(r.reason),
+    )
+    const report = readFileSync(join(artifactsDir, '11-verify-report.md'), 'utf-8')
+    check('verify report contains [VERIFY_PARTIAL]', report.includes('[VERIFY_PARTIAL]'))
+  }
+
+  // --- REJECT: no changes on the branch ---
+  {
+    const dir = mkTmpDir()
+    git(dir, ['init', '--quiet', '--initial-branch', 'main'])
+    git(dir, ['config', 'user.email', 't@e.com'])
+    git(dir, ['config', 'user.name', 'T'])
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', scripts: { test: 'node -e "process.exit(0)"' } }),
+      'utf-8',
+    )
+    git(dir, ['add', '.'])
+    git(dir, ['commit', '--quiet', '-m', 'only commit'])
+
+    const artifactsDir = mkTmpDir()
+    const r = await provider.dispatch({
+      agentName: 'verification',
+      label: 'Verification',
+      worktreePath: dir,
+      artifactsDir,
+      inputs: { story: { id: 'V-REJECT', title: 't', description: 'd' } },
+    })
+    check('verify REJECT (no diff) -> status blocked', r.status === 'blocked', JSON.stringify(r))
+    check(
+      'verify REJECT (no diff) reason mentions no changes',
+      /no changes/i.test(r.reason ?? ''),
+      String(r.reason),
+    )
+  }
+
+  // --- REJECT: suite not runnable (no test manifest) ---
+  {
+    const dir = mkTmpDir()
+    git(dir, ['init', '--quiet', '--initial-branch', 'main'])
+    git(dir, ['config', 'user.email', 't@e.com'])
+    git(dir, ['config', 'user.name', 'T'])
+    writeFileSync(join(dir, 'a.txt'), 'x\n', 'utf-8')
+    git(dir, ['add', '.'])
+    git(dir, ['commit', '--quiet', '-m', 'base'])
+    git(dir, ['checkout', '--quiet', '-b', 'feat'])
+    writeFileSync(join(dir, 'b.txt'), 'y\n', 'utf-8')
+    git(dir, ['add', '.'])
+    git(dir, ['commit', '--quiet', '-m', 'add b'])
+
+    const artifactsDir = mkTmpDir()
+    const r = await provider.dispatch({
+      agentName: 'verification',
+      label: 'Verification',
+      worktreePath: dir,
+      artifactsDir,
+      inputs: { story: { id: 'V-NOMANIFEST', title: 't', description: 'd' } },
+    })
+    check(
+      'verify REJECT (no manifest) -> status blocked',
+      r.status === 'blocked',
+      JSON.stringify(r),
+    )
+    const report = readFileSync(join(artifactsDir, '11-verify-report.md'), 'utf-8')
+    check('verify REJECT report contains [VERIFY_REJECT]', report.includes('[VERIFY_REJECT]'))
+  }
+}
+
 // 25. AgentProvider.dispatch — appends agent_dispatch + agent_result to
 //     trajectory. This is the end-to-end proof that the StoryRunner's
 //     "every agent call is logged" property holds for one specific call.

@@ -611,8 +611,8 @@ async function runImplementingStage(
 }
 
 /**
- * testing — dispatch TestAgent. The stub emits [TEST_PASS] unconditionally;
- * a real model would inspect the test suite. The orchestrator transitions
+ * testing — dispatch TestAgent, which runs the worktree's real test
+ * suite (see services/test-executor.ts). The orchestrator transitions
  * to `verifying` on PASS or to `fixing` on FAIL.
  */
 async function runTestingStage(
@@ -637,15 +637,13 @@ async function runTestingStage(
 }
 
 /**
- * fixing — dispatch FixAgent against the most-recent test failure, then
+ * fixing — dispatch FixAgent against the most-recently-failed task, then
  * loop back to `testing`. The 5-round breaker (SD-4) is enforced via the
- * SUM of attemptCount across all the story's tasks: if any task has
- * attemptCount > 5, the story is parked in `blocked`.
+ * SUM of attemptCount across all the story's tasks: if the sum reaches
+ * 5, the story is parked in `blocked`.
  *
- * Stub behaviour: every dispatch returns success, attemptCount climbs on
- * each invocation, and after 5 invocations of this stage the breaker
- * trips. This is the path that lets M3 demonstrate the breaker without
- * needing a real model.
+ * The FixAgent handler commits its work for real (services/worktree-git.ts),
+ * so a successful round genuinely advances the branch.
  */
 async function runFixingStage(
   story: StoryRecord,
@@ -699,7 +697,9 @@ async function runFixingStage(
     target.status = 'failed'
     target.blockedReason = result.reason
   } else {
-    // Stub success — flip status back to in_progress so testing can re-run.
+    // The handler succeeded but the suite may still be red — `testing`
+    // re-runs and decides. Flip back to in_progress so the next
+    // `testing` pass accounts for this attempt.
     target.status = 'in_progress'
   }
   await tasks.put(target.id, target)
@@ -713,8 +713,15 @@ async function runFixingStage(
 }
 
 /**
- * verifying — dispatch VerificationAgent on the integration tree. PASS →
- * `reviewing`; PARTIAL → `fixing`; REJECT → blocked (architectural issue).
+ * verifying — dispatch VerificationAgent on the integration tree.
+ *
+ * Verdict mapping (design §5):
+ *   - success (VERIFY_PASS)    -> `reviewing`
+ *   - failed  (VERIFY_PARTIAL) -> `fixing`   (the suite is red; another
+ *                                              fix round is the remedy)
+ *   - blocked (VERIFY_REJECT)  -> `blocked`  (nothing to verify, or the
+ *                                              tree cannot be tested —
+ *                                              retrying will not help)
  */
 async function runVerifyingStage(
   story: StoryRecord,
@@ -729,10 +736,20 @@ async function runVerifyingStage(
     inputs: storyInput(story),
   })
 
-  if (result.status === 'blocked' || result.status === 'failed') {
-    story.blockedReason = `Verifying: ${result.reason}`
+  if (result.status === 'blocked') {
+    // REJECT — unrecoverable by retry (no diff, or no runnable suite).
+    story.blockedReason = `Verifying REJECT: ${result.reason}`
+    deps.logger.warn(`VerificationAgent rejected story ${story.id}: ${result.reason}`)
     return 'blocked'
   }
+  if (result.status === 'failed') {
+    // PARTIAL — the branch is verifiable but currently red. Send it
+    // back for another fix round rather than parking the story.
+    recordArtifact(story, 'verification', '11-verify-report.md', result.reason)
+    deps.logger.warn(`VerificationAgent PARTIAL for story ${story.id}: ${result.reason} → fixing`)
+    return 'fixing'
+  }
+
   recordArtifact(story, 'verification', '11-verify-report.md', result.summary ?? '')
   return 'reviewing'
 }

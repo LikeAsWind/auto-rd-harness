@@ -1053,45 +1053,133 @@ async function runVerificationStub(
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string }
-  deps.logger.info(`VerificationAgent stub running for story ${story.id}`)
+  deps.logger.info(`VerificationAgent running for story ${story.id}`)
+
+  // ---- Real whole-branch verification ----
+  //
+  // The verification gate must run against the integration tree
+  // (F-1: Re-Run on Integration Tree), not against a claim. Both the
+  // diff and the suite are gathered for real here.
+  const diff = await readWorktreeDiff(req.worktreePath)
+  const testRun = await runWorktreeTests(req.worktreePath)
+
+  // ---- Deterministic whole-branch checks ----
+  const checks: Array<{ name: string; status: 'PASS' | 'FAIL' | 'SKIP'; evidence: string }> = []
+
+  // 1. Something was actually changed.
+  const hasChanges = diff.commitCount > 0 || diff.filesChanged.length > 0
+  checks.push({
+    name: 'Diff is non-empty',
+    status: hasChanges ? 'PASS' : 'FAIL',
+    evidence: `${diff.commitCount} commit(s), ${diff.filesChanged.length} file(s), +${diff.insertions}/-${diff.deletions}`,
+  })
+
+  // 2. The whole-branch suite runs green.
+  checks.push({
+    name: 'Whole-branch test suite',
+    status: testRun.skippedReason ? 'SKIP' : testRun.passed ? 'PASS' : 'FAIL',
+    evidence: testRun.skippedReason
+      ? testRun.skippedReason
+      : `\`${testRun.command}\` exit=${testRun.exitCode ?? 'n/a'} in ${testRun.durationMs}ms`,
+  })
+
+  // 3. The diff is readable.
+  checks.push({
+    name: 'Diff is readable',
+    status: diff.error ? 'FAIL' : 'PASS',
+    evidence: diff.error ?? `base=${diff.base || '<none>'} head=${diff.head || '<none>'}`,
+  })
+
+  const failed = checks.filter((c) => c.status === 'FAIL')
+  const skipped = checks.filter((c) => c.status === 'SKIP')
+
+  // Verdict mapping (design §5): PASS -> reviewing, PARTIAL -> fixing,
+  // REJECT -> blocked.
+  //   - A failing suite is PARTIAL: recoverable by another fix round.
+  //   - An unverifiable tree (no changes, or no way to run the suite)
+  //     is REJECT: retrying will not help.
+  const noChanges = !hasChanges
+  const cannotRun = !!testRun.skippedReason
+  const reject = noChanges || cannotRun || !!diff.error
+  const verdict: 'PASS' | 'PARTIAL' | 'REJECT' = reject
+    ? 'REJECT'
+    : failed.length > 0
+      ? 'PARTIAL'
+      : 'PASS'
+  const sentinel =
+    verdict === 'PASS' ? '[VERIFY_PASS]' : verdict === 'PARTIAL' ? '[VERIFY_PARTIAL]' : '[VERIFY_REJECT]'
 
   const report = [
     `# Verification Report — ${story.title}`,
     ``,
+    diff.error ? `**ERROR**: \`${diff.error}\`` : null,
     `## Integration Tree HEAD`,
-    `- Branch: \`auto-rd/${story.id}\``,
-    `- Commit: <stub>`,
+    `- Branch: \`${diff.head ? 'HEAD' : '<unknown>'}\``,
+    `- Commit: \`${diff.head || '<none>'}\``,
+    `- Base: \`${diff.base || '<none>'}\``,
+    `- Commits on branch: ${diff.commitCount}`,
+    `- Files changed: ${diff.filesChanged.length}`,
+    `- Lines: +${diff.insertions} / -${diff.deletions}`,
+    ``,
+    `## Files Changed`,
+    diff.filesChanged.length > 0
+      ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
+      : '_no files changed_',
     ``,
     `## Runs (fresh)`,
-    `| Command | Result | Notes |`,
-    `|---------|--------|-------|`,
-    `| <test cmd> | 0/0 pass | stub |`,
-    `| tsc --noEmit | 0 errors, 0 warnings | stub |`,
-    `| <lint cmd> | 0 errors, 0 warnings | stub |`,
+    `| Check | Result | Evidence |`,
+    `|-------|--------|----------|`,
+    ...checks.map((c) => `| ${c.name} | ${c.status} | ${c.evidence} |`),
     ``,
     `## Whole-Branch Properties`,
     `| Property | Status | Evidence |`,
     `|----------|--------|----------|`,
-    `| §Behavior — every AC | ✅ | covered by 09-test-report.md |`,
-    `| §Error Contract | ✅ | stub |`,
-    `| §Compatibility | ✅ | stub |`,
-    `| §Security & Privacy | ✅ | stub |`,
-    `| Doc/Schema parity | ✅ | stub |`,
+    `| Something changed | ${hasChanges ? '✅' : '❌'} | ${diff.filesChanged.length} file(s) |`,
+    `| Suite green on the branch | ${testRun.skippedReason ? '⚠️' : testRun.passed ? '✅' : '❌'} | ${testRun.skippedReason ?? `exit ${testRun.exitCode ?? 'n/a'}`} |`,
+    `| Diff readable | ${diff.error ? '❌' : '✅'} | ${diff.error ?? 'yes'} |`,
+    `| Per-AC detail | ℹ️ | see \`09-test-report.md\` |`,
     ``,
     `## Failures`,
-    `_None._`,
+    failed.length > 0
+      ? failed.map((c) => `- **${c.name}**: ${c.evidence}`).join('\n')
+      : `_None._`,
+    skipped.length > 0 ? `\nSkipped: ${skipped.map((c) => c.name).join(', ')}` : null,
+    ``,
+    `## Test Output Tail`,
+    '```',
+    (testRun.tail.stdout || '_empty_').split('\n').slice(0, 40).join('\n'),
+    '```',
     ``,
     `## Claim`,
-    `I claim: PASS`,
-    `Because: stub has zero failures across whole-branch properties.`,
-    `Sufficient because: every property observed green.`,
+    `I claim: ${verdict}`,
+    `Because: ${checks.filter((c) => c.status === 'PASS').length}/${checks.length} checks passed, ${failed.length} failed, ${skipped.length} skipped.`,
+    `Evidence: ${hasChanges ? `${diff.commitCount} commit(s) / ${diff.filesChanged.length} file(s)` : 'no changes on the branch'}${testRun.skippedReason ? '; suite not runnable' : `; suite exit ${testRun.exitCode ?? 'n/a'}`}.`,
+    `Sufficient because: ${verdict === 'PASS' ? 'every check is green on the integration tree' : 'the failing checks above are reproducible from the evidence.'}`,
     ``,
-    `[VERIFY_PASS]`,
-  ].join('\n')
+    sentinel,
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, '11-verify-report.md'), report, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Verification report (PASS).' }
+  if (verdict === 'PASS') {
+    return {
+      status: 'success',
+      summary: `Verification PASS (${diff.commitCount} commit(s), suite green in ${testRun.durationMs}ms).`,
+    }
+  }
+  if (verdict === 'PARTIAL') {
+    // Recoverable: the runner maps `failed` here to the `fixing` stage.
+    return {
+      status: 'failed',
+      reason: `verification PARTIAL: ${failed.map((c) => c.name).join(', ')}`,
+    }
+  }
+  return {
+    status: 'blocked',
+    reason: `verification REJECT: ${noChanges ? 'no changes on the branch' : cannotRun ? 'suite not runnable' : 'diff unreadable'}`,
+  }
 }
 
 async function runReviewStub(
