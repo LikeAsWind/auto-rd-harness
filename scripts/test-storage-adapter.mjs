@@ -130,7 +130,7 @@ const CTX = {}
     'open: result is not a Promise (awaited properly)',
     typeof storage.then !== 'function',
   )
-  check('open: domain name is auto-rd', facility.spec.last.name === 'auto-rd', facility.spec.last.name)
+  check('open: domain name is auto_rd (storage naming rule: ^[a-z][a-z0-9_]*$)', facility.spec.last.name === 'auto_rd', facility.spec.last.name)
   check('open: version is 4', facility.spec.last.version === 4, String(facility.spec.last.version))
   check(
     'open: layout is per-record (not single-file)',
@@ -162,7 +162,7 @@ const CTX = {}
 
   check(
     'the underlying table really has no values() (fixture is faithful)',
-    typeof facility.opened.get('auto-rd').table('stories').values === 'undefined',
+    typeof facility.opened.get('auto_rd').table('stories').values === 'undefined',
   )
   check('adapter: provides values()', typeof stories.values === 'function')
 
@@ -230,7 +230,7 @@ const CTX = {}
   const facility = realShapedFacility()
   const storage = await AutoRdStorage.open(CTX, facility)
   await storage.close()
-  check('close: released the domain', facility.spec.closed.includes('auto-rd'), JSON.stringify(facility.spec.closed))
+  check('close: released the domain', facility.spec.closed.includes('auto_rd'), JSON.stringify(facility.spec.closed))
 }
 
 // ---- already-open guard --------------------------------------------

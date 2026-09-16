@@ -281,10 +281,10 @@ function teardown(ctx) {
   check('mount: return value was awaited (apply is async)', ctx !== undefined)
 
   // Storage.
-  check('mount: opened the auto-rd domain', sd.spec.last?.name === 'auto-rd', String(sd.spec.last?.name))
+  check('mount: opened the auto_rd domain', sd.spec.last?.name === 'auto_rd', String(sd.spec.last?.name))
   check('mount: domain version is 4', sd.spec.last?.version === 4, String(sd.spec.last?.version))
   check('mount: domain layout is per-record', sd.spec.last?.layout === 'per-record', String(sd.spec.last?.layout))
-  const domain = sd.get('auto-rd')
+  const domain = sd.get('auto_rd')
   check('mount: domain is open', domain !== undefined)
 
   // Module seeding.
@@ -306,11 +306,21 @@ function teardown(ctx) {
   check('mount: registered exactly 1 prompt section', prompt.sections.length === 1, String(prompt.sections.length))
   check('mount: prompt section name is auto-rd-overview', prompt.sections[0]?.name === 'auto-rd-overview', String(prompt.sections[0]?.name))
 
-  // The panel HTTP route (the transport for the client UI half).
-  check('mount: registered the panel route', web.routes.length === 1, String(web.routes.length))
-  check('mount: panel route path', web.routes[0]?.path === '/auto-rd/panel', String(web.routes[0]?.path))
-  check('mount: panel route is exact', web.routes[0]?.kind === 'exact')
-  check('mount: panel route has a handler', typeof web.routes[0]?.handler === 'function')
+  // The webServer HTTP routes — both the panel data route AND the
+  // reconfigure route (POST /auto-rd/reconfigure) are bound when
+  // webServer is present. The reconfigure route is the second one
+  // added in M5+ to let users apply new config without restarting
+  // DSH; the panel route is still the primary transport for the UI.
+  check('mount: registered 2 webServer routes (panel + reconfigure)', web.routes.length === 2, String(web.routes.length))
+  const panelRoute = web.routes.find((r) => r.path === '/auto-rd/panel')
+  const reconfigureRoute = web.routes.find((r) => r.path === '/auto-rd/reconfigure')
+  check('mount: panel route is registered', !!panelRoute, JSON.stringify(web.routes.map((r) => r.path)))
+  check('mount: panel route path', panelRoute?.path === '/auto-rd/panel', String(panelRoute?.path))
+  check('mount: panel route is exact', panelRoute?.kind === 'exact')
+  check('mount: panel route has a handler', typeof panelRoute?.handler === 'function')
+  check('mount: reconfigure route is registered', !!reconfigureRoute, JSON.stringify(web.routes.map((r) => r.path)))
+  check('mount: reconfigure route is exact', reconfigureRoute?.kind === 'exact')
+  check('mount: reconfigure route has a handler', typeof reconfigureRoute?.handler === 'function')
 
   // Effects.
   check('mount: registered the storage effect', ctx.disposers.some((d) => d.label === 'auto-rd:storage'))
@@ -319,7 +329,7 @@ function teardown(ctx) {
 
   // Teardown closes the domain.
   teardown(ctx)
-  check('teardown: closed the storage domain', sd.spec.closed.includes('auto-rd'), JSON.stringify(sd.spec.closed))
+  check('teardown: closed the storage domain', sd.spec.closed.includes('auto_rd'), JSON.stringify(sd.spec.closed))
   check('teardown: ran every disposer', ctx.disposers.length >= 3)
 }
 
@@ -358,23 +368,61 @@ function teardown(ctx) {
     threw = err
   }
   check('no modules: mounts cleanly', threw === null, threw?.message)
-  const domain = sd.get('auto-rd')
+  const domain = sd.get('auto_rd')
   check('no modules: no module records seeded', [...domain.table('modules').entries()].length === 0)
   check('no modules: tools still registered', tools.registered.size === 3)
   if (ctx) teardown(ctx)
 }
 
 // 4. An invalid config fails the mount loudly (fast, visible failure).
+//    Note: as of M5, every previously-required field is optional with
+//    a default so the plugin can mount against a bare cordis.patch.yml
+//    and still show its UI (with a setup checklist). To exercise the
+//    "invalid" path we feed a malformed URL — a real validation error.
 {
   const sd = storageDomainFacility()
   const ctx = fakeCtx({ storageDomain: sd })
   let threw = null
   try {
-    await apply(ctx, { tapdApiToken: 'x' }) // missing required workspaceRoot/urls
+    await apply(ctx, { tapdApiToken: 'x', tapdBaseUrl: 'not-a-url' })
   } catch (err) {
     threw = err
   }
   check('invalid config: apply() rejects', threw !== null)
+}
+
+// 4b. Empty config: the plugin MUST still mount, so the sidebar panel
+//     and `auto_rd_status` are reachable. The setup checklist surfaces
+//     what is missing instead.
+{
+  const sd = storageDomainFacility()
+  const tools = strictToolsRegistry()
+  let threw = null
+  let ctx
+  try {
+    ctx = await mount({ storageDomain: sd, tools, systemPrompt: strictSystemPrompt() }, {})
+  } catch (err) {
+    threw = err
+  }
+  check('empty config: mounts cleanly (UI shows setup checklist)', threw === null, threw?.message)
+  check(
+    'empty config: warns about the missing TAPD token',
+    ctx?.logs.some(([l, m]) => l === 'warn' && /tapdApiToken is empty/.test(m)),
+    JSON.stringify(ctx?.logs.filter(([l]) => l === 'warn').map(([, m]) => m.slice(0, 60))),
+  )
+  check(
+    'empty config: warns about the missing GitLab token',
+    ctx?.logs.some(([l, m]) => l === 'warn' && /gitlabApiToken is empty/.test(m)),
+  )
+  check(
+    'empty config: warns about the missing workspaceRoot',
+    ctx?.logs.some(([l, m]) => l === 'warn' && /workspaceRoot is empty/.test(m)),
+  )
+  check(
+    'empty config: warns about the missing modules',
+    ctx?.logs.some(([l, m]) => l === 'warn' && /modules is empty/.test(m)),
+  )
+  if (ctx) teardown(ctx)
 }
 
 // 5. The domains guard rejects a second mount against the same facility.
@@ -408,4 +456,8 @@ function teardown(ctx) {
 // ---- Summary --------------------------------------------------------
 
 process.stdout.write(`\nMountSmoke tests: ${pass} pass, ${fail} fail\n`)
-if (fail > 0) process.exitCode = 1
+// Force-exit so lingering `setTimeout`s from `registerPanelRouteWithRetry`
+// (which polls for the optional `webServer` host service) cannot keep
+// the child process alive past this point. The timers have no observable
+// side effects at this stage; everything was checked.
+process.exit(fail > 0 ? 1 : 0)

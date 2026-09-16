@@ -237,7 +237,7 @@ export type TaskRecord = z.infer<typeof TaskRecordSchema>
  * plugin runs in the Cordis Host context (not sandboxed dynamic plugin), we
  * can `import { z } from 'zod'` directly and pass schemas as-is.
  */
-export const AUTORD_DOMAIN_NAME = 'auto-rd'
+export const AUTORD_DOMAIN_NAME = 'auto_rd'
 /**
  * Domain schema version. Bump whenever a table is added, a field's
  * shape changes, or a field is renamed. storageDomain.open() handles
