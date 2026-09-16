@@ -900,103 +900,153 @@ workspaceRoot/
 
 ### 5.1 状态列表
 
-| State | 含义 | 触发 | 下一步 |
+| State | 含义 | 触发 | 机制 | 下一步 |
+|---|---|---|---|---|
+| `pending` | 等待处理 | TAPD 拉取 / `recoverStories` 重置 | - | → `context` |
+| `context` | Context Agent 调查中 | storyQueue tick | 1 个 agent | → `clarification` |
+| `clarification` | 需求澄清中 | storyRunner | 1 个 agent | → `brainstorm` 或 `blocked` |
+| `brainstorm` | 3 路 Brainstorm 并行 | storyRunner | **3 并行**：`minimal`/`clean`/`novel` variation | → `critic` |
+| `critic` | Critic 评审中 | storyRunner | 1 个 agent | → `decision` |
+| `decision` | 形成最终方案 | storyRunner | 1 个 agent | → `spec` |
+| `spec` | 生成 Spec | storyRunner | 1 个 agent | → `planning` |
+| `planning` | 拆分任务 | storyRunner | Planner + planner-parser | → `implementing`（无 task → `blocked`） |
+| `implementing` | Task 实现中 | storyRunner | per-task 顺序 dispatch（按 `dependsOn` DAG） | → `testing`（全部 task 完成） |
+| `testing` | Test Agent 跑测试 | storyRunner | 1 个 agent | → `fixing`（失败）或 `verifying` |
+| `fixing` | Fix Agent 修代码 | storyRunner | **SD-4 5-round breaker**：SUM(attemptCount) ≥ 5 → `blocked` | → `testing` |
+| `verifying` | Verification 验证 | storyRunner | 1 个 agent | → `reviewing` |
+| `reviewing` | Code Review | storyRunner | **CR-1 双轴并行**：`standards` + `spec` | → `final_verifying` 或 `fixing` |
+| `final_verifying` | Story 级最终验证 | storyRunner | **SD-6 双轴并行**：同上但作用于整个 branch | → `mr_creating` 或 `fixing` |
+| `mr_creating` | 创建 GitLab MR | storyRunner | **checkpoint 模式**：`pushedSha` + `mrUrl` 跳过已做 | → `tapd_syncing` |
+| `tapd_syncing` | 回写 TAPD | storyRunner | **checkpoint 模式** + **20 次 cap**：transient ≥ 20 → `failed` | → `completed` |
+| `completed` | 成功 | (终态) | - | - |
+| `failed` | 失败 | breaker trip / 20 次 sync cap | - | retry（auto）或 manual |
+| `blocked` | 等待人工介入 | 任意阶段可被路由 | - | manual（`auto_rd_retry`） |
+
+### 5.1.1 关键设计点（patterns borrowed）
+
+| ID | 名称 | 实现位置 | 含义 |
 |---|---|---|---|
-| `pending` | 等待处理 | TAPD 拉取 | → `context` |
-| `context` | Context Agent 调查中 | storyQueue | → `clarification` |
-| `clarification` | 需求澄清中 | agentRunner | → `brainstorm` |
-| `brainstorm` | 多 Brainstorm 并行 | agentRunner | → `critic` |
-| `critic` | Critic 评审中 | agentRunner | → `decision` |
-| `decision` | 形成最终方案 | agentRunner | → `spec` |
-| `spec` | 生成 Spec | agentRunner | → `planning` |
-| `planning` | 拆分任务 | agentRunner | → `implementing` |
-| `implementing` | Task 实现中 | agentRunner | ↔ `testing`/`fixing` |
-| `testing` | Test Agent 跑测试 | agentRunner | → `fixing` 或 `verifying` |
-| `fixing` | Fix Agent 修代码 | agentRunner | → `testing` |
-| `verifying` | Verification 验证 | agentRunner | → `reviewing` |
-| `reviewing` | Code Review | agentRunner | → `final_verifying` |
-| `final_verifying` | Story 级最终验证 | agentRunner | → `mr_creating` |
-| `mr_creating` | 创建 GitLab MR | gitlabMerger | → `tapd_syncing` |
-| `tapd_syncing` | 回写 TAPD | notifier | → `completed` |
-| `completed` | 成功 | (终态) | - |
-| `failed` | 失败 | 任意阶段 | retry 或 manual |
-| `blocked` | 等待人工介入 | 任意阶段 | manual |
+| **SD-2** | Fresh subagent per task | `agent-provider.ts: ensureImplementationSpec(taskId)` | 每个 task 有独立 `ImplementationAgent` 实例，dispatch 按 taskId lookup |
+| **SD-3** | No-subagents contract | `ImplementationAgent` spec tool filter | spec 不含 subagent 工具；AgentProvider 不暴露 spawn-to-handler |
+| **SD-4** | 5-round fix breaker | `story-runner.ts: runFixingStage()` | SUM(`task.attemptCount`) across story ≥ 5 → `blocked` |
+| **SD-5** | Two-stage review | `reviewing` + `final_verifying` 是两个 stage | review 找问题，final_verify 确认无问题 |
+| **SD-6** | Whole-branch review | `final_verifying` 跑在完整 branch 上 | 不是 per-task；汇总所有 impl + verify report |
+| **CR-1** | Two-axis review | `agent-provider.ts: reviewSpecByAxis` | `standards` axis + `spec` axis 双轴并行；任一 reject → `fixing` |
+| **DP-1** | Parallel final-verify dispatch | `Promise.allSettled(['standards','spec'])` | 与 CR-1 同 pattern，作用于 whole-branch |
+| **DP-2** | Don't merge verdicts | 双轴独立写 `12-review-*.md` / `13-final-verify-*.md` | 不合并为单一文件；orchestrator 在 routing 层看 verdict |
+| **T-1~T-4** | TDD discipline | `planner-parser` + persona | RED/GREEN/VERIFY/COMMIT 步骤严格，test 不可删 |
+| **V-1~V-3** | Fresh evidence | persona 强制"在本次消息内跑命令" | Verify / Review 都重新执行命令，不看旧 log |
+| **F-1** | Re-run on integration tree | `FinalVerifyAgent` tool filter | 强制 fresh re-run，不复用单 task report |
 
 ### 5.2 状态转移图
 
 ```
-TAPD → pending → context → clarification → brainstorm ─┐
-                                                      ├→ critic → decision
-                              Brainstorm B ────────────┤
-                              Brainstorm C ────────────┘
-                                                        ↓
-                                                      spec → planning
-                                                        ↓
-                                                   implementing ⇄ testing
+TAPD poller ─→ pending ─→ context ─→ clarification ─→ brainstorm ─┐
+                                                  ├─ B_minimal ────┤
+                                                  ├─ B_clean ──────┤
+                                                  └─ B_novel ──────┘
                                                                     ↓
-                                                                 fixing → testing
-                                                                 testing → verifying
-                                                                 verifying → reviewing
-                                                                 reviewing → final_verifying
-                                                                 final_verifying → mr_creating
-                                                                 mr_creating → tapd_syncing
-                                                                 tapd_syncing → completed
+                                                          critic → decision → spec → planning
+                                                                                    │
+                                                                                    ↓ planner-parser
+                                                                                    ↓ (per-task DAG)
+                                                                        implementing (per-task 顺序)
+                                                                                    ↓
+                                                                        testing ←─→ fixing (5-round breaker)
+                                                                                                ↓ ≥ 5
+                                                                                              blocked
+                                                                                    ↓
+                                                                              verifying
+                                                                                    ↓
+                                                                  reviewing (双轴 parallel)
+                                                                                    ↓
+                                                                  final_verifying (双轴 parallel)
+                                                                                    ↓
+                                                                mr_creating (push + createMR, checkpoint)
+                                                                                    ↓
+                                                                tapd_syncing (PATCH /changes, checkpoint)
+                                                                                    ↓ ≥ 20 transient
+                                                                                  failed
+                                                                                    ↓
+                                                                              completed
 
-任意阶段 → blocked (通知用户) → manual resume
-任意阶段 → failed (3次后) → permanent failure
+任意阶段 → blocked (通知用户) → manual resume via auto_rd_retry
+任意阶段 → failed (3次后 / breaker trip / sync cap) → permanent failure
 ```
 
 ### 5.3 状态机实现
 
+真实实现在 `packages/dsh-auto-rd/src/services/story-runner.ts`。关键代码骨架（**与 first commit draft 显著不同**）：
+
 ```typescript
-async function executeStage(
-  ctx: Context, 
-  story: Story, 
-  config: any
-): Promise<StoryState> {
-  const stageHandlers: Record<StoryState, (story: Story) => Promise<StoryState>> = {
-    pending: async (s) => 'context',
-    context: async (s) => await runContextAgent(ctx, s, config),
-    clarification: async (s) => await runClarificationAgent(ctx, s, config),
-    brainstorm: async (s) => await runBrainstormAgents(ctx, s, config),
-    critic: async (s) => await runCriticAgent(ctx, s, config),
-    decision: async (s) => await runDecisionAgent(ctx, s, config),
-    spec: async (s) => await runSpecAgent(ctx, s, config),
-    planning: async (s) => await runPlannerAgent(ctx, s, config),
-    implementing: async (s) => await runImplementationAgents(ctx, s, config),
-    testing: async (s) => await runTestAgent(ctx, s, config),
-    fixing: async (s) => await runFixAgent(ctx, s, config),
-    verifying: async (s) => await runVerificationAgent(ctx, s, config),
-    reviewing: async (s) => await runReviewAgent(ctx, s, config),
-    final_verifying: async (s) => await runFinalVerifyAgent(ctx, s, config),
-    mr_creating: async (s) => await gitlabMerger.createMR(ctx, s, config),
-    tapd_syncing: async (s) => await tapdPoller.syncTapd(ctx, s, config),
-    completed: async (s) => s.state,
-    failed: async (s) => s.state,
-    blocked: async (s) => s.state,
-  }
-  
-  const handler = stageHandlers[story.state]
-  if (!handler) {
-    logger.error(`No handler for state ${story.state}`)
-    return story.state
-  }
-  
-  try {
-    return await handler(story)
-  } catch (e) {
-    logger.error(`Stage ${story.state} failed for story ${story.id}: ${e.message}`)
-    story.retryCount += 1
-    if (story.retryCount >= 3) {
-      story.state = 'failed'
-      story.blockedReason = `Stage ${story.state} failed 3 times: ${e.message}`
-    } else {
-      // 重试相同状态
+const STAGE_HANDLERS: Record<StoryState, StageHandler | null> = {
+  pending: async () => 'context',
+  context: runContextAgent, clarification: runClarificationAgent,
+  brainstorm: runBrainstormAgents, critic: runCriticAgent,
+  decision: runDecisionAgent, spec: runSpecAgent,
+  planning: runPlanningStage, implementing: runImplementingStage,
+  testing: runTestingStage, fixing: runFixingStage,
+  verifying: runVerifyingStage, reviewing: runReviewingStage,
+  final_verifying: runFinalVerifyingStage,
+  mr_creating: runMrCreatingStage, tapd_syncing: runTapdSyncingStage,
+  completed: async (s) => s.state,
+  failed: async (s) => s.state,
+  blocked: async (s) => s.state,
+}
+
+export class StoryRunner {
+  async runStory(storyId: string): Promise<void> {
+    let story = this.deps.storage.stories().get(storyId)!
+    while (!isTerminalState(story.state)) {
+      const handler = STAGE_HANDLERS[story.state]!
+      let next: StoryState
+      try {
+        next = await handler(story, this.deps)
+      } catch (err) {
+        story.retryCount += 1
+        if (story.retryCount >= 3) {
+          story.state = 'failed'
+          story.blockedReason = `Stage ${prevState} failed 3 times: ${err.message}`
+        }
+        // 否则保持当前 state 等下一 tick 重试
+      }
+      if (next === story.state) break  // handler 主动保持当前 state（transient 错误）
+      story.state = next
+      await stories.put(story.id, story)
     }
-    return story.state
   }
 }
 ```
+
+**关键不同点**：
+
+1. **handler 返回相同 state ≠ 错误**：transient 错误下 handler 不抛——它写 checkpoint / log 然后返回**同一个** state，runner 检测 `next === story.state` 自动退出 while-loop，等下一 tick 重试（**不**进 retryCount++）
+2. **handler 抛错 = config error**：config / programming 错误才抛，runner 才计 retryCount
+3. **SD-4 breaker 在 handler 内**：不是 runner 计——`runFixingStage` 看 `tasks` 表 SUM(attemptCount) ≥ 5 → 返回 `blocked`
+4. **CR-1 / DP-1 双轴在 handler 内**：`Promise.allSettled` 在 `runReviewingStage` / `runFinalVerifyingStage` 内实现
+
+### 5.4 Checkpoint 模式（mr_creating / tapd_syncing）
+
+M4-A 引入。**两个 stage handler 入口先检查 StoryRecord checkpoint 字段**：
+
+```
+runMrCreatingStage(story, deps):
+  if not story.pushedSha:
+    pushBranch(...)           # 可能 fail -> 重试不重做
+    story.pushedSha, pushedAt = ...
+  if not story.mrUrl:
+    createOrReuseMR(...)      # 可能 fail -> 重试 list existing 重用
+    story.mrUrl, mrIid, mrReused = ...
+  return 'tapd_syncing'
+
+runTapdSyncingStage(story, deps):
+  if not story.tapdSyncedAt:
+    syncTapd(...)             # 可能 fail -> 重试不重复
+    story.tapdSyncedAt = now
+  return 'completed'
+```
+
+效果：Plugin 重启 / network 抖动 / MR 重复创建都不会让 story 卡死。详见 §8.4 和 §10.3。
 
 ---
 
