@@ -214,8 +214,48 @@ export function buildPanelModel(
   config?: Config,
   runtime?: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null },
 ): PanelModel {
-  const modules: ModuleRecord[] = [...storage.modules().values()]
+  // Module ids come from `config.modules` (the live source of truth),
+  // not from storage. Two reasons:
+  //
+  //   1. DSH restarts wipe `liveConfig.current` but leave storage
+  //      intact, so storage can carry "orphan" records from a previous
+  //      run that the user did not expect to see again. The live
+  //      config is the user-visible contract.
+  //
+  //   2. `add_workspace` / `remove_workspace` both mutate
+  //      `liveConfig.current.modules` and storage in lock-step, so
+  //      reading modules from config is consistent with the routes the
+  //      UI talks to. The UI then never disagrees with the host.
+  //
+  // Stories still come from storage (they are stored keyed by moduleId,
+  // and the live config does not duplicate them).
+  const configModules = (config && config.modules) || []
+  const configModuleIds = new Set(configModules.map((m) => m.id))
+  const moduleRecordsById = new Map<string, ModuleRecord>()
+  for (const m of storage.modules().values()) {
+    moduleRecordsById.set(m.id, m)
+  }
+  const modules: ModuleRecord[] = configModules.map((m) => {
+    const stored = moduleRecordsById.get(m.id)
+    if (stored) return stored
+    // Synthesize a minimal record from the config entry when the
+    // storage layer doesn't have one (e.g. a workspace that was
+    // added by the UI but whose storage write failed). Title /
+    // repoUrl / defaultBranch come straight from config.
+    return {
+      id: m.id,
+      title: m.title,
+      repoUrl: m.repoUrl,
+      defaultBranch: m.defaultBranch,
+      workspacePath: '',
+      createdAt: '',
+    } as ModuleRecord
+  })
   const stories: StoryRecord[] = [...storage.stories().values()]
+    // Filter orphan stories whose moduleId is not in the live config.
+    // They would otherwise show up under a module id the UI does not
+    // know about, breaking the per-module grouping.
+    .filter((s) => configModuleIds.has(s.moduleId))
 
   const byModule = new Map<string, StoryRecord[]>()
   for (const s of stories) {
