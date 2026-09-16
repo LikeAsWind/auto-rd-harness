@@ -47,6 +47,7 @@ import {
   status as worktreeStatus,
 } from './worktree-git.js'
 import { probeProject } from './project-probe.js'
+import { buildPlan } from './plan-builder.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -704,54 +705,45 @@ async function runPlannerStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
-  deps.logger.info(`PlannerAgent stub running for story ${story.id}`)
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description?: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`PlannerAgent running for story ${story.id}`)
 
-  const report = [
-    `# Implementation Plan — ${story.title}`,
-    ``,
-    `## File Structure Plan`,
-    `| Spec Section | File(s) | Action |`,
-    `|--------------|---------|--------|`,
-    `| §API | src/<feature>.ts | create |`,
-    `| §Test Plan | tests/<feature>.test.ts | create |`,
-    ``,
-    `## Tasks`,
-    ``,
-    `### T001 — Add the failing test`,
-    `**File(s)**: \`tests/<feature>.test.ts\` (create)`,
-    `**Depends on**: none`,
-    `**Estimated**: 3 min`,
-    ``,
-    `#### Step 1: Write the failing test (RED)`,
-    `- File: \`tests/<feature>.test.ts\``,
-    `- Test name: \`handle<Feature> returns expected response\``,
-    `- Assertion: result equals expected stub value`,
-    ``,
-    `#### Step 2: Verify RED`,
-    `- Run: \`<test command>\``,
-    `- Expected: FAIL with "module not found"`,
-    ``,
-    `#### Step 3: Minimal implementation (GREEN)`,
-    `- File: \`src/<feature>.ts\``,
-    `- Change: add stub returning the expected value`,
-    ``,
-    `#### Step 4: Verify GREEN`,
-    `- Run: \`<test command>\``,
-    `- Expected: PASS; full suite still green; no warnings`,
-    ``,
-    `#### Step 5: Commit`,
-    `- Message: \`feat(<scope>): add <feature>\``,
-    ``,
-    `## Execution Order`,
-    `T001`,
-    ``,
-    `[PLAN_COMPLETE]`,
-  ].join('\n')
+  // ---- Real plan derivation ----
+  //
+  // One task per acceptance criterion, with file paths anchored in the
+  // actual repository layout observed by the probe. The implementation
+  // stage consumes the parsed TaskRecords, so real paths here mean the
+  // whole implementing/fixing loop operates on real data instead of
+  // `<feature>.ts` placeholders.
+  const probe = probeProject(req.worktreePath)
+  const plan = buildPlan(
+    {
+      id: story.id,
+      title: story.title,
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria,
+    },
+    probe,
+  )
 
-  writeFileSync(join(req.artifactsDir, '07-tasks.md'), report, 'utf-8')
+  writeFileSync(join(req.artifactsDir, '07-tasks.md'), plan.markdown, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Plan (1 task).' }
+  const unanchored = plan.tasks.filter((t) => t.notes.length > 0).length
+  if (unanchored > 0) {
+    deps.logger.warn(
+      `PlannerAgent: ${unanchored}/${plan.tasks.length} task(s) have unanchored paths for story ${story.id}`,
+    )
+  }
+
+  return {
+    status: 'success',
+    summary: `Plan: ${plan.tasks.length} task(s), src=${plan.layout.sourceDir ?? '?'}, tests=${plan.layout.testDir ?? '?'}, ext=${plan.layout.extension}`,
+  }
 }
 
 async function runImplementationStub(
