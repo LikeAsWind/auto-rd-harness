@@ -28,6 +28,13 @@ writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
   name: 'fake-dsh-profile', private: true, dependencies: {},
 }));
 writeFileSync(join(profileDir, 'pnpm-lock.yaml'), '');
+// Pre-create the tarball cache that the install path expects `npm pack`
+// to have produced. Under AUTORD_FAKE_PM=1 `npm pack` is a no-op, so we
+// seed a placeholder tarball here (its content is irrelevant — pnpm
+// never reads it under the fake seam).
+const fakeCacheDir = join(profileDir, 'node_modules', '.cache', 'autord-install');
+mkdirSync(fakeCacheDir, { recursive: true });
+writeFileSync(join(fakeCacheDir, 'dsh-auto-rd.tgz'), 'placeholder');
 const patchFile = join(profileDir, 'cordis.patch.yml');
 
 const BLOCK_BEGIN = '# >>> auto-rd (managed by scripts/install-to-dsh.mjs) >>>';
