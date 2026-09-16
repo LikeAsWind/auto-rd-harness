@@ -639,18 +639,23 @@ export function agentRunner(
 ### 4.1 storageDomain 表结构
 
 ```typescript
+// 当前真实 schema（M3 + M4-A 落地后）。代码源：packages/dsh-auto-rd/src/domain/schema.ts
 import { z } from 'zod'
-import { defineDomain } from '@deepseek-ai/dsh-storage-domain'
 
 const ModuleRecord = z.object({
   id: z.string(),
   title: z.string(),
   repoUrl: z.string().url(),
   defaultBranch: z.string(),
-  workspacePath: z.string(),
-  createdAt: z.string(),
+  workspacePath: z.string().describe('Absolute path to the cloned module workspace'),
+  createdAt: z.string().describe('ISO 8601 timestamp'),
 })
 
+/**
+ * 19-state story machine. Terminal: completed, failed.
+ * Branch: pending (queue), blocked (human).
+ * Active: context → ... → tapd_syncing.
+ */
 const StoryStateSchema = z.enum([
   'pending',
   'context',
@@ -673,6 +678,21 @@ const StoryStateSchema = z.enum([
   'blocked',
 ])
 
+const ArtifactRef = z.object({
+  kind: z.enum([
+    'context', 'clarification', 'proposal', 'critique', 'decision',
+    'spec', 'plan', 'implementation', 'test', 'fix',
+    'verification', 'review', 'final_verify',
+  ]),
+  filename: z.string(),  // 相对路径于 worktree/.auto-rd/stories/<id>/artifacts/
+  summary: z.string(),
+  createdAt: z.string(),
+})
+
+/**
+ * StoryRecord v3 (M4-A 加 checkpoint 字段后).
+ * Checkpoint 字段是 M4 核心设计 —— 见 §8 与 §10.
+ */
 const StoryRecord = z.object({
   id: z.string(),
   moduleId: z.string(),
@@ -682,29 +702,70 @@ const StoryRecord = z.object({
   acceptanceCriteria: z.string().optional(),
   state: StoryStateSchema,
   branch: z.string(),
-  worktreePath: z.string(),
+  worktreePath: z.string().optional(),
   mainSessionId: z.string().optional(),
-  artifacts: z.record(z.string(), z.object({
-    kind: z.enum(['context', 'clarification', 'proposal', 'critique', 'decision', 'spec', 'tasks', 'impl', 'test', 'verify', 'review']),
-    path: z.string(),  // 文件系统路径
-    summary: z.string(),
-    createdAt: z.string(),
-  })),
+  artifacts: z.record(z.string(), ArtifactRef).default({}),
   retryCount: z.number().int().min(0).default(0),
   blockedReason: z.string().optional(),
   mrUrl: z.string().optional(),
+
+  // ---- M4-A checkpoint 字段 ----
+  // 每次 stage handler 入口检查这些字段；非空即跳过对应副作用。
+  // 这是 "checkpoint + idempotent recovery" 设计。
+  pushedSha: z.string().optional(),         // pushBranch 成功后写
+  pushedAt: z.string().optional(),
+  mrIid: z.number().int().optional(),       // createOrReuseMR 成功后写
+  mrCreatedAt: z.string().optional(),
+  mrReused: z.boolean().optional(),        // true = list existing MR 复用
+  tapdSyncedAt: z.string().optional(),     // syncTapd 成功后写
+  tapdSyncAttempts: z.number().int().min(0).optional(), // 失败计数, ≥20 → failed
+
   createdAt: z.string(),
   updatedAt: z.string(),
 })
 
+/**
+ * TaskRecord v3 (M3 加 payload/attemptCount/blocked 后).
+ * payload 是 Planner markdown 解析后的结构化 task 定义；
+ * attemptCount 是 SD-4 5-round fix breaker 的依据。
+ */
 const TaskRecord = z.object({
   id: z.string(),
   storyId: z.string(),
   title: z.string(),
   description: z.string(),
-  status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
+  // ---- Planner payload ----
+  payload: z.object({
+    taskId: z.string(),
+    title: z.string(),
+    files: z.array(z.string()),
+    dependsOn: z.array(z.string()),
+    estimatedMinutes: z.number().int().min(0).optional(),
+    red: z.object({                  // RED 步: 失败的测试
+      file: z.string(),
+      testName: z.string(),
+      assertion: z.string(),
+    }).optional(),
+    green: z.object({                // GREEN 步: 让 RED 过的最小修改
+      file: z.string(),
+      change: z.string(),
+    }).optional(),
+    verify: z.object({               // VERIFY 步: 跑测试
+      run: z.string(),
+      expectedPass: z.boolean(),
+    }).optional(),
+    commit: z.object({               // COMMIT 步: Conventional Commits
+      type: z.string(),
+      scope: z.string(),
+      subject: z.string(),
+    }).optional(),
+    specExcerpt: z.string().optional(),
+  }).optional(),
+  status: z.enum(['pending', 'in_progress', 'completed', 'failed', 'blocked']),
+  attemptCount: z.number().int().min(0).default(0),  // SD-4 breaker
   implementationSessionId: z.string().optional(),
   implementationResult: z.string().optional(),
+  blockedReason: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -712,7 +773,7 @@ const TaskRecord = z.object({
 export function defineAutoRdDomain(storageDomain: any) {
   return storageDomain.open({
     name: 'auto-rd',
-    version: 1,
+    version: 3,                     // M4-A: 1 → 2 (M3 payload), 2 → 3 (M4-A checkpoint)
     layout: 'per-record',
     tables: {
       modules: { valueSchema: ModuleRecord },
@@ -722,6 +783,28 @@ export function defineAutoRdDomain(storageDomain: any) {
   })
 }
 ```
+
+### 4.1.1 Schema 版本演化
+
+| 版本 | commit | 变化 | 兼容性 |
+|---|---|---|---|
+| 1 | first commit | modules + stories + tasks 三表，basic fields | -- |
+| 2 | `f7a49d5` (M3 schema + planner parser) | TaskRecord 加 `payload` / `attemptCount` / `blockedReason`，status 增 `'blocked'` | 旧 record 缺字段时 zod 报错（payload default 不存在所以是 required add） |
+| 3 | `4b4a41d` (M4-A5) | StoryRecord 加 7 个 checkpoint 字段（`pushedSha` / `pushedAt` / `mrIid` / `mrCreatedAt` / `mrReused` / `tapdSyncedAt` / `tapdSyncAttempts`） | 全部 optional，向后兼容 |
+
+升 version 时 zod strict mode 会拒绝旧 record；插件按**软迁移**模式处理（旧 record 用 default 填充，失败则 `recoverStories` 重置 story 到 pending）。M4-A 没硬迁——缺 checkpoint 字段对老 record 是无害的（undefined 视为"未做"，自动补做）。
+
+### 4.1.2 Checkpoint 字段表
+
+| 字段 | 写入者 | 读取者 | 含义 |
+|---|---|---|---|
+| `pushedSha` | `mr_creating` pushBranch 成功 | `mr_creating` 重入 | "已经 push 到 origin" |
+| `pushedAt` | 同上 | 日志 | push 时间 |
+| `mrIid` | `mr_creating` createOrReuseMR 成功 | `mr_creating` 重入 | "GitLab MR 已建/已找到" |
+| `mrCreatedAt` | 同上 | 日志 | MR 创建时间 |
+| `mrReused` | 同上 | 日志 / debug | true = list existing 找到旧的；false = 新建 |
+| `tapdSyncedAt` | `tapd_syncing` syncTapd 成功 | `tapd_syncing` 重入 | "TAPD 已经回写" |
+| `tapdSyncAttempts` | `tapd_syncing` 每次失败自增 | breaker 判断 | 网络故障计数, ≥ 20 → `failed` |
 
 ### 4.2 文件系统布局
 
