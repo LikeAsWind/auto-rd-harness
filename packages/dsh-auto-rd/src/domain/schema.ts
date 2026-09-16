@@ -108,9 +108,57 @@ export const TaskRecordSchema = z.object({
   storyId: z.string(),
   title: z.string(),
   description: z.string(),
-  status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
+  /**
+   * Free-form task bag passed to the ImplementationAgent. Carries the
+   * RED / GREEN / verify / commit instructions from the Planner, the
+   * spec excerpt, file paths, and any per-task context.
+   */
+  payload: z
+    .object({
+      taskId: z.string(),
+      title: z.string(),
+      files: z.array(z.string()),
+      dependsOn: z.array(z.string()),
+      estimatedMinutes: z.number().int().min(0).optional(),
+      red: z
+        .object({
+          file: z.string(),
+          testName: z.string(),
+          assertion: z.string(),
+        })
+        .optional(),
+      green: z
+        .object({
+          file: z.string(),
+          change: z.string(),
+        })
+        .optional(),
+      verify: z
+        .object({
+          run: z.string(),
+          expectedPass: z.boolean(),
+        })
+        .optional(),
+      commit: z
+        .object({
+          type: z.string(),
+          scope: z.string(),
+          subject: z.string(),
+        })
+        .optional(),
+      specExcerpt: z.string().optional(),
+    })
+    .optional(),
+  status: z.enum(['pending', 'in_progress', 'completed', 'failed', 'blocked']),
+  /**
+   * How many times the FixAgent has been dispatched against this task.
+   * SD-4 (5-round breaker) trips when attemptCount reaches 5 and the task
+   * is still failing.
+   */
+  attemptCount: z.number().int().min(0).default(0),
   implementationSessionId: z.string().optional(),
   implementationResult: z.string().optional(),
+  blockedReason: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -129,7 +177,7 @@ export type TaskRecord = z.infer<typeof TaskRecordSchema>
  * can `import { z } from 'zod'` directly and pass schemas as-is.
  */
 export const AUTORD_DOMAIN_NAME = 'auto-rd'
-export const AUTORD_DOMAIN_VERSION = 1
+export const AUTORD_DOMAIN_VERSION = 2
 
 export function buildAutoRdDomainTables() {
   return {
