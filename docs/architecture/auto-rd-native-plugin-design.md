@@ -1547,71 +1547,149 @@ export interface SubagentsService {
 
 ## 8. GitLab MR 集成
 
-### 8.1 MR 创建流程
+> 真实实现：M4-A commits (`583e121`/`da9b7dc`/`06ec568`/`5a51d76`/`4b4a41d`/`bf8ab05`)。本节不是 draft——已落地的代码。
+
+### 8.1 模块拆分
+
+| 模块 | 文件 | 角色 |
+|---|---|---|
+| `HttpClient` | `utils/http-client.ts` | timeout / retry / 429 Retry-After / 错误分类 |
+| `GitLabMerger` | `services/gitlab-merger.ts` | `pushBranch` / `findExistingMR` / `createMR` / `createOrReuseMR` |
+| `syncTapd` | `services/tapd-poller.ts`（导出） | POST `/changes` → 404 → PATCH `/changes` 回落 |
+
+### 8.2 pushBranch（GitLab MR 创建流程）
+
+代码：`services/gitlab-merger.ts: pushBranch(worktreePath, branch, gitlabConfig)`。
 
 ```typescript
-export function gitlabMerger(
-  ctx: Context,
-  config: { 
-    gitlabBaseUrl: string, 
-    gitlabApiToken: string,
-    domain: Domain<any>,
-  }
-) {
-  ctx.gitlabMerger = {
-    async createMR(story: Story): Promise<StoryState> {
-      const module = config.domain.table('modules').get(story.moduleId)!
-      
-      // 1. Push Story Branch 到 GitLab
-      await pushBranch(ctx, story.worktreePath, story.branch)
-      
-      // 2. 构造 MR 描述
-      const description = await buildMRDescription(story, config)
-      
-      // 3. 调用 GitLab API 创建 MR
-      const projectId = await getProjectId(ctx, module.repoUrl, config)
-      const mr = await gitlabCreateMR(ctx, projectId, {
-        source_branch: story.branch,
-        target_branch: module.defaultBranch,
-        title: `[Auto-RD] ${story.title} (TAPD-${story.tapdId})`,
-        description,
-      }, config)
-      
-      story.mrUrl = mr.web_url
-      await config.domain.table('stories').put(story.id, story)
-      
-      return 'tapd_syncing'
-    }
-  }
-}
+export async function pushBranch(
+  worktreePath: string,
+  branch: string,
+  config: { baseUrl: string; token: string; userName: string; userEmail: string }
+): Promise<{ sha: string; pushedAt: string }> {
+  // 1. 配置 git identity（per-push, 避免全局污染）
+  await run('git', ['config', 'user.name', config.userName], { cwd: worktreePath })
+  await run('git', ['config', 'user.email', config.userEmail], { cwd: worktreePath })
 
-async function buildMRDescription(story: Story, config: any): Promise<string> {
-  // 收集所有 artifact 内容拼成 MR 描述
-  const artifacts = Object.values(story.artifacts)
-  // ...
+  // 2. 拿到 HEAD SHA（push 前先记）
+  const localSha = (await run('git', ['rev-parse', 'HEAD'], { cwd: worktreePath })).stdout.trim()
+
+  // 3. push（force-with-lease 不是 force——避免覆盖别人 commit）
+  await run('git', ['push', '--force-with-lease', 'origin', branch], { cwd: worktreePath })
+
+  return { sha: localSha, pushedAt: new Date().toISOString() }
 }
 ```
 
-### 8.2 回写 TAPD
+返回 `(sha, pushedAt)` 给 runner 写 checkpoint 字段（`story.pushedSha` / `story.pushedAt`）。
+
+### 8.3 createOrReuseMR（find-or-create 模式）
+
+```typescript
+export async function createOrReuseMR(
+  story: StoryRecord,
+  module: ModuleRecord,
+  config: { baseUrl: string; token: string }
+): Promise<{ mrIid: number; mrUrl: string; reused: boolean }> {
+  // 1. 找现有 MR（list MRs for this source_branch + target_branch）
+  const existing = await findExistingMR(story, module, config)
+  if (existing) {
+    return { mrIid: existing.iid, mrUrl: existing.web_url, reused: true }
+  }
+  // 2. 没有就新建
+  const created = await createMR(story, module, config)
+  return { mrIid: created.iid, mrUrl: created.web_url, reused: false }
+}
+```
+
+**`reused: true`** 让 runner 知道这是复用——log 区分 + 避免"duplicate MR"噪音。
+
+### 8.4 projectIdFromRepoUrl
+
+URL → GitLab project id 提取。处理3 种 URL 形态：
+
+| URL 形态 | 提取方式 |
+|---|---|
+| `https://gitlab.com/group/sub/repo.git` | `encodeURIComponent('group/sub/repo')` |
+| `git@gitlab.com:group/sub/repo.git` (scp-style) | 去掉 `git@` 前缀和 `:repo.git` 后缀，转 `/` |
+| `https://gitlab.com/group/sub/repo`（无 `.git`） | 同上，加 `.git` 后缀 |
+
+测试：`scripts/test-m4-fakes.mjs` 测试 4-6 覆盖3 种形态 + nested group。
+
+### 8.5 MR 创建流程（端到端）
+
+```typescript
+// story-runner.ts: runMrCreatingStage
+async runMrCreatingStage(story, deps) {
+  const module = deps.storage.modules().get(story.moduleId)
+  const gitlabConfig = { ...deps.config.gitlab, baseUrl: deps.config.gitlabBaseUrl }
+
+  // 1. push（如没 push 过）
+  if (!story.pushedSha) {
+    const { sha, pushedAt } = await pushBranch(story.worktreePath!, story.branch, gitlabConfig)
+    story.pushedSha = sha
+    story.pushedAt = pushedAt
+    await deps.storage.stories().put(story.id, story)
+  }
+
+  // 2. find-or-create MR
+  if (!story.mrUrl) {
+    const { mrIid, mrUrl, reused } = await createOrReuseMR(story, module!, gitlabConfig)
+    story.mrIid = mrIid
+    story.mrUrl = mrUrl
+    story.mrReused = reused
+    story.mrCreatedAt = new Date().toISOString()
+    await deps.storage.stories().put(story.id, story)
+  }
+
+  return 'tapd_syncing'
+}
+```
+
+checkpoint 模式确保 push / create MR 都不会重做（详见 §10.3 / §A.5）。
+
+### 8.6 syncTapd（回写 TAPD）
+
+代码：`services/tapd-poller.ts: syncTapd(story, config, deps)`。
 
 ```typescript
 export async function syncTapd(
-  ctx: Context, 
-  story: Story, 
-  config: any
-): Promise<StoryState> {
-  await ctx.web.fetch(`${config.tapdBaseUrl}/v1/stories/${story.tapdId}`, {
-    method: 'PATCH',
-    headers: { 'Authorization': `Bearer ${config.tapdApiToken}` },
-    body: JSON.stringify({
-      status: 'completed',
-      mr_url: story.mrUrl,
-      git_branch: story.branch,
-    }),
-  })
-  return 'completed'
+  story: StoryRecord,
+  config: { baseUrl: string; token: string; workspaceIds: string[] },
+  deps: { httpClient: HttpClient; logger: Logger }
+): Promise<void> {
+  // 1. POST /changes（新版本优于直接 PATCH /stories/:id）
+  const postBody = {
+    workspace_id: config.workspaceIds[0],     // primary workspace
+    entity_type: 'story',
+    entity_id: story.tapdId,
+    changes: { status: 'done', mr_url: story.mrUrl, git_branch: story.branch },
+  }
+  try {
+    await deps.httpClient.post(`${config.baseUrl}/v1/changes`, postBody, authHeaders(config.token))
+    return
+  } catch (err) {
+    if (!isNotFound(err)) throw err
+    // 2. 404 → PATCH 回落（/stories/:id）
+    await deps.httpClient.patch(
+      `${config.baseUrl}/v1/stories/${story.tapdId}`,
+      postBody.changes,
+      authHeaders(config.token),
+    )
+  }
 }
 ```
+
+**POST-then-PATCH 回落原因**：TAPD 新版 `/changes` endpoint 对老 workspace 不支持，POST 404 → fallback 到经典 PATCH `/stories/:id`。
+
+### 8.7 失败 cap
+
+`tapd_syncing` stage 内：
+- 每次 transient 失败 → `story.tapdSyncAttempts += 1`
+- ≥ 20 → state → `failed`（**不是** `blocked`——网络问题不该让人介入）
+- 写入 `story.tapdSyncedAt` 在成功后——下次 re-enter 跳过
+
+详见 §10.3 / §5.4。
 
 ---
 
@@ -1625,26 +1703,57 @@ export async function syncTapd(
 | `name` | `title` |
 | `description` | `description` |
 | `acceptance_criteria` | `acceptanceCriteria` |
-| `module` (自定义) | `moduleId` |
+| `module` (自定义) | `moduleId`（由 config.modules 中匹配 `repoUrl` 反查） |
 | `status === 'open'` | 拉取条件 |
-| `priority` | 优先级 |
+| `priority` | （**当前未使用**——TAPD 字段映射到 StoryRecord 但 orchestrator 不排序） |
 
 ### 9.2 TAPD 凭证存储
 
-cordis.yml config：
+cordis.yml config（**默认配置见 §2.2**）：
 
 ```yaml
 config:
   tapdApiToken: '<your-token>'
+  tapdWorkspaceIds: ['<workspace-id-1>', '<workspace-id-2>']
+  tapdBaseUrl: 'https://api.tapd.cn'
+  tapdPollIntervalMs: 60000
+  useTapdMock: false   # true = 用本地 MOCK_TAPD_FIXTURE
 ```
 
-**注意**：cordis.yml 包含敏感信息，需注意权限。生产环境应该用 DSH 的 credentials service：
+**多 workspace**：config 接受 `tapdWorkspaceIds: string[]`，poller 顺序拉取每个 workspace 的 open stories。返回的 story 全部塞进 storage（去重靠 `tapdId`）。
+
+**Mock 模式**：`useTapdMock: true` 时，poller 用 `MOCK_TAPD_FIXTURE` 而不是真 TAPD。**生产部署必须 false**。
+
+### 9.3 MOCK_TAPD_FIXTURE
+
+代码：`src/tapd-mock.ts`（如果存在；else 内联在 `tapd-poller.ts`）。返回与 TAPD 真实响应 envelope **结构等价**的 fixture，用于：
+
+- 离线开发（无 TAPD 凭据）
+- `npm run test:m4` / `test:m5`
+- e2e smoke test（fake-server in-process）
+
+### 9.4 TAPD 拉取的真实实现
+
+代码：`services/tapd-poller.ts: fetchTapdStories(config)`。
 
 ```typescript
-const cred = await ctx.credentials.resolve({ kind: 'tapd', account: 'default' })
+async function fetchTapdStories(config, deps): Promise<TapdStory[]> {
+  const url = `${config.baseUrl}/v1/stories?workspace_id=${config.workspaceIds[0]}&status=open`
+  const resp = await deps.httpClient.get(url, authHeaders(config.token))
+  // 多 envelope 容错：响应可能是 {data: [...]} / {stories: [...]} / {items: [...]} / 直接 [...]
+  const body = resp.json() as RawTapdListResponse | RawTapdApiStory[]
+  const items = Array.isArray(body) ? body : body.data ?? body.stories ?? body.items ?? []
+  return items.map(toTapdStory)
+}
 ```
 
-但目前 dsh-credentials 服务未必在所有版本都暴露给真 plugin，**先用 config，验证后再切换**。
+**envelope 容错**：TAPD 不同 endpoint 返回不同 envelope shape——poller 接受所有4 种形态。
+
+**`enqueueIfNew()` 流程**（`tapd-poller.ts`）：
+1. fetch story 列表
+2. 对每条 story：若 `storage.stories().get(story.id)` 已存在，skip
+4. 否则：构造完整 `StoryRecord`（含 `moduleId` 推断、`worktreePath` 占位），put 到 storage
+5. log `enqueued tapd-${id}`
 
 ---
 
