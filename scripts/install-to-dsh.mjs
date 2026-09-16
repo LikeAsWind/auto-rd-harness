@@ -494,6 +494,10 @@ function main() {
       forceCopyFile('lib/index.d.ts');
       forceCopyFile('lib/client.js');
       forceCopyTree('lib/agents/personas');
+      // `lib/services/*.js` are the per-route host implementations. Each
+      // one is its own compiled .js file produced by tsc; `npm pack`
+      // ships the whole `lib/` tree, so we mirror that.
+      forceCopyTree('lib/services');
       process.stdout.write(`[2b/5] force-refreshed ${BUNDLE_NAME} from the freshly built sources\n`);
     }
   }
