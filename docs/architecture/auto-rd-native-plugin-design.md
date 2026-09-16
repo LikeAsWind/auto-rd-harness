@@ -1524,47 +1524,83 @@ dsh-base compose 应用
   ↓
 auto-rd 真 plugin 在 cordis.yml 中配置，DSH 启动时自动 mount
   ↓
-apply(ctx, config) 执行
+apply(ctx, config) 执行（见 §13.1 8 步）
   ↓
 1. 打开 storageDomain，读所有 stories
-2. 检查每个 executing 状态的 story 是否还活着
-   - Story 还在但 child Session 已死 → 重新启动当前 stage
-   - Story 主 Session 还在 → 跳过（不需要恢复）
-3. 启动 tapdPoller、storyQueue 等后台服务
+2. recoverStories(storage, logger): 把 ACTIVE state story 重置回 pending
+3. 启动 tapdPoller / storyQueue / storyNotifier 后台服务
+4. 注册 UI（best-effort）
   ↓
 正常调度开始
 ```
 
-### 10.2 恢复实现
+### 10.2 恢复实现（M1 真实版）
 
 ```typescript
-async function recoverStories(ctx: Context, config: any) {
-  const allStories = [...config.domain.table('stories').values()]
-  const executing = allStories.filter(s => isExecuting(s.state))
-  
-  for (const story of executing) {
-    const isAlive = await isStoryAlive(ctx, story)
-    if (!isAlive) {
-      logger.warn(`Story ${story.id} state=${story.state} but child session dead, restarting`)
-      // 从当前 state 重新开始，不需要从头回
-      ctx.agentRunner.runStory(story).catch(...)
-    } else {
-      logger.info(`Story ${story.id} state=${story.state} still running, no recovery needed`)
-    }
-  }
-}
+// packages/dsh-auto-rd/src/services/recover.ts
+const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
+  'completed', 'failed', 'blocked', 'pending',
+])
 
-async function isStoryAlive(ctx: Context, story: Story): Promise<boolean> {
-  if (!story.mainSessionId) return false
-  // 检查 session 是否还在 sessions 列表中
-  const session = ctx.sessions.get(story.mainSessionId)
-  return session !== undefined
+export async function recoverStories(
+  storage: AutoRdStorage,
+  logger: Logger,
+): Promise<{ recovered: string[] }> {
+  const recovered: string[] = []
+  for (const story of storage.stories().values()) {
+    if (TERMINAL_STATES.has(story.state)) continue
+
+    const previous = story.state
+    story.state = 'pending'
+    story.updatedAt = new Date().toISOString()
+    story.retryCount = 0          // 重置 breaker 计数
+    await storage.stories().put(story.id, story)
+    recovered.push(story.id)
+    logger.warn(`[recover] story ${story.id} was ${previous} → reset to pending`)
+  }
+  return { recovered }
 }
 ```
 
-### 10.3 Artifact 保护
+**关键决策**：**不**检查 mainSessionId 是否还活着——M1 实现选择粗暴重置。原因：
+- DSH session API 版本敏感，跨 DSH 升级易坏
+- 重置后 StoryQueue 重新 dispatch，runner 入口检查 checkpoint（mr_creating / tapd_syncing 已写过的副作用会跳过）——所以**部分完成的副作用不会被重做**
+- 已经在文件系统里的 artifact / commit 不受影响——见 §10.3
 
-**关键**：因为 Artifact 进文件系统 + 子 Session 是独立的 JSONL log，**Plugin 重启后所有历史都不会丢失**。Agent 可以从 Artifact 文件读取之前阶段的结果。
+### 10.3 Artifact 保护 + Checkpoint 模式（M4 升级）
+
+**两层保护**：
+
+1. **文件系统 artifact**：`worktree/.auto-rd/stories/<story-id>/artifacts/*.md` 在 plugin 重启后**永远不丢**——独立于 session，DSH 重启对它们无影响
+
+2. **StoryRecord checkpoint 字段**（M4-A 新增，见 §4.1.2）：外部副作用（push branch / 创建 MR / sync TAPD）的"已完成"状态写到 storage 里：
+   - `pushedSha` / `mrUrl` / `tapdSyncedAt` 等
+   - 重新 mount 后，`mr_creating` / `tapd_syncing` stage handler 入口检查这些字段
+   - **非空就跳过对应副作用**——避免 push 重复 / MR 重复创建 / TAPD 状态被覆盖
+
+效果：
+```
+场景 1: push 成功 → MR create 401 → plugin 重启
+  recover 把 state 重置为 pending
+  runner 重跑 → context → ... → mr_creating
+  mr_creating 入口：story.pushedSha 存在 → 跳过 push
+  mr_creating: 创建 MR 成功 → story.mrUrl 写
+
+场景 2: push 成功 → MR 成功 → sync TAPD 401 → plugin 重启
+  recover 把 state 重置为 pending
+  runner 重跑 → ... → mr_creating → tapd_syncing
+  mr_creating 跳过 push + 复用已有 MR（list existing）
+  tapd_syncing 入口：story.tapdSyncedAt 不存在 → 调 syncTapd
+  syncTapd 成功 → story.tapdSyncedAt 写
+```
+
+**checkpoint + recover 双层组合**让"plugin 重启 + 网络瞬时故障"场景**完全不需要人工介入**。
+
+### 10.4 未做的事（未来扩展）
+
+- ❌ **Cold resume mainSessionId**：M1+ 暂不做。DSH session API 跨版本不一致；checkpoint + 文件系统 artifact 已经覆盖 95% 用例
+- ❌ **Stuck-session detection**：用 session list 查 `state='executing'` 时间 > N min 的孤儿 session —— M5 + 加
+- ❌ **Concurrent plugin instance 防多写**：trust DSH single-process 假设
 
 ---
 
