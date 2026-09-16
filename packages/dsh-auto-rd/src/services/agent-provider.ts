@@ -31,7 +31,21 @@ import { CriticAgent } from '../agents/critic'
 import { DecisionAgent } from '../agents/decision'
 import { SpecAgent } from '../agents/spec'
 import { PlannerAgent } from '../agents/planner'
+import { ImplementationAgent } from '../agents/implementation'
+import { TestAgent } from '../agents/test'
+import { FixAgent } from '../agents/fix'
+import { VerificationAgent } from '../agents/verification'
+import { ReviewAgent } from '../agents/review'
+import { FinalVerifyAgent } from '../agents/final-verify'
 import type { AgentSpec } from '../agents/base'
+
+/**
+ * Axis parameter for the parallel two-axis review agents. The orchestrator
+ * dispatches review / final-verify twice — once per axis — and merges the
+ * findings downstream (CR-4: Don't Merge or Rerank at this layer; just
+ * produce per-axis reports).
+ */
+export type ReviewAxis = 'standards' | 'spec'
 
 export interface AgentDispatchRequest {
   agentName: string
@@ -47,6 +61,17 @@ export interface AgentDispatchRequest {
   variation?: BrainstormVariation
   /** Optional index inside the parallel-dispatch set, 1-based. */
   variationIndex?: number
+  /**
+   * Axis for two-axis review (review / final-verify). The orchestrator
+   * dispatches each review agent twice — once per axis — and the stub
+   * uses this to write a per-axis artifact file.
+   */
+  axis?: ReviewAxis
+  /**
+   * Optional task identifier for ImplementationAgent / FixAgent so the
+   * stub can write a per-task artifact (e.g., 08-impl-T001.md).
+   */
+  taskId?: string
 }
 
 export type AgentDispatchResult =
@@ -90,6 +115,21 @@ export class AgentProvider {
   private readonly subagents: SubagentsService | null
   private brainstormSpecByVariation: Partial<Record<BrainstormVariation, AgentSpec>> | null = null
   private brainstormHandler: AgentHandler | null = null
+  /**
+   * ImplementationAgent is unique-per-task: the orchestrator creates a fresh
+   * instance per task (SD-2). The dispatch path picks the right instance
+   * from the supplied `taskId`; missing → fall through to a default
+   * placeholder spec for the registration.
+   */
+  private implementationSpecByTaskId: Map<string, AgentSpec> = new Map()
+  private implementationDefaultSpec: AgentSpec | null = null
+  private implementationHandler: AgentHandler | null = null
+
+  private reviewSpecByAxis: Partial<Record<ReviewAxis, AgentSpec>> | null = null
+  private reviewHandler: AgentHandler | null = null
+
+  private finalVerifySpecByAxis: Partial<Record<ReviewAxis, AgentSpec>> | null = null
+  private finalVerifyHandler: AgentHandler | null = null
 
   constructor(private readonly ctx: Context, private readonly deps: AgentProviderDeps) {
     this.registerBuiltins()
@@ -125,8 +165,9 @@ export class AgentProvider {
    * Dispatch an agent by name.
    */
   async dispatch(req: AgentDispatchRequest): Promise<AgentDispatchResult> {
-    // Brainstorm is special: same agentName, three variations. Resolve to the
-    // matching AgentSpec instance before falling through to the registry.
+    // Several agents need per-dispatch spec lookup (Brainstorm by variation,
+    // Implementation by taskId, Review/FinalVerify by axis). Resolve the
+    // spec + handler before falling through to the generic registry path.
     let spec: AgentSpec
     let handler: AgentHandler
     if (req.agentName === 'brainstorm') {
@@ -136,6 +177,27 @@ export class AgentProvider {
       }
       spec = variationSpec
       handler = this.brainstormHandler
+    } else if (req.agentName === 'implementation') {
+      const taskId = req.taskId ?? 'default'
+      spec = this.implementationSpecByTaskId.get(taskId) ?? this.implementationDefaultSpec!
+      if (!this.implementationHandler) {
+        return { status: 'failed', reason: `agentNotImplemented:implementation` }
+      }
+      handler = this.implementationHandler
+    } else if (req.agentName === 'review') {
+      const axisSpec = req.axis ? this.reviewSpecByAxis?.[req.axis] : undefined
+      if (!axisSpec || !this.reviewHandler) {
+        return { status: 'failed', reason: `agentNotImplemented:review:${req.axis}` }
+      }
+      spec = axisSpec
+      handler = this.reviewHandler
+    } else if (req.agentName === 'final-verify') {
+      const axisSpec = req.axis ? this.finalVerifySpecByAxis?.[req.axis] : undefined
+      if (!axisSpec || !this.finalVerifyHandler) {
+        return { status: 'failed', reason: `agentNotImplemented:final-verify:${req.axis}` }
+      }
+      spec = axisSpec
+      handler = this.finalVerifyHandler
     } else {
       const entry = this.registry.get(req.agentName)
       if (!entry) {
@@ -149,7 +211,11 @@ export class AgentProvider {
     // can read it (or so an operator can audit what was sent).
     writeFileSync(
       join(req.artifactsDir, 'agent-persona.md'),
-      `# Persona (${spec.name}${req.variation ? ` / ${req.variation}` : ''})\n\n${spec.persona}`,
+      `# Persona (${spec.name}` +
+        `${req.variation ? ` / ${req.variation}` : ''}` +
+        `${req.axis ? ` / ${req.axis}` : ''}` +
+        `${req.taskId ? ` / ${req.taskId}` : ''}` +
+        `)\n\n${spec.persona}`,
       'utf-8',
     )
 
@@ -173,7 +239,7 @@ export class AgentProvider {
             variation: req.variation,
           },
         })
-        this.deps.logger.info(`Subagent launched for ${req.agentName}${req.variation ? ` (${req.variation})` : ''}: ${req.label}`)
+        this.deps.logger.info(`Subagent launched for ${req.agentName}${req.variation ? ` (${req.variation})` : ''}${req.axis ? ` (${req.axis})` : ''}${req.taskId ? ` (${req.taskId})` : ''}: ${req.label}`)
       } catch (err) {
         this.deps.logger.error(
           `Subagent start failed for ${req.agentName}: ${(err as Error).message}; falling back to stub`,
@@ -208,6 +274,45 @@ export class AgentProvider {
     this.register('decision', new DecisionAgent(), runDecisionStub)
     this.register('spec', new SpecAgent(), runSpecStub)
     this.register('planner', new PlannerAgent(), runPlannerStub)
+
+    // ImplementationAgent: a fresh instance per task (SD-2). The dispatch
+    // path caches one spec per taskId, with a default fallback for any
+    // taskId the registry hasn't seen (still rare — the orchestrator
+    // pre-creates them).
+    this.implementationDefaultSpec = new ImplementationAgent('default')
+    this.implementationHandler = runImplementationStub
+
+    this.register('test', new TestAgent(), runTestStub)
+    this.register('fix', new FixAgent(), runFixStub)
+    this.register('verification', new VerificationAgent(), runVerificationStub)
+
+    // Review and FinalVerify are dispatched twice in parallel — once per
+    // axis. Same pattern as Brainstorm: same name, axis parameter chooses
+    // the AgentSpec instance.
+    this.reviewSpecByAxis = {
+      standards: new ReviewAgent(),
+      spec: new ReviewAgent(),
+    }
+    this.reviewHandler = runReviewStub
+    this.finalVerifySpecByAxis = {
+      standards: new FinalVerifyAgent(),
+      spec: new FinalVerifyAgent(),
+    }
+    this.finalVerifyHandler = runFinalVerifyStub
+  }
+
+  /**
+   * Make sure the implementation registry has an AgentSpec for `taskId`.
+   * The orchestrator calls this once per task before dispatching so the
+   * dispatch path can always find a per-task spec.
+   */
+  ensureImplementationSpec(taskId: string): AgentSpec {
+    let spec = this.implementationSpecByTaskId.get(taskId)
+    if (!spec) {
+      spec = new ImplementationAgent(taskId)
+      this.implementationSpecByTaskId.set(taskId, spec)
+    }
+    return spec
   }
 
   /**
@@ -542,4 +647,258 @@ async function runPlannerStub(
   writeFileSync(join(req.artifactsDir, '07-tasks.md'), report, 'utf-8')
 
   return { status: 'success', summary: 'Stub Plan (1 task).' }
+}
+
+async function runImplementationStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string }
+  const task = req.inputs.task as { taskId: string; title?: string; files?: string[] } | undefined
+  const taskId = req.taskId ?? task?.taskId ?? 'T001'
+  deps.logger.info(`ImplementationAgent stub running for story ${story.id} task=${taskId}`)
+
+  const report = [
+    `# Implementation — ${taskId} — ${task?.title ?? story.title}`,
+    ``,
+    `**Task**: ${taskId}`,
+    `**Status**: PASS`,
+    ``,
+    `## RED`,
+    `- Test file: ${task?.files?.[0] ?? '<test path>'}`,
+    `- Run output (failure): stub — RED not run`,
+    ``,
+    `## GREEN`,
+    `- Source file: ${task?.files?.[1] ?? '<src path>'}`,
+    `- Change summary: stub minimal implementation`,
+    ``,
+    `## VERIFY`,
+    `- Run: <test command>`,
+    `- Output (final): PASS — 0/0 (stub)`,
+    ``,
+    `## COMMIT`,
+    `- Hash: <stub>`,
+    `- Files: ${(task?.files ?? []).join(', ') || '<stub>'}`,
+    ``,
+    `## Notes for Reviewer`,
+    `Stub. No real diff produced.`,
+    ``,
+    `[IMPL_TASK_COMPLETE]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, `08-impl-${taskId}.md`), report, 'utf-8')
+
+  return { status: 'success', summary: `Stub Implementation report (${taskId}).` }
+}
+
+async function runTestStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string; acceptanceCriteria?: string }
+  deps.logger.info(`TestAgent stub running for story ${story.id}`)
+
+  const report = [
+    `# Test Report — ${story.title}`,
+    ``,
+    `## Run Command`,
+    `<stub>`,
+    ``,
+    `## Suite Summary`,
+    `- Total: 0`,
+    `- Pass: 0`,
+    `- Fail: 0`,
+    `- Warnings: 0`,
+    `- Duration: 0s`,
+    ``,
+    `## AC Coverage`,
+    `| AC | Test | Result | Evidence |`,
+    `|----|------|--------|----------|`,
+    story.acceptanceCriteria
+      ? `| ${story.acceptanceCriteria.slice(0, 60)}... | <stub> | ✅ | stub |`
+      : `| (stub) | <stub> | ✅ | stub |`,
+    ``,
+    `## Failures`,
+    `_None._`,
+    ``,
+    `## Claim`,
+    `I claim: PASS`,
+    `Because: stub emits PASS when no failure is recorded.`,
+    `Evidence: stub run, no actual test output.`,
+    `Sufficient because: no ACs observed failing.`,
+    ``,
+    `[TEST_PASS]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, '09-test-report.md'), report, 'utf-8')
+
+  return { status: 'success', summary: 'Stub Test report (PASS).' }
+}
+
+async function runFixStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string }
+  const attempt = (req.inputs.fix as { attempt?: number } | undefined)?.attempt ?? 1
+  deps.logger.info(`FixAgent stub running for story ${story.id} attempt=${attempt}`)
+
+  const report = [
+    `# Fix Report — F<stub> — attempt ${attempt}`,
+    ``,
+    `**Attempt**: ${attempt}`,
+    `**Status**: PASS`,
+    ``,
+    `## Phase 1 — Root Cause`,
+    `- Failure message: <stub>`,
+    `- Failing line: \`<path>:<line>\``,
+    `- Root cause: stub`,
+    ``,
+    `## Phase 2 — Pattern`,
+    `- Pattern: stub`,
+    ``,
+    `## Phase 3 — Hypothesis`,
+    `- "If I change ... then ..."`,
+    ``,
+    `## Phase 4 — Implementation`,
+    `- File changed: \`<path>\``,
+    `- Diff: stub`,
+    `- Originally failing test: PASS`,
+    `- Full suite: 0/0 green`,
+    ``,
+    `## Notes for Reviewer`,
+    `Stub. No real fix.`,
+    ``,
+    `[FIX_COMPLETE]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, '10-fix-report.md'), report, 'utf-8')
+
+  return { status: 'success', summary: `Stub Fix report (attempt ${attempt}).` }
+}
+
+async function runVerificationStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string }
+  deps.logger.info(`VerificationAgent stub running for story ${story.id}`)
+
+  const report = [
+    `# Verification Report — ${story.title}`,
+    ``,
+    `## Integration Tree HEAD`,
+    `- Branch: \`auto-rd/${story.id}\``,
+    `- Commit: <stub>`,
+    ``,
+    `## Runs (fresh)`,
+    `| Command | Result | Notes |`,
+    `|---------|--------|-------|`,
+    `| <test cmd> | 0/0 pass | stub |`,
+    `| tsc --noEmit | 0 errors, 0 warnings | stub |`,
+    `| <lint cmd> | 0 errors, 0 warnings | stub |`,
+    ``,
+    `## Whole-Branch Properties`,
+    `| Property | Status | Evidence |`,
+    `|----------|--------|----------|`,
+    `| §Behavior — every AC | ✅ | covered by 09-test-report.md |`,
+    `| §Error Contract | ✅ | stub |`,
+    `| §Compatibility | ✅ | stub |`,
+    `| §Security & Privacy | ✅ | stub |`,
+    `| Doc/Schema parity | ✅ | stub |`,
+    ``,
+    `## Failures`,
+    `_None._`,
+    ``,
+    `## Claim`,
+    `I claim: PASS`,
+    `Because: stub has zero failures across whole-branch properties.`,
+    `Sufficient because: every property observed green.`,
+    ``,
+    `[VERIFY_PASS]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, '11-verify-report.md'), report, 'utf-8')
+
+  return { status: 'success', summary: 'Stub Verification report (PASS).' }
+}
+
+async function runReviewStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string }
+  const axis = req.axis ?? 'standards'
+  const taskId = req.taskId ?? 'T001'
+  deps.logger.info(`ReviewAgent stub running for story ${story.id} axis=${axis} task=${taskId}`)
+
+  const report = [
+    `# Review — ${taskId} — ${axis}`,
+    ``,
+    `**Diff range**: \`<base>..<head>\``,
+    ``,
+    `## Findings`,
+    `_Stub: no findings._`,
+    ``,
+    `## Summary`,
+    `- Critical: 0`,
+    `- Important: 0`,
+    `- Minor: 0`,
+    ``,
+    `## Decision`,
+    `- \`APPROVE\` — zero Critical findings, zero Important findings.`,
+    ``,
+    `[REVIEW_${axis.toUpperCase()}_APPROVE]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, `12-review-${taskId}-${axis}.md`), report, 'utf-8')
+
+  return { status: 'success', summary: `Stub Review report (${taskId} ${axis}).` }
+}
+
+async function runFinalVerifyStub(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as { id: string; title: string }
+  const axis = req.axis ?? 'standards'
+  deps.logger.info(`FinalVerifyAgent stub running for story ${story.id} axis=${axis}`)
+
+  const report = [
+    `# Final Verify — ${axis}`,
+    ``,
+    `**Diff range**: \`<base>..<head>\``,
+    `**Commits**: 1`,
+    `**+/-**: 0 / 0`,
+    ``,
+    `## Fresh Re-Run`,
+    `- Command: \`<stub>\``,
+    `- Result: PASS — 0/0 tests`,
+    `- Warnings: 0`,
+    ``,
+    `## Findings (whole-branch)`,
+    `_Stub: no findings._`,
+    ``,
+    `## Summary`,
+    `- Critical: 0`,
+    `- Important: 0`,
+    `- Minor: 0`,
+    ``,
+    `## Decision`,
+    `- \`FINAL_READY\` — zero Critical across this axis, zero Important.`,
+    ``,
+    `## Ledger`,
+    `- Reviewed at: ${new Date().toISOString()}`,
+    `- Diff range: <base>..<head> — 1 commits, +0/-0 lines`,
+    `- Standards findings: 0 Critical, 0 Important, 0 Minor`,
+    `- Spec findings: 0 Critical, 0 Important, 0 Minor`,
+    `- Verification re-run: <stub> — PASS`,
+    `- Decision: FINAL_READY`,
+    ``,
+    `[FINAL_READY]`,
+  ].join('\n')
+
+  writeFileSync(join(req.artifactsDir, `13-final-verify-${axis}.md`), report, 'utf-8')
+
+  return { status: 'success', summary: `Stub Final Verify report (${axis}).` }
 }
