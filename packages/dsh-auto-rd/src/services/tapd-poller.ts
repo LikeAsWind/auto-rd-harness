@@ -11,6 +11,7 @@
  * rule. The simplest rule (used here) is: if the story's category field
  * matches a configured module.id, route to that module.
  */
+import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config'
 import type { AutoRdStorage } from '../domain/storage'
@@ -95,14 +96,30 @@ export class TapdPoller {
     if (stories.get(t.id)) return // already enqueued
 
     const moduleId = t.category
-    if (!moduleId || !this.deps.storage.modules().get(moduleId)) {
+    if (!moduleId) {
+      this.deps.logger.warn(`Story ${t.id} has no category; skipping`)
+      return
+    }
+    const moduleRecord = this.deps.storage.modules().get(moduleId)
+    if (!moduleRecord) {
       this.deps.logger.warn(
-        `Story ${t.id} category="${t.category}" does not match any configured module; skipping`,
+        `Story ${t.id} category="${moduleId}" does not match any configured module; skipping`,
       )
       return
     }
 
     const now = new Date().toISOString()
+    const branch = `auto-rd/${t.id}`
+    // Pre-compute the worktree path so the story record is complete at enqueue
+    // time. WorkspaceManager.ensureStoryWorktree will create the directory on
+    // first access; we just record the intended location here.
+    const worktreePath = resolve(
+      moduleRecord.workspacePath,
+      '.auto-rd',
+      'worktrees',
+      t.id,
+    )
+
     await stories.put(t.id, {
       id: t.id,
       moduleId,
@@ -111,13 +128,14 @@ export class TapdPoller {
       description: t.description,
       acceptanceCriteria: t.acceptanceCriteria,
       state: 'pending',
-      branch: `auto-rd/${t.id}`,
+      branch,
+      worktreePath,
       artifacts: {},
       retryCount: 0,
       createdAt: now,
       updatedAt: now,
     })
-    this.deps.logger.info(`Enqueued story ${t.id} for module ${moduleId}`)
+    this.deps.logger.info(`Enqueued story ${t.id} for module ${moduleId} (worktree=${worktreePath})`)
   }
 
   /**

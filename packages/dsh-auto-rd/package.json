@@ -44,8 +44,16 @@
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-storage-domain": "*"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis":         { "optional": true },
+    "@deepseek-ai/dsh-agent":      { "optional": true },
+    "@deepseek-ai/dsh-session":    { "optional": true },
+    "@deepseek-ai/dsh-tools":      { "optional": true },
+    "@deepseek-ai/dsh-storage-domain": { "optional": true }
+  },
   "devDependencies": {
     "typescript": "^5.4.0",
-    "@types/node": "^20.10.0"
+    "@types/node": "^20.10.0",
+    "@deepseek-ai/cordis": "*"
   }
 }

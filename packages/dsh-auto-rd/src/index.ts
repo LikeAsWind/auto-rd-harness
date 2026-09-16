@@ -23,7 +23,7 @@
  * emit a `[cordis:auto-rd]` error to the host log. That's what we want —
  * fast, visible failure rather than silent partial mount.
  */
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { ConfigSchema, type Config } from './config'
 import { AutoRdStorage } from './domain/storage'
@@ -32,6 +32,7 @@ import { TapdPoller } from './services/tapd-poller'
 import { AgentProvider } from './services/agent-provider'
 import { StoryRunner } from './services/story-runner'
 import { StoryQueue } from './services/story-queue'
+import { recoverStories } from './services/recover'
 import { Logger } from './utils/logger'
 
 /**
@@ -56,8 +57,12 @@ export const inject = [
 
 /**
  * Runtime schema for the plugin's row config. Validated before apply() runs.
+ *
+ * NOTE: We re-export the schema as `ConfigSchema` (not `Config`) to avoid
+ * clashing with the `Config` type re-exported from ./config. Mixed
+ * type+const declarations of the same name are not allowed.
  */
-export const Config = ConfigSchema
+export { ConfigSchema }
 
 export type { Config as PluginConfig }
 
@@ -81,7 +86,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   }
 
   // 1. Storage
-  const storageDomain = ctx.get('storageDomain' as never) as Parameters<typeof AutoRdStorage>[1]
+  const storageDomain = ctx.get('storageDomain' as never) as unknown as ConstructorParameters<typeof AutoRdStorage>[1]
   const storage = new AutoRdStorage(ctx, storageDomain)
 
   // 2. Seed module records from config (idempotent).
@@ -105,7 +110,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })
   const poller = new TapdPoller(ctx, { storage, logger, config })
 
-  // 4. Start timers via Cordis effect for proper cleanup on plugin disable.
+  // 4. Recover any in-flight stories from a previous run. We do this BEFORE
+  // starting timers so StoryQueue picks them up cleanly on its first tick.
+  // Fire-and-log; failure here must not block plugin mount.
+  void recoverStories(storage, logger).catch((err) => {
+    logger.error(`[auto-rd] recoverStories failed: ${(err as Error).message}`)
+  })
+
+  // 5. Start timers via Cordis effect for proper cleanup on plugin disable.
   ctx.effect(() => {
     queue.start()
     poller.start()
