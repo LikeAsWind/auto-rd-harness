@@ -1631,60 +1631,150 @@ function canStartStory(story: Story, executing: Story[], config: any): boolean {
 
 ## 12. 人工介入
 
+> 真实实现（M4-UI 后）有 **3 个 model-callable tool**和 **5s 轮询 notifier**——不只是 §12.3 draft 的单个 tool。原 §12.2 的 `ctx.on('story-blocked')` 假设了不存在的 Cordis event，已替换为 §7.2 描述的 polling 实现。
+
 ### 12.1 Blocked 触发场景
 
-| 场景 | Block 原因 | 用户介入方式 |
+| 场景 | Block 原因 | 路由阶段 | 用户介入方式 |
+|---|---|---|---|
+| Clarification Agent 发现需求必须问用户 | `clarification: user_input_required` | `clarification` | 用户补充信息 → `auto_rd_retry(retry)` |
+| Implementation 任务卡死（连续 5 轮 fix 不行） | `fixing: breaker_tripped` (SD-4) | `fixing` | 用户调查后改代码 → `auto_rd_retry(retry)` 或 `auto_rd_retry(skip)` |
+| Verification 发现 Spec 不满足 | `verifying: spec_mismatch` | `verifying` | 用户确认 Spec 调整 → `auto_rd_retry(retry)` |
+| Planner 解析出 0 个 task | `planning: zero_tasks` | `planning` | 用户调整 Spec → `auto_rd_retry(retry)` |
+| **MR create 401/403/404（非 transient）** | `mr_creating: gitlab_config_error` | `mr_creating` | 修 token / project 访问权限 → `auto_rd_retry(retry)` |
+| **TAPD sync 401（非 transient）** | `tapd_syncing: tapd_config_error` | `tapd_syncing` | 修 token → `auto_rd_retry(retry)` |
+| TAPD sync 20 次 transient 失败 | 实际上**不进 blocked**——进 `failed` | `tapd_syncing` | 修网络 / TAPD 状态后 → `auto_rd_retry(reset_to_pending)` |
+
+**注意 blocked vs failed 区分**：
+
+| 状态 | 含义 | 用户介入 |
 |---|---|---|
-| Clarification Agent 发现需求必须问用户 | `clarification: user_input_required` | 用户补充信息 + `auto_rd_retry` |
-| Implementation Agent 遇到无法解决的冲突 | `implementation: merge_conflict` | 用户手动 merge + `auto_rd_retry` |
-| Verification 发现 Spec 不满足 | `verification: spec_mismatch` | 用户确认 Spec 调整 + `auto_rd_retry` |
-| Test 连续失败 3 次 | `test: persistent_failure` | 用户调查后调整代码 + `auto_rd_retry` |
+| `blocked` | 配置 / 设计问题，需要**人为判断** | 调 `auto_rd_retry(retry/skip)` 或 `auto_rd_trigger(mark_reviewed)` |
+| `failed` | **网络或环境长期不可恢复**（20 次 sync cap、runner 抛 3 次） | 修环境后 `auto_rd_retry(reset_to_pending)`（保留 retryCount 让 breaker 仍生效）或 `auto_rd_retry(retry)`（清零）|
 
-### 12.2 通知机制
+### 12.2 通知机制（5s 轮询）
 
-```typescript
-ctx.on('story-blocked', async (story, reason) => {
-  // 1. 写到 UI 面板（Sidebar）
-  // 2. 推到用户主 session
-  // 3. 写入 blocked Story 详情
-})
-```
+实现：`packages/dsh-auto-rd/src/services/story-notifier.ts`（详见 §7.2）
 
-### 12.3 auto_rd_retry 工具
+**不是** `ctx.on('story-blocked')` event——Cordis 没提供 storage-changed event。Notifier 每 5s 扫 storage，已通知的进 `Set` 去重，全清空后重置 Set。
 
 ```typescript
-ctx.tools.register({
-  name: 'auto_rd_retry',
-  description: 'Manually retry or skip a blocked/failed story',
-  parameters: {
-    storyId: { type: 'string', required: true },
-    action: { 
-      type: 'enum', 
-      enum: ['retry', 'skip', 'reset_to_pending'],
-      required: true 
-    },
-    note: { type: 'string', required: false },
-  },
-  async execute(args, exec) {
-    const story = config.domain.table('stories').get(args.storyId)
-    if (!story) throw new Error(`Story ${args.storyId} not found`)
-    
-    if (args.action === 'retry') {
-      story.state = 'pending'  // 重新调度
-      story.retryCount = 0
-    } else if (args.action === 'skip') {
-      story.state = 'failed'
-      story.blockedReason = `Skipped by user: ${args.note ?? ''}`
-    } else if (args.action === 'reset_to_pending') {
-      story.state = 'pending'
-    }
-    
-    story.updatedAt = new Date().toISOString()
-    await config.domain.table('stories').put(story.id, story)
-    return { ok: true, story }
-  },
-})
+const POLL_INTERVAL_MS = 5_000
+
+async tick(): Promise<void> {
+  for (const story of storage.stories().values()) {
+    if (story.state !== 'blocked') continue
+    if (notifiedStories.has(story.id)) continue
+    await notify(story)
+    notifiedStories.add(story.id)
+  }
+}
 ```
+
+**消息格式**（推到 user session）：
+
+```
+🔔 Auto-RD: Story <id> ("<title>") is blocked in state=<state>.
+
+Reason: <blockedReason>
+
+Use the `auto_rd_retry` or `auto_rd_trigger` tool to recover. Common actions:
+`action="mark_reviewed", decision="approve"` to release the block;
+`action="advance_story"` to wake the queue.
+```
+
+**Best-effort**：subagents service 拿不到就 warn 跳过。Story 仍 blocked 在 storage——auto_rd_status / sidebar 仍能看到。
+
+### 12.3 Model-Callable Tools（3 个）
+
+#### 12.3.1 `auto_rd_retry` —— 手动恢复 blocked/failed story
+
+文件：`tools/auto-rd-retry.ts`
+
+```typescript
+{
+  storyId: string,
+  action: 'retry' | 'skip' | 'reset_to_pending',
+  note?: string
+}
+```
+
+| action | state 转换 | retryCount | 用途 |
+|---|---|---|---|
+| `retry` | `*` → `pending` | **重置为 0** | breaker trip 后想完全清零 |
+| `reset_to_pending` | `*` → `pending` | **不变** | 想保留 breaker 计数（看用户 fix 是否真的进步）|
+| `skip` | `*` → `failed`（终态） | 不变 | 用户决定放弃这条 story |
+
+**不抛错**——找不到 story 返回 `{ok:false, error:'story_not_found'}`。DSH 处理 throw 差。
+
+#### 12.3.2 `auto_rd_trigger` —— 主动触发操作（M4-U3）
+
+文件：`tools/auto-rd-trigger.ts`
+
+```typescript
+{ action: 'poll_now' }
+| { action: 'advance_story', storyId: string }
+| { action: 'mark_reviewed', storyId: string, decision: 'approve' | 'request_changes' | 'skip', note?: string }
+```
+
+| action | 行为 |
+|---|---|
+| `poll_now` | 立即调 `tapdPoller.tick()`——不等下个 interval |
+| `advance_story` | 直接调 `storyRunner.runStory(storyId)`——绕开 StoryQueue 的并发限流（人手动触发应该立即执行） |
+| `mark_reviewed.approve` | state → `pending`，retryCount → 0，blockedReason 清 |
+| `mark_reviewed.request_changes` | append 到 blockedReason，state 不变 |
+| `mark_reviewed.skip` | state → `failed`，record decision |
+
+#### 12.3.3 `auto_rd_status` —— 查 pipeline 状态（M4-U2）
+
+文件：`tools/auto-rd-status.ts`
+
+```typescript
+{
+  scope?: 'summary' | 'stories' | 'tasks'   // default 'summary'
+  moduleId?: string
+  state?: StoryState
+  limit?: number                            // default 50, max 500
+}
+```
+
+返回纯 JSON 数据，不抛错。模型在用户问"auto-rd 现在在干嘛"时调。
+
+### 12.4 三 tool 的关系图
+
+```
+            ┌──────────────┐
+            │ user session │
+            └──────┬───────┘
+                   │
+       模型可调（zod 校验参数）
+                   │
+   ┌───────────────┼───────────────┐
+   ▼               ▼               ▼
+auto_rd_status  auto_rd_trigger  auto_rd_retry
+   (查)            (操作)         (恢复)
+   │               │               │
+   ▼               ▼               ▼
+storage       tapdPoller.tick  StoryRecord
+              storyRunner.runStory  state/retryCount
+              storage.stories.put  state/retryCount
+              storage.stories.put  blockedReason
+```
+
+**3 tool 互不依赖**——任何顺序、任何组合都能调。模型可一次性查（status）→ 决定怎么操作（trigger/retry）。
+
+### 12.5 Human-in-the-loop 协议
+
+故事进 `blocked` 后：
+
+1. **Notifier 5s 内推到 user session**（priority='background'）
+3. **用户回复**：
+   - 调 `auto_rd_status(scope='stories', state='blocked')` 看全图
+   - 选 tool：
+     - **配置问题**（401/403/404/breaker_tripped） → `auto_rd_retry(retry)` 修环境后清零重跑
+     - **设计问题**（spec_mismatch / zero_tasks） → `auto_rd_trigger(mark_reviewed, approve)` release block 后改 Spec
+     - **放弃** → `auto_rd_retry(skip)` 永久终止
+4. **模型不主动调** —— system prompt 明确"Do NOT proactively call unless the user has asked"
 
 ---
 
