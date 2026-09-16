@@ -55,6 +55,16 @@ const { findExistingMR, createMR, createOrReuseMR } = gitlabMod
 const FAKE_BASE = 'http://127.0.0.1:0' // bound at start
 
 /**
+ * Every server this suite creates, so the suite can guarantee each handle
+ * is fully closed before the process exits. Without that guarantee Node 24
+ * on Windows trips a libuv assertion during exit
+ * (`!(handle->flags & UV_HANDLE_CLOSING)`), which crashed the process
+ * AFTER the results printed and made `npm run test:all` report a failure
+ * for a suite that had actually passed.
+ */
+const liveServers = new Set()
+
+/**
  * Tracks scripted responses. Each `expect` registers an expected
  * method/path pattern; calls that match consume the next scripted
  * response in order. Anything not matched gets a 500 fallback.
@@ -63,6 +73,7 @@ class FakeServer {
   constructor() {
     this.scripted = []
     this.requests = []
+    this.closed = null
     this.server = createServer((req, res) => {
       let body = ''
       req.on('data', (chunk) => (body += chunk))
@@ -93,23 +104,46 @@ class FakeServer {
 
   async listen() {
     await new Promise((r) => this.server.listen(0, '127.0.0.1', r))
-    this.server.unref()
+    liveServers.add(this)
     return {
       url: `http://127.0.0.1:${this.server.address().port}`,
       fake: this,
     }
   }
 
+  /**
+   * Close the listener and resolve once the handle is gone.
+   *
+   * Idempotent: a second call returns the same promise instead of
+   * touching a closing handle, which is what provoked the libuv
+   * assertion. Deliberately does NOT `unref()` — letting the handle keep
+   * the event loop alive until it is closed is what removes the
+   * close-during-exit race; the suite closes everything explicitly.
+   */
   close() {
-    // closeAllConnections first so any keep-alive sockets release the
-    // listener immediately. Otherwise the Windows libuv handle-close
-    // assertion fires during process exit even after the test results
-    // are printed.
-    if (typeof this.server.closeAllConnections === 'function') {
-      this.server.closeAllConnections()
-    }
-    this.server.close()
+    if (this.closed) return this.closed
+    this.closed = new Promise((resolve) => {
+      try {
+        // Release keep-alive sockets so close() completes immediately
+        // rather than waiting on an idle client.
+        if (typeof this.server.closeAllConnections === 'function') {
+          this.server.closeAllConnections()
+        }
+      } catch {
+        // Already closing — fall through to close().
+      }
+      this.server.close(() => {
+        liveServers.delete(this)
+        resolve()
+      })
+    })
+    return this.closed
   }
+}
+
+/** Close every server still open. Call before the process exits. */
+async function closeAllServers() {
+  await Promise.all([...liveServers].map((s) => s.close()))
 }
 
 const noSleep = () => Promise.resolve()
@@ -363,18 +397,11 @@ const check = (name, cond, extra) => {
 
 // ---- summary ---------------------------------------------------------
 
-// Flush stdout/stderr synchronously before exiting so the test result
-// line is on disk before the libuv cleanup race triggers on Windows
-// Node 24+. Without this, the test count is correct but the script
-// exits with code 1 because of a benign async-handle assertion that
-// fires after process.exit() returns.
-const _out = `\nM4-A fake-server tests: ${pass} pass, ${fail} fail\n`
-try {
-  process.stdout.write(_out)
-  process.stdout.write = () => true
-  process.stderr.write = () => true
-} catch {}
-process.exit(fail === 0 ? 0 : 1)
+// The summary is written at the END of this file, after every listener has
+// been closed. An abrupt `process.exit()` here would tear the process down
+// while HTTP handles are still closing, which trips a libuv assertion on
+// Node 24 / Windows (`!(handle->flags & UV_HANDLE_CLOSING)`) AFTER the
+// results printed — so a passing suite reported a failure exit code.
 
 // ---- factories --------------------------------------------------------
 
@@ -470,3 +497,12 @@ function consoleLogger() {
     error: () => {},
   }
 }
+
+
+// ---- summary ----------------------------------------------------------
+
+// Close every listener and let Node exit on its own. Awaiting the closes
+// removes the close-during-exit race that the old `process.exit()` caused.
+await closeAllServers()
+process.stdout.write(`\nM4-A fake-server tests: ${pass} pass, ${fail} fail\n`)
+process.exitCode = fail === 0 ? 0 : 1
