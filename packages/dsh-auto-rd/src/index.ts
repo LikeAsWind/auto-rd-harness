@@ -25,7 +25,7 @@
  */
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { ConfigSchema, type Config } from './config.js'
+import { ConfigSchema, normalizeConfig, type Config } from './config.js'
 import { AutoRdStorage } from './domain/storage.js'
 import { WorkspaceManager } from './services/workspace-manager.js'
 import { TapdPoller } from './services/tapd-poller.js'
@@ -36,7 +36,8 @@ import { recoverStories } from './services/recover.js'
 import { StoryNotifierService } from './services/story-notifier.js'
 import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
-import { registerPanelRoute } from './services/panel-route.js'
+import { registerPanelRoute, registerPanelRouteWithRetry } from './services/panel-route.js'
+import { registerReconfigureRoute } from './services/reconfigure-route.js'
 import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
 import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
@@ -51,15 +52,22 @@ import { Logger } from './utils/logger.js'
  * Every entry here was checked against the live host service catalog.
  * `inject` is a hard-dependency list: Cordis holds the plugin until each
  * named service appears, so naming a service the host never provides
- * means the plugin never mounts. Two corrections were made after that
- * check:
+ * means the plugin never mounts. Notes:
  *
  *   - `slots` was REMOVED. It is not a host service at all — slots are
- *     a client-realm concern (see services/ui-panel.ts). Declaring it
+ *     a client-realm concern (see src/client/client.js). Declaring it
  *     here would have blocked the plugin from ever mounting.
  *   - `workspaceRegistry`, `timer`, `fs`, `shell`, `subprocess`,
  *     `agents` and `sessionPersistence` were REMOVED because nothing in
  *     the plugin reads them; they were dead wait-conditions.
+ *   - `webServer` is OPTIONAL. The web profile ships
+ *     `@deepseek-ai/dsh-host-webserver` and exposes the host HTTP server;
+ *     the headless / sdk / acp profiles do not. Listing it here would
+ *     block the plugin in headless deployments, so we wait for it via an
+ *     effect instead (see `registerPanelRoute` + `subscribeWebServer`).
+ *     The client-side panel `fetch('/auto-rd/panel')` only works when
+ *     the web server actually mounts; `auto_rd_status` stays reachable
+ *     either way.
  *
  * The remaining five are all used and all verified present.
  */
@@ -93,19 +101,34 @@ export type { Config as PluginConfig }
  */
 export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   // Validate config eagerly so failures show up at mount time, not at first poll.
-  const config = ConfigSchema.parse(rawConfig)
+  // The schema accepts every field as optional with friendly defaults
+  // (see config.ts) so the plugin MOUNTS even on a bare config; the UI then
+  // shows a setup checklist instead of going dark.
+  const parsed = ConfigSchema.parse(rawConfig)
+  const config = normalizeConfig(parsed)
   const logger = new Logger(ctx, config.logLevel)
 
   logger.info('='.repeat(60))
   logger.info('auto-rd plugin starting up')
   logger.info(`  modules: ${config.modules.map((m) => m.id).join(', ') || '(none configured)'}`)
-  logger.info(`  workspaceRoot: ${config.workspaceRoot}`)
+  logger.info(`  workspaceRoot: ${config.workspaceRoot || '(not configured)'}`)
   logger.info(`  pollIntervalMs: ${config.tapdPollIntervalMs}`)
   logger.info(`  useTapdMock: ${config.useTapdMock}`)
   logger.info('='.repeat(60))
 
+  // Log every missing piece at WARN level. None of these aborts the mount:
+  // the UI will surface them again as a setup checklist via /auto-rd/panel.
   if (!config.tapdApiToken) {
-    logger.warn('tapdApiToken is empty — the poller will use the mock fixture, but production needs a real token')
+    logger.warn('tapdApiToken is empty — poller forced to mock mode. Set DSH_TAPD_API_TOKEN to talk to real TAPD.')
+  }
+  if (!config.gitlabApiToken) {
+    logger.warn('gitlabApiToken is empty — MR creation will fail per story. Set DSH_GITLAB_API_TOKEN to enable MRs.')
+  }
+  if (!config.workspaceRoot) {
+    logger.warn('workspaceRoot is empty — no module repos will be cloned. Set workspaceRoot in cordis.patch.yml.')
+  }
+  if (config.modules.length === 0) {
+    logger.warn('modules is empty — nothing to poll. Add at least one module under config.modules in cordis.patch.yml.')
   }
 
   // 1. Storage. `storageDomain` is declared in `inject`, so Cordis has
@@ -147,34 +170,40 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     })
   }
 
-  // 3. Services
-  const trajectory = new TrajectoryRecorder(ctx, { storage, logger })
-  const workspaceManager = new WorkspaceManager(ctx, { storage, logger, config })
-  const agentProvider = new AgentProvider(ctx, { logger, config, trajectory })
-  const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider, trajectory })
-  const queue = new StoryQueue(ctx, { storage, logger, config, runner })
-  const poller = new TapdPoller(ctx, { storage, logger, config })
-  const notifier = new StoryNotifierService(ctx, { storage, logger })
+  // 3. Services + runtime stats. We rebuild these on every reconfigure
+  // so editing cordis.patch.yml (or posting a new config to the
+  // `/auto-rd/reconfigure` route) takes effect without restarting DSH.
+  //
+  // `liveConfig` is the single source of truth that the panel route +
+  // reconfigure route read from. It starts as the parsed-once config
+  // and gets replaced whenever the user re-runs setup.
+  const liveConfig: { current: Config } = { current: config }
+  const runtime = {
+    mountedAt: new Date(),
+    lastTapdPollAt: null as Date | null,
+    lastTapdError: null as string | null,
+  }
+  const services = startServices(ctx, storage, logger, liveConfig.current, runtime)
 
   // 4. Recover any in-flight stories from a previous run. We do this BEFORE
   // starting timers so StoryQueue picks them up cleanly on its first tick.
   // Fire-and-log; failure here must not block plugin mount.
-  void recoverStories(storage, logger, trajectory).catch((err) => {
+  void recoverStories(storage, logger, services.trajectory).catch((err) => {
     logger.error(`[auto-rd] recoverStories failed: ${(err as Error).message}`)
   })
 
   // 5. Start timers via Cordis effect for proper cleanup on plugin disable.
   ctx.effect(() => {
-    queue.start()
-    poller.start()
-    notifier.start()
+    services.queue.start()
+    services.poller.start()
+    services.notifier.start()
     logger.info('[auto-rd] plugin mounted — poller + queue + notifier running')
 
     return () => {
       logger.info('[auto-rd] plugin unmounting — stopping timers')
-      queue.stop()
-      poller.stop()
-      notifier.stop()
+      services.queue.stop()
+      services.poller.stop()
+      services.notifier.stop()
     }
   }, 'auto-rd:timers')
 
@@ -200,8 +229,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         autoRdTriggerTool({
           storage,
           logger,
-          pollNow: () => poller.tick(),
-          advanceStory: (storyId) => runner.runStory(storyId),
+          pollNow: () => services.poller.tick(),
+          advanceStory: (storyId) => services.runner.runStory(storyId),
         }) as ToolDefinition,
       ],
       ['auto_rd_retry', autoRdRetryTool({ storage, logger }) as ToolDefinition],
@@ -222,13 +251,114 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
 
     // Report the UI situation (see ui-panel.ts: the sidebar panel is a
     // client-side contribution) and, when a web server exists, serve the
-    // panel data so that client half has something to read.
-    registerAutoRdPanel(ctx, { storage, logger })
-    registerPanelRoute(ctx, { storage, logger })
+    // panel data so that client half has something to read. We split the
+    // two so the panel route can wait for the optional `webServer` host
+    // service without ever blocking plugin mount in headless deployments.
+    // We pass the LIVE config (mutable reference) so when the user
+    // re-runs setup via /auto-rd/reconfigure, the next panel fetch
+    // reflects the new state without re-binding the route.
+    registerAutoRdPanel(ctx, { storage, logger, config: liveConfig.current })
+
+    // Panel route — `webServer` is OPTIONAL (only the web profile ships
+    // it). The plugin does NOT block on it; instead we attempt the route
+    // registration now, and if the service is missing we poll every
+    // WEBSERVER_RETRY_MS until it appears (or we hit a cap). In headless
+    // profiles the service never appears, the cap is reached, and we stop
+    // logging. `auto_rd_status` keeps working either way.
+    //
+    // The retry helper's disposer aborts the polling loop and (on success)
+    // unregisters the route, so we hand it to `ctx.effect` for fiber-lifetime
+    // cleanup.
+    const WEBSERVER_RETRY_MS = 1000
+    const WEBSERVER_RETRY_CAP = 10
+    ctx.effect(() => {
+      const disposeRoute = registerPanelRouteWithRetry(ctx, {
+        storage,
+        logger,
+        getConfig: () => liveConfig.current,
+        runtime,
+        retryMs: WEBSERVER_RETRY_MS,
+        maxAttempts: WEBSERVER_RETRY_CAP,
+      })
+      return () => {
+        disposeRoute()
+      }
+    }, 'auto-rd:web-server-route')
+
+    // Reconfigure route — POST /auto-rd/reconfigure with a JSON
+    // { config: { ... } } body. The handler validates + swaps the live
+    // config, rebuilds the timer-driven services, re-seeds modules, and
+    // returns the new health snapshot so the client can update in one
+    // round-trip. Also served under the optional webServer (same pattern
+    // as the panel route).
+    ctx.effect(() => {
+      const dispose = registerReconfigureRoute(ctx, {
+        storage,
+        logger,
+        liveConfig,
+        runtime,
+        startServices: (cfg) => startServices(ctx, storage, logger, cfg, runtime),
+        stopServices: (svcs) => {
+          svcs.queue.stop()
+          svcs.poller.stop()
+          svcs.notifier.stop()
+        },
+        currentServices: services,
+      })
+      return () => {
+        if (dispose) dispose()
+      }
+    }, 'auto-rd:reconfigure-route')
 
     return () => {
       // Cordis tears down tool / prompt registrations when the parent
       // ctx disposes; explicit cleanup is unnecessary here.
     }
   }, 'auto-rd:ui')
+}
+
+/**
+ * Build a fresh batch of runtime services against a given config.
+ *
+ * Used twice:
+ *  1. Initial mount in `apply()` — wired up to the first `services`
+ *     ref captured by the timers effect.
+ *  2. Every reconfigure — the new batch replaces `currentServices` on
+ *     `ReconfigureRouteDeps`, and the new timers (started by the route
+ *     handler) use the new poller/queue/notifier references.
+ *
+ * The poller is bound to `runtime` via `onTickEnd`, so the panel route
+ * keeps showing fresh stats across reconfigures.
+ */
+function startServices(
+  ctx: Context,
+  storage: AutoRdStorage,
+  logger: Logger,
+  config: Config,
+  runtime: { lastTapdPollAt: Date | null; lastTapdError: string | null },
+): {
+  trajectory: TrajectoryRecorder
+  workspaceManager: WorkspaceManager
+  agentProvider: AgentProvider
+  runner: StoryRunner
+  queue: StoryQueue
+  poller: TapdPoller
+  notifier: StoryNotifierService
+} {
+  const trajectory = new TrajectoryRecorder(ctx, { storage, logger })
+  const workspaceManager = new WorkspaceManager(ctx, { storage, logger, config })
+  const agentProvider = new AgentProvider(ctx, { logger, config, trajectory })
+  const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider, trajectory })
+  const queue = new StoryQueue(ctx, { storage, logger, config, runner })
+  const poller = new TapdPoller(ctx, {
+    storage,
+    logger,
+    config,
+    onTickEnd: ({ at, error }) => {
+      runtime.lastTapdPollAt = at
+      runtime.lastTapdError = error ? error.message : null
+    },
+  })
+  const notifier = new StoryNotifierService(ctx, { storage, logger })
+  return { trajectory, workspaceManager, agentProvider, runner, queue, poller, notifier }
 }
