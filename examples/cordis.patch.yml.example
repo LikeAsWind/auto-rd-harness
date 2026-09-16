@@ -1,22 +1,33 @@
-# Example ~/.dsh/profiles/web/cordis.patch.yml additions for auto-rd
+# Legacy example — superseded by `npm run install:dsh`.
 #
-# Copy this section into your cordis.patch.yml and fill in real values.
+# As of M5 the install script writes this block to your profile's
+# `cordis.patch.yml` automatically. You only need to edit it after
+# install: replace the placeholder tokens and the empty `modules: []`
+# with your real workspace list, then restart DSH.
+#
+# This file is kept for reference (so you can see the exact shape of
+# the loader entry) and for tooling that needs a standalone fixture.
 
 - id: auto-rd
   name: '@yangzhitong/dsh-auto-rd'
   config:
-    # TAPD API token. Get from TAPD account settings.
+    # TAPD integration
     tapdBaseUrl: 'https://api.tapd.cn'
-    tapdApiToken: '<your-tapd-api-token-here>'
+    tapdApiToken: ''    # set via DSH_TAPD_API_TOKEN env var, not here
+    tapdPollIntervalMs: 60000
+    tapdWorkspaceIds: []
+    useTapdMock: false
 
-    # GitLab API token. Needs api scope + read_repository + write_repository.
-    gitlabBaseUrl: 'https://gitlab.example.com'
-    gitlabApiToken: '<your-gitlab-api-token-here>'
+    # GitLab integration
+    gitlabBaseUrl: 'https://gitlab.com'
+    gitlabApiToken: ''  # set via DSH_GITLAB_API_TOKEN env var, not here
+    gitlabPushUserName: 'auto-rd'
+    gitlabPushUserEmail: 'auto-rd@example.com'
 
-    # Where to put module clones and story worktrees.
+    # Workspace
     workspaceRoot: 'C:/work'
 
-    # Static module-to-repo mapping.
+    # Module-to-repo mapping — fill in your real modules here.
     modules:
       - id: payment
         title: 'Payment Service'
@@ -27,6 +38,23 @@
         repoUrl: 'https://gitlab.example.com/order/order-service.git'
         defaultBranch: 'main'
 
-    # Concurrency limits.
+    # Concurrency limits
     maxConcurrentStoriesPerModule: 1
     maxTotalConcurrentStories: 4
+
+    # Model selection per role
+    modelSelection:
+      brainstorm: 'sonnet'
+      critic: 'sonnet'
+      decision: 'sonnet'
+      spec: 'sonnet'
+      planner: 'sonnet'
+      implementation: 'haiku'
+      test: 'sonnet'
+      fix: 'sonnet'
+      verification: 'sonnet'
+      review: 'sonnet'
+      finalVerify: 'opus'
+
+    # Logging
+    logLevel: 'info'
