@@ -33,15 +33,40 @@ This plugin is **not** a dynamic Cordis plugin. It is a **deployment-level plugi
 ```
 auto-rd-harness/
 ├── packages/
-│   └── dsh-auto-rd/              # The actual Cordis plugin (TypeScript)
+│   └── dsh-auto-rd/              # The actual Cordis plugin (TypeScript + one client bundle)
+│       └── src/client/client.js  #   the browser half (sidebar panel + main panel)
 ├── docs/
 │   └── architecture/             # Design docs
 ├── examples/                     # cordis.patch.yml snippets
+├── scripts/                      # Test suites and the pattern audit
 ├── .github/workflows/            # CI
 ├── README.md
 ├── LICENSE (MIT)
 └── NOTICE                        # Acknowledgements
 ```
+
+## Testing
+
+```bash
+npm run build          # tsc + copy the personas and the client bundle
+npm run lint           # tsc --noEmit
+npm run test:all       # every suite, with a summary table
+```
+
+`test:all` runs 20 suites / 903 assertions: the pipeline state machine and
+tools, the real subprocess test runner, the real git diff reader and
+committer, the project probe, the plan/spec/clarify/design generators, the
+storage adapter against the verified `KvTable` contract, the DSH host
+contracts, a full `apply()` mount against a faithful fake host, the panel
+HTTP route, the client bundle, and a bidirectional audit of the Agent
+pattern mapping. Individual suites are exposed as `test:m5`, `test:probe`,
+`test:mount`, and so on.
+
+Four things need a real environment and are listed with concrete
+verification steps in
+[`packages/dsh-auto-rd/README.md`](./packages/dsh-auto-rd/README.md#verifying-a-deployment):
+a live mount inside DSH, the panel route over HTTP, the client panel in a
+browser, and the TAPD/GitLab round trips.
 
 ## Installation
 
