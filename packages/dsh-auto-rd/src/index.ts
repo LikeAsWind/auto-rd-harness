@@ -33,6 +33,13 @@ import { AgentProvider } from './services/agent-provider.js'
 import { StoryRunner } from './services/story-runner.js'
 import { StoryQueue } from './services/story-queue.js'
 import { recoverStories } from './services/recover.js'
+import { StoryNotifierService } from './services/story-notifier.js'
+import { registerAutoRdPanel } from './services/ui-panel.js'
+import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
+import { autoRdStatusTool } from './tools/auto-rd-status.js'
+import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
+import { autoRdRetryTool } from './tools/auto-rd-retry.js'
+import type { ToolsService } from './types/dsh-services.js'
 import { Logger } from './utils/logger.js'
 
 /**
@@ -53,6 +60,9 @@ export const inject = [
   'agents',
   'sessionPersistence',
   'tools',
+  'slots',
+  'systemPrompt',
+  'sessions',
 ] as const
 
 /**
@@ -75,10 +85,11 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   const logger = new Logger(ctx, config.logLevel)
 
   logger.info('='.repeat(60))
-  logger.info('M1 plugin starting up')
+  logger.info('auto-rd plugin starting up')
   logger.info(`  modules: ${config.modules.map((m) => m.id).join(', ') || '(none configured)'}`)
   logger.info(`  workspaceRoot: ${config.workspaceRoot}`)
   logger.info(`  pollIntervalMs: ${config.tapdPollIntervalMs}`)
+  logger.info(`  useTapdMock: ${config.useTapdMock}`)
   logger.info('='.repeat(60))
 
   if (!config.tapdApiToken) {
@@ -109,6 +120,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider })
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })
   const poller = new TapdPoller(ctx, { storage, logger, config })
+  const notifier = new StoryNotifierService(ctx, { storage, logger })
 
   // 4. Recover any in-flight stories from a previous run. We do this BEFORE
   // starting timers so StoryQueue picks them up cleanly on its first tick.
@@ -121,12 +133,49 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   ctx.effect(() => {
     queue.start()
     poller.start()
-    logger.info('[auto-rd] M1 plugin mounted — poller + queue running')
+    notifier.start()
+    logger.info('[auto-rd] plugin mounted — poller + queue + notifier running')
 
     return () => {
-      logger.info('[auto-rd] M1 plugin unmounting — stopping timers')
+      logger.info('[auto-rd] plugin unmounting — stopping timers')
       queue.stop()
       poller.stop()
+      notifier.stop()
     }
-  }, 'auto-rd:m1:timers')
+  }, 'auto-rd:timers')
+
+  // 6. Register UI surface (slots / prompt section) and tools. Each
+  // is best-effort: if the underlying DSH service is unavailable we
+  // log a warning and move on. The plugin continues to work without
+  // a sidebar; the headless tools / status surface are independent.
+  ctx.effect(() => {
+    const tools = ctx.get('tools') as ToolsService | undefined
+    if (tools) {
+      tools.register(
+        autoRdStatusTool({ storage, logger }) as unknown as Parameters<ToolsService['register']>[0],
+      )
+      tools.register(
+        autoRdTriggerTool({
+          storage,
+          logger,
+          pollNow: () => poller.tick(),
+          advanceStory: (storyId) => runner.runStory(storyId),
+        }) as unknown as Parameters<ToolsService['register']>[0],
+      )
+      tools.register(
+        autoRdRetryTool({ storage, logger }) as unknown as Parameters<ToolsService['register']>[0],
+      )
+      logger.info('[auto-rd] registered tools: auto_rd_status / auto_rd_trigger / auto_rd_retry')
+    } else {
+      logger.warn('[auto-rd] tools service unavailable — model will not see auto-rd tools')
+    }
+
+    registerAutoRdPromptSection(ctx)
+    registerAutoRdPanel(ctx, { storage, logger })
+
+    return () => {
+      // Cordis tears down slots/tools registrations when the parent
+      // ctx disposes; explicit cleanup is unnecessary here.
+    }
+  }, 'auto-rd:ui')
 }
