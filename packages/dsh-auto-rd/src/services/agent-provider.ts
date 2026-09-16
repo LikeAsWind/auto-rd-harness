@@ -46,6 +46,7 @@ import {
   buildCommitMessage,
   status as worktreeStatus,
 } from './worktree-git.js'
+import { probeProject } from './project-probe.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -388,37 +389,91 @@ async function runContextStub(
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string; description: string }
-  deps.logger.info(`ContextAgent stub running for story ${story.id}`)
+  deps.logger.info(`ContextAgent running for story ${story.id}`)
+
+  // ---- Real environment inspection ----
+  //
+  // W-1 (Detect Isolation) / W-2 (Native Tools First) / W-3 (Verify
+  // Clean Baseline) are all satisfied by an actual probe of the
+  // worktree rather than a templated report.
+  const probe = probeProject(req.worktreePath)
+
+  // Baseline: run the suite as it stands BEFORE any change. This is
+  // the "clean baseline" the Context stage must establish — a story
+  // that starts from a red suite can never be verified later.
+  let baseline: import('./test-executor.js').TestRunResult | null = null
+  if (probe.testCommand) {
+    try {
+      baseline = await runWorktreeTests(req.worktreePath)
+    } catch (err) {
+      deps.logger.warn(`ContextAgent: baseline test run failed: ${(err as Error).message}`)
+    }
+  }
+
+  const baselineLine = baseline
+    ? baseline.skippedReason
+      ? `- Skipped: ${baseline.skippedReason}`
+      : `- Command: \`${baseline.command}\``
+    : '- Not run (no test command detected)'
+
+  const baselineResult = baseline
+    ? baseline.skippedReason
+      ? '- Result: not run'
+      : `- Result: ${baseline.passed ? 'GREEN' : 'RED'} — ${baseline.counts.pass ?? '?'} passed / ${baseline.counts.fail ?? '?'} failed (exit ${baseline.exitCode ?? 'n/a'}, ${baseline.durationMs}ms)`
+    : '- Result: not run'
+
+  const langLines = Object.entries(probe.languageBreakdown)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([ext, count]) => `| \`${ext}\` | ${count} |`)
 
   const report = [
     `# Context Report — ${story.title}`,
     ``,
     `## Environment Verification`,
-    `- Worktree: \`${req.worktreePath}\``,
-    `- Branch: \`auto-rd/${story.id}\``,
+    `- Worktree: \`${probe.worktreePath}\``,
+    `- Is git repo: ${probe.isGitRepo}`,
+    `- Branch: \`${probe.branch ?? '<detached>'}\``,
+    `- HEAD: \`${probe.headSha ?? '<none>'}\``,
     ``,
     `## Project Setup`,
-    `- Command run: <detected install command>`,
-    `- Result: success (stub — real detection lands when the SubAgent is model-backed)`,
+    `- Package manager: ${probe.packageManager ?? '_not detected_'}`,
+    `- Install command: ${probe.installCommand ? `\`${probe.installCommand}\`` : '_n/a_'}`,
+    `- Test command: ${probe.testCommand ? `\`${probe.testCommand}\`` : '_n/a_'}`,
+    `- Build command: ${probe.buildCommand ? `\`${probe.buildCommand}\`` : '_n/a_'}`,
+    `- Manifests: ${probe.manifests.length > 0 ? probe.manifests.map((m) => `\`${m}\``).join(', ') : '_none_'}`,
     ``,
     `## Baseline Tests`,
-    `- Command: <detected test command>`,
-    `- Result: N/N passing (stub)`,
+    baselineLine,
+    baselineResult,
     ``,
     `## Codebase Map`,
-    `- (stub: real exploration happens once the SubAgent provider is wired up)`,
+    `- Files walked: ${probe.fileCount}${probe.walkTruncated ? ' (walk truncated at cap)' : ''}`,
+    `- Top-level directories: ${probe.topLevelDirs.length > 0 ? probe.topLevelDirs.map((d) => `\`${d}/\``).join(', ') : '_none_'}`,
+    `- Top-level files: ${probe.topLevelFiles.length > 0 ? probe.topLevelFiles.map((f) => `\`${f}\``).join(', ') : '_none_'}`,
+    ``,
+    `### Language Breakdown`,
+    `| Extension | Files |`,
+    `|-----------|-------|`,
+    langLines.length > 0 ? langLines.join('\n') : `| _none counted_ | 0 |`,
     ``,
     `## Handoff`,
-    `Stub. Next stage is \`clarification\`.`,
+    baseline && !baseline.skippedReason && !baseline.passed
+      ? `Baseline is RED. Next stage is \`clarification\` — downstream stages should expect a pre-existing failure.`
+      : `Baseline is clean. Next stage is \`clarification\`.`,
     ``,
     `[CONTEXT_COMPLETE]`,
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, '01-context.md'), report, 'utf-8')
 
   return {
     status: 'success',
-    summary: 'Stub Context report.',
+    summary:
+      `Context: ${probe.fileCount} files, pm=${probe.packageManager ?? 'unknown'}, ` +
+      `baseline=${baseline ? (baseline.skippedReason ? 'skipped' : baseline.passed ? 'GREEN' : 'RED') : 'n/a'}`,
   }
 }
 

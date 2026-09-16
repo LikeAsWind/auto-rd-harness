@@ -18,6 +18,7 @@
     "test:executor": "node scripts/test-test-executor.mjs",
     "test:diff": "node scripts/test-git-diff-reader.mjs",
     "test:wtgit": "node scripts/test-worktree-git.mjs",
+    "test:probe": "node scripts/test-project-probe.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },
