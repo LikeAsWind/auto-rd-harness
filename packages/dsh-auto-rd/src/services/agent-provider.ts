@@ -41,6 +41,11 @@ import type { AgentSpec } from '../agents/base.js'
 import type { TrajectoryRecorder } from './trajectory.js'
 import { runWorktreeTests } from './test-executor.js'
 import { readWorktreeDiff, type DiffResult } from './git-diff-reader.js'
+import {
+  commitWorktreeChanges,
+  buildCommitMessage,
+  status as worktreeStatus,
+} from './worktree-git.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -699,41 +704,117 @@ async function runImplementationStub(
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string }
-  const task = req.inputs.task as { taskId: string; title?: string; files?: string[] } | undefined
+  const task = req.inputs.task as
+    | {
+        taskId: string
+        title?: string
+        files?: string[]
+        red?: { file: string; testName: string; assertion: string }
+        green?: { file: string; change: string }
+        commit?: { type?: string; scope?: string; subject?: string }
+      }
+    | undefined
   const taskId = req.taskId ?? task?.taskId ?? 'T001'
-  deps.logger.info(`ImplementationAgent stub running for story ${story.id} task=${taskId}`)
+  deps.logger.info(`ImplementationAgent running for story ${story.id} task=${taskId}`)
+
+  // ---- Real worktree operations ----
+  //
+  // The model layer (when attached) writes the file contents between
+  // the RED and GREEN steps. Everything below is the deterministic
+  // half: verify the pre-change test state, commit whatever landed in
+  // the worktree, and report the real sha. Without this the branch
+  // never advanced and the ReviewAgent's diff was always empty.
+  const statusBefore = await worktreeStatus(req.worktreePath)
+
+  // VERIFY: run the suite to capture the current verdict (this is the
+  // GREEN evidence when a model already wrote the change; it is the
+  // RED evidence when the model wrote only the test).
+  let testRun: import('./test-executor.js').TestRunResult | null = null
+  try {
+    testRun = await runWorktreeTests(req.worktreePath)
+  } catch (err) {
+    deps.logger.warn(`ImplementationAgent: test run failed for ${taskId}: ${(err as Error).message}`)
+  }
+
+  // COMMIT: real commit of whatever the worktree now contains.
+  const commitMessage = buildCommitMessage(task?.commit, `implement ${taskId}`)
+  let commitResult: import('./worktree-git.js').CommitResult | null = null
+  try {
+    commitResult = await commitWorktreeChanges({
+      worktreePath: req.worktreePath,
+      message: commitMessage,
+      userName: deps.config.gitlabPushUserName,
+      userEmail: deps.config.gitlabPushUserEmail,
+    })
+  } catch (err) {
+    deps.logger.warn(`ImplementationAgent: commit failed for ${taskId}: ${(err as Error).message}`)
+  }
+
+  const commitSha = commitResult?.sha ?? null
+  const committed = commitResult?.committed === true
+  const changedFiles = [
+    ...statusBefore.modified,
+    ...statusBefore.untracked,
+  ]
 
   const report = [
     `# Implementation — ${taskId} — ${task?.title ?? story.title}`,
     ``,
     `**Task**: ${taskId}`,
-    `**Status**: PASS`,
+    `**Status**: ${committed ? 'COMMITTED' : 'NO_CHANGE'}`,
     ``,
     `## RED`,
-    `- Test file: ${task?.files?.[0] ?? '<test path>'}`,
-    `- Run output (failure): stub — RED not run`,
+    `- Test file: ${task?.red?.file ?? task?.files?.[0] ?? '<not specified by planner>'}`,
+    task?.red ? `- Test name: \`${task.red.testName}\`` : null,
+    task?.red ? `- Assertion: ${task.red.assertion}` : null,
+    `- Code written by: ${this_is_stub()}`,
     ``,
     `## GREEN`,
-    `- Source file: ${task?.files?.[1] ?? '<src path>'}`,
-    `- Change summary: stub minimal implementation`,
+    `- Source file: ${task?.green?.file ?? task?.files?.[1] ?? '<not specified by planner>'}`,
+    task?.green ? `- Change: ${task.green.change}` : null,
     ``,
     `## VERIFY`,
-    `- Run: <test command>`,
-    `- Output (final): PASS — 0/0 (stub)`,
+    testRun?.skippedReason
+      ? `- Skipped: ${testRun.skippedReason}`
+      : testRun
+        ? `- Run: \`${testRun.command}\` → ${testRun.passed ? 'PASS' : 'FAIL'} (exit ${testRun.exitCode ?? 'n/a'}, ${testRun.durationMs}ms)`
+        : `- Run: <not attempted>`,
     ``,
     `## COMMIT`,
-    `- Hash: <stub>`,
-    `- Files: ${(task?.files ?? []).join(', ') || '<stub>'}`,
+    `- Hash: ${commitSha ?? '<none>'}`,
+    `- Message: \`${commitMessage}\``,
+    `- Committed: ${committed}`,
+    commitResult?.reason ? `- Skipped reason: ${commitResult.reason}` : null,
+    `- Files changed: ${changedFiles.length > 0 ? changedFiles.map((f) => `\`${f}\``).join(', ') : '_none_'}`,
+    `- Branch: \`${statusBefore.branch || '<detached>'}\``,
     ``,
     `## Notes for Reviewer`,
-    `Stub. No real diff produced.`,
+    committed
+      ? `Real commit \`${commitSha}\` created on \`${statusBefore.branch}\`.`
+      : `No commit created (${commitResult?.reason ?? 'unknown'}). The worktree was already clean.`,
     ``,
     `[IMPL_TASK_COMPLETE]`,
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, `08-impl-${taskId}.md`), report, 'utf-8')
 
-  return { status: 'success', summary: `Stub Implementation report (${taskId}).` }
+  return {
+    status: 'success',
+    summary: committed
+      ? `Implementation ${taskId} committed ${commitSha?.slice(0, 7)} (${changedFiles.length} file(s)).`
+      : `Implementation ${taskId} — no worktree changes to commit.`,
+  }
+}
+
+/**
+ * Whether the file contents were authored by a deterministic stub or a
+ * model. Kept as a function so the wording lives in one place and a
+ * future model-attached path can flip it.
+ */
+function this_is_stub(): string {
+  return 'deterministic handler (no model attached)'
 }
 
 async function runTestStub(
@@ -832,40 +913,84 @@ async function runFixStub(
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string }
   const attempt = (req.inputs.fix as { attempt?: number } | undefined)?.attempt ?? 1
-  deps.logger.info(`FixAgent stub running for story ${story.id} attempt=${attempt}`)
+  const task = req.inputs.task as { taskId?: string; title?: string } | undefined
+  const taskId = req.taskId ?? task?.taskId ?? 'T001'
+  deps.logger.info(`FixAgent running for story ${story.id} attempt=${attempt} task=${taskId}`)
+
+  // ---- Real worktree operations ----
+  //
+  // The model layer (when attached) performs root-cause analysis and
+  // writes the fix. The deterministic half below runs the suite for
+  // evidence and commits whatever the fix produced — otherwise the fix
+  // would never reach the branch and the next `testing` pass would see
+  // the same failure forever.
+  const statusBefore = await worktreeStatus(req.worktreePath)
+
+  let testRun: import('./test-executor.js').TestRunResult | null = null
+  try {
+    testRun = await runWorktreeTests(req.worktreePath)
+  } catch (err) {
+    deps.logger.warn(`FixAgent: test run failed for ${taskId}: ${(err as Error).message}`)
+  }
+
+  const commitMessage = buildCommitMessage(
+    { type: 'fix', scope: taskId },
+    `address failure on attempt ${attempt}`,
+  )
+  let commitResult: import('./worktree-git.js').CommitResult | null = null
+  try {
+    commitResult = await commitWorktreeChanges({
+      worktreePath: req.worktreePath,
+      message: commitMessage,
+      userName: deps.config.gitlabPushUserName,
+      userEmail: deps.config.gitlabPushUserEmail,
+    })
+  } catch (err) {
+    deps.logger.warn(`FixAgent: commit failed for ${taskId}: ${(err as Error).message}`)
+  }
+
+  const commitSha = commitResult?.sha ?? null
+  const committed = commitResult?.committed === true
+  const changedFiles = [...statusBefore.modified, ...statusBefore.untracked]
 
   const report = [
-    `# Fix Report — F<stub> — attempt ${attempt}`,
+    `# Fix Report — ${taskId} — attempt ${attempt}`,
     ``,
     `**Attempt**: ${attempt}`,
-    `**Status**: PASS`,
+    `**Task**: ${taskId}`,
+    `**Status**: ${committed ? 'COMMITTED' : 'NO_CHANGE'}`,
     ``,
     `## Phase 1 — Root Cause`,
-    `- Failure message: <stub>`,
-    `- Failing line: \`<path>:<line>\``,
-    `- Root cause: stub`,
+    `- Analysis author: ${this_is_stub()}`,
+    `- Failing evidence: ${testRun && !testRun.skippedReason ? `\`${testRun.command}\` → ${testRun.passed ? 'PASS' : 'FAIL'}` : '<no test run>'}`,
     ``,
     `## Phase 2 — Pattern`,
-    `- Pattern: stub`,
+    `- Diagnosis recorded by the fix layer (deterministic handler in this environment).`,
     ``,
     `## Phase 3 — Hypothesis`,
-    `- "If I change ... then ..."`,
+    `- See the fix layer's own report; the handler does not synthesise one.`,
     ``,
     `## Phase 4 — Implementation`,
-    `- File changed: \`<path>\``,
-    `- Diff: stub`,
-    `- Originally failing test: PASS`,
-    `- Full suite: 0/0 green`,
+    `- Files changed: ${changedFiles.length > 0 ? changedFiles.map((f) => `\`${f}\``).join(', ') : '_none_'}`,
+    `- Commit: ${commitSha ?? '<none>'} (${committed ? 'created' : commitResult?.reason ?? 'skipped'})`,
+    `- Originally failing test: ${testRun && !testRun.skippedReason ? (testRun.passed ? 'PASS (fixed)' : 'still FAILING') : 'not run'}`,
     ``,
     `## Notes for Reviewer`,
-    `Stub. No real fix.`,
+    committed
+      ? `Real fix commit \`${commitSha}\` created on \`${statusBefore.branch}\`.`
+      : `No commit created (${commitResult?.reason ?? 'unknown'}).`,
     ``,
     `[FIX_COMPLETE]`,
   ].join('\n')
 
-  writeFileSync(join(req.artifactsDir, '10-fix-report.md'), report, 'utf-8')
+  writeFileSync(join(req.artifactsDir, `10-fix-report-attempt-${attempt}.md`), report, 'utf-8')
 
-  return { status: 'success', summary: `Stub Fix report (attempt ${attempt}).` }
+  return {
+    status: 'success',
+    summary: committed
+      ? `Fix attempt ${attempt} committed ${commitSha?.slice(0, 7)} (${changedFiles.length} file(s)).`
+      : `Fix attempt ${attempt} — no worktree changes to commit.`,
+  }
 }
 
 async function runVerificationStub(

@@ -18,12 +18,39 @@
 import { pathToFileURL } from 'node:url'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 function mkTmpDir() {
   return mkdtempSync(join(tmpdir(), 'auto-rd-m5-'))
+}
+
+/** Run a git command in `cwd` and return its stdout. */
+function git(cwd, args) {
+  return execFileSync('git', args, { cwd, encoding: 'utf-8' })
+}
+
+/**
+ * Minimal Config object for AgentProvider tests. AgentProvider only
+ * reads `config.gitlabPushUserName` / `gitlabPushUserEmail` from it.
+ */
+function defaultConfig() {
+  return {
+    tapdApiToken: '', tapdBaseUrl: 'http://x', tapdPollIntervalMs: 60000,
+    tapdWorkspaceIds: [], useTapdMock: true,
+    gitlabApiToken: '', gitlabBaseUrl: 'http://x',
+    gitlabPushUserName: 'auto-rd', gitlabPushUserEmail: 'auto-rd@example.com',
+    workspaceRoot: '/tmp', modules: [],
+    maxConcurrentStoriesPerModule: 1, maxTotalConcurrentStories: 1,
+    modelSelection: {
+      brainstorm: 'x', critic: 'x', decision: 'x', spec: 'x', planner: 'x',
+      implementation: 'x', test: 'x', fix: 'x', verification: 'x', review: 'x',
+      finalVerify: 'x',
+    },
+    logLevel: 'info',
+  }
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -779,6 +806,137 @@ function makeConsoleSpy() {
   )
 }
 
+// 26. ImplementationAgent handler — really commits to the worktree.
+//     This is the end-to-end proof for the design requirement
+//     "Implementation 应真实修改 Story worktree": a dirty worktree
+//     must produce a real commit with a real sha, and a clean one
+//     must report no-change rather than a fake hash.
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { AgentProvider } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'agent-provider.js')).href
+  )
+  const config = defaultConfig()
+  const provider = new AgentProvider({}, { logger, config })
+
+  // Real git repo to act as the story worktree.
+  const repo = mkTmpDir()
+  git(repo, ['init', '--quiet', '--initial-branch', 'main'])
+  git(repo, ['config', 'user.email', 'test@example.com'])
+  git(repo, ['config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'README.md'), '# base\n', 'utf-8')
+  git(repo, ['add', '.'])
+  git(repo, ['commit', '--quiet', '-m', 'base'])
+  const shaBefore = git(repo, ['rev-parse', 'HEAD']).trim()
+
+  // Simulate the model having written the implementation.
+  writeFileSync(join(repo, 'feature.ts'), 'export const implemented = true\n', 'utf-8')
+
+  const artifactsDir = mkTmpDir()
+  const result = await provider.dispatch({
+    agentName: 'implementation',
+    label: 'Implementation T001',
+    worktreePath: repo,
+    artifactsDir,
+    inputs: {
+      story: { id: 'IMPL-1', title: 'Add feature', description: 'd' },
+      task: {
+        taskId: 'T001',
+        title: 'Add feature',
+        files: ['feature.ts'],
+        commit: { type: 'feat', scope: 'core', subject: 'add implemented flag' },
+      },
+    },
+    taskId: 'T001',
+  })
+  check('impl dispatch succeeds', result.status === 'success', JSON.stringify(result))
+
+  const shaAfter = git(repo, ['rev-parse', 'HEAD']).trim()
+  check('impl created a REAL commit (sha advanced)', shaAfter !== shaBefore, `${shaBefore} -> ${shaAfter}`)
+  check(
+    'impl commit message uses the planner commit payload',
+    git(repo, ['log', '-1', '--pretty=%s']).trim() === 'feat(core): add implemented flag',
+    git(repo, ['log', '-1', '--pretty=%s']).trim(),
+  )
+  check(
+    'impl commit contains feature.ts',
+    git(repo, ['show', '--name-only', '--pretty=format:', 'HEAD']).includes('feature.ts'),
+  )
+  check(
+    'impl worktree is clean after the commit',
+    git(repo, ['status', '--porcelain']).trim() === '',
+    git(repo, ['status', '--porcelain']),
+  )
+  check(
+    'impl report records the real sha',
+    readFileSync(join(artifactsDir, '08-impl-T001.md'), 'utf-8').includes(shaAfter),
+  )
+
+  // Second dispatch on the now-clean worktree must NOT fabricate a commit.
+  const result2 = await provider.dispatch({
+    agentName: 'implementation',
+    label: 'Implementation T001 (replay)',
+    worktreePath: repo,
+    artifactsDir,
+    inputs: { story: { id: 'IMPL-1', title: 'Add feature', description: 'd' } },
+    taskId: 'T001',
+  })
+  check('impl replay still succeeds', result2.status === 'success', JSON.stringify(result2))
+  check(
+    'impl replay kept the same sha (no empty commit)',
+    git(repo, ['rev-parse', 'HEAD']).trim() === shaAfter,
+  )
+}
+
+// 27. FixAgent handler — really commits its fix.
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { AgentProvider } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'agent-provider.js')).href
+  )
+  const provider = new AgentProvider({}, { logger, config: defaultConfig() })
+
+  const repo = mkTmpDir()
+  git(repo, ['init', '--quiet', '--initial-branch', 'main'])
+  git(repo, ['config', 'user.email', 'test@example.com'])
+  git(repo, ['config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'bug.ts'), 'export const broken = true\n', 'utf-8')
+  git(repo, ['add', '.'])
+  git(repo, ['commit', '--quiet', '-m', 'base'])
+  const shaBefore = git(repo, ['rev-parse', 'HEAD']).trim()
+
+  writeFileSync(join(repo, 'bug.ts'), 'export const broken = false\n', 'utf-8')
+
+  const artifactsDir = mkTmpDir()
+  const result = await provider.dispatch({
+    agentName: 'fix',
+    label: 'Fix attempt 1',
+    worktreePath: repo,
+    artifactsDir,
+    inputs: {
+      story: { id: 'FIX-1', title: 'Fix bug', description: 'd' },
+      task: { taskId: 'T001' },
+      fix: { attempt: 1 },
+    },
+    taskId: 'T001',
+  })
+  check('fix dispatch succeeds', result.status === 'success', JSON.stringify(result))
+  check(
+    'fix created a REAL commit',
+    git(repo, ['rev-parse', 'HEAD']).trim() !== shaBefore,
+  )
+  check(
+    'fix commit message is conventional fix',
+    git(repo, ['log', '-1', '--pretty=%s']).trim() === 'fix(T001): address failure on attempt 1',
+    git(repo, ['log', '-1', '--pretty=%s']).trim(),
+  )
+  check(
+    'fix wrote an attempt-scoped artifact',
+    existsSync(join(artifactsDir, '10-fix-report-attempt-1.md')),
+  )
+}
 // 25. AgentProvider.dispatch — appends agent_dispatch + agent_result to
 //     trajectory. This is the end-to-end proof that the StoryRunner's
 //     "every agent call is logged" property holds for one specific call.
@@ -796,19 +954,8 @@ function makeConsoleSpy() {
   )
   const trajectory = new TrajectoryRecorder(null, { storage, logger })
 
-  // DefaultConfig — AgentProvider only requires `logger` and `config`.
-  const config = {
-    tapdApiToken: '', tapdBaseUrl: 'http://x', tapdPollIntervalMs: 60000,
-    tapdWorkspaceIds: [], useTapdMock: true,
-    gitlabApiToken: '', gitlabBaseUrl: 'http://x',
-    gitlabPushUserName: 'a', gitlabPushUserEmail: 'a@b',
-    workspaceRoot: '/tmp', modules: [],
-    maxConcurrentStoriesPerModule: 1, maxTotalConcurrentStories: 1,
-    modelSelection: { brainstorm: 'x', critic: 'x', decision: 'x', spec: 'x',
-      planner: 'x', implementation: 'x', test: 'x', fix: 'x', verification: 'x',
-      review: 'x', finalVerify: 'x' },
-    logLevel: 'info',
-  }
+  // AgentProvider only requires `logger` and `config`.
+  const config = defaultConfig()
 
   // Build AgentProvider with a no-op ctx (subagents=null so stub path runs).
   const provider = new AgentProvider({}, { logger, config, trajectory })
