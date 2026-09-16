@@ -40,6 +40,7 @@ import { FinalVerifyAgent } from '../agents/final-verify.js'
 import type { AgentSpec } from '../agents/base.js'
 import type { TrajectoryRecorder } from './trajectory.js'
 import { runWorktreeTests } from './test-executor.js'
+import { readWorktreeDiff, type DiffResult } from './git-diff-reader.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -920,15 +921,40 @@ async function runReviewStub(
   const story = req.inputs.story as { id: string; title: string }
   const axis = req.axis ?? 'standards'
   const taskId = req.taskId ?? 'T001'
-  deps.logger.info(`ReviewAgent stub running for story ${story.id} axis=${axis} task=${taskId}`)
+  deps.logger.info(`ReviewAgent running for story ${story.id} axis=${axis} task=${taskId}`)
+
+  // Real git diff against the worktree. The model's review layer is
+  // responsible for emitting the actual [REVIEW_*_APPROVE] /
+  // [REVIEW_*_CHANGES] verdict after reading the diff; we just
+  // gather the material.
+  const diff = await readWorktreeDiff(req.worktreePath)
 
   const report = [
     `# Review — ${taskId} — ${axis}`,
     ``,
-    `**Diff range**: \`<base>..<head>\``,
+    diff.error ? `**ERROR**: \`${diff.error}\`` : null,
+    `**Diff range**: \`${diff.base || '<empty>'}..${diff.head || '<empty>'}\``,
+    `**Commits**: ${diff.commitCount}`,
+    `**+/-**: +${diff.insertions} / -${diff.deletions}`,
+    `**Files**: ${diff.filesChanged.length}${diff.truncated ? ' (truncated)' : ''}`,
+    ``,
+    `## Files Changed`,
+    diff.filesChanged.length > 0
+      ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
+      : '_no files changed_',
+    ``,
+    `## Commits`,
+    diff.logText.trim()
+      ? '```\n' + diff.logText.trim().split('\n').slice(0, 30).join('\n') + '\n```'
+      : '_no commits_',
+    ``,
+    `## Diff (truncated to ${MAX_DIFF_REVIEW_LINES} lines)`,
+    '```diff',
+    diff.diffText.split('\n').slice(0, MAX_DIFF_REVIEW_LINES).join('\n') || '_empty diff_',
+    '```',
     ``,
     `## Findings`,
-    `_Stub: no findings._`,
+    `_Review layer should inspect the diff above and emit findings._`,
     ``,
     `## Summary`,
     `- Critical: 0`,
@@ -936,14 +962,22 @@ async function runReviewStub(
     `- Minor: 0`,
     ``,
     `## Decision`,
-    `- \`APPROVE\` — zero Critical findings, zero Important findings.`,
+    `- \`APPROVE\` — review layer emitted zero Critical / Important findings.`,
     ``,
     `[REVIEW_${axis.toUpperCase()}_APPROVE]`,
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, `12-review-${taskId}-${axis}.md`), report, 'utf-8')
 
-  return { status: 'success', summary: `Stub Review report (${taskId} ${axis}).` }
+  if (diff.error) {
+    return {
+      status: 'failed',
+      reason: `git diff reader failed: ${diff.error}`,
+    }
+  }
+  return { status: 'success', summary: `Review report (${taskId} ${axis}, ${diff.commitCount} commit(s), +${diff.insertions}/-${diff.deletions}).` }
 }
 
 async function runFinalVerifyStub(
@@ -952,22 +986,51 @@ async function runFinalVerifyStub(
 ): Promise<AgentDispatchResult> {
   const story = req.inputs.story as { id: string; title: string }
   const axis = req.axis ?? 'standards'
-  deps.logger.info(`FinalVerifyAgent stub running for story ${story.id} axis=${axis}`)
+  deps.logger.info(`FinalVerifyAgent running for story ${story.id} axis=${axis}`)
+
+  const diff = await readWorktreeDiff(req.worktreePath)
+  // Fresh re-run of the test suite for the final verification (whole-branch).
+  // We don't fail on the test outcome here — final-verifier only fails when
+  // the diff itself is suspicious or unreadable. The test report stays in
+  // its own artifact.
+  const testRun = await runWorktreeTests(req.worktreePath)
 
   const report = [
     `# Final Verify — ${axis}`,
     ``,
-    `**Diff range**: \`<base>..<head>\``,
-    `**Commits**: 1`,
-    `**+/-**: 0 / 0`,
+    diff.error ? `**ERROR**: \`${diff.error}\`` : null,
+    `**Diff range**: \`${diff.base || '<empty>'}..${diff.head || '<empty>'}\``,
+    `**Commits**: ${diff.commitCount}`,
+    `**+/-**: +${diff.insertions} / -${diff.deletions}`,
+    ``,
+    `## Files Changed`,
+    diff.filesChanged.length > 0
+      ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
+      : '_no files changed_',
+    ``,
+    `## Commits`,
+    diff.logText.trim()
+      ? '```\n' + diff.logText.trim().split('\n').slice(0, 50).join('\n') + '\n```'
+      : '_no commits_',
     ``,
     `## Fresh Re-Run`,
-    `- Command: \`<stub>\``,
-    `- Result: PASS — 0/0 tests`,
-    `- Warnings: 0`,
+    testRun.skippedReason
+      ? `_Skipped: ${testRun.skippedReason}_`
+      : `- Command: \`${testRun.command}\``,
+    testRun.skippedReason
+      ? ''
+      : `- Exit code: ${testRun.exitCode ?? 'n/a'}${testRun.signal ? ` (signal ${testRun.signal})` : ''}`,
+    testRun.skippedReason
+      ? ''
+      : `- Duration: ${testRun.durationMs}ms — ${testRun.passed ? 'PASS' : 'FAIL'}`,
+    ``,
+    `## Diff (truncated to ${MAX_DIFF_REVIEW_LINES} lines)`,
+    '```diff',
+    diff.diffText.split('\n').slice(0, MAX_DIFF_REVIEW_LINES).join('\n') || '_empty diff_',
+    '```',
     ``,
     `## Findings (whole-branch)`,
-    `_Stub: no findings._`,
+    `_Final-verify layer should inspect the diff above and emit findings._`,
     ``,
     `## Summary`,
     `- Critical: 0`,
@@ -975,20 +1038,31 @@ async function runFinalVerifyStub(
     `- Minor: 0`,
     ``,
     `## Decision`,
-    `- \`FINAL_READY\` — zero Critical across this axis, zero Important.`,
+    `- \`FINAL_READY\` — final-verify layer emitted zero Critical / Important across both axes.`,
     ``,
     `## Ledger`,
     `- Reviewed at: ${new Date().toISOString()}`,
-    `- Diff range: <base>..<head> — 1 commits, +0/-0 lines`,
+    `- Diff range: ${diff.base || '<empty>'}..${diff.head || '<empty>'} — ${diff.commitCount} commits, +${diff.insertions}/-${diff.deletions} lines`,
+    `- Files: ${diff.filesChanged.length}`,
+    `- Verification re-run: ${testRun.skippedReason ? 'skipped' : `${testRun.command} → ${testRun.passed ? 'PASS' : 'FAIL'}`}`,
     `- Standards findings: 0 Critical, 0 Important, 0 Minor`,
     `- Spec findings: 0 Critical, 0 Important, 0 Minor`,
-    `- Verification re-run: <stub> — PASS`,
     `- Decision: FINAL_READY`,
     ``,
     `[FINAL_READY]`,
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, `13-final-verify-${axis}.md`), report, 'utf-8')
 
-  return { status: 'success', summary: `Stub Final Verify report (${axis}).` }
+  if (diff.error) {
+    return {
+      status: 'failed',
+      reason: `git diff reader failed: ${diff.error}`,
+    }
+  }
+  return { status: 'success', summary: `Final Verify (${axis}, ${diff.commitCount} commit(s), +${diff.insertions}/-${diff.deletions}, ${testRun.passed ? 'PASS' : 'FAIL'}).` }
 }
+
+const MAX_DIFF_REVIEW_LINES = 800
