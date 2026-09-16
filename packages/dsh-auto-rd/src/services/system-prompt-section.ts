@@ -16,13 +16,29 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SystemPromptService, PromptSection } from '../types/dsh-services.js'
+import { resolveLogChannel, type LogChannel } from '../utils/logger.js'
+
+/**
+ * A channel that never throws, so a logging call cannot break the mount.
+ * `ctx.logger` has no verified shape (it is not in the host service
+ * catalog), so we resolve it defensively.
+ */
+function channel(ctx: Context): LogChannel {
+  return (
+    resolveLogChannel(ctx, 'auto-rd') ?? {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    }
+  )
+}
 
 export function registerAutoRdPromptSection(ctx: Context): boolean {
   const systemPrompt = ctx.get('systemPrompt') as SystemPromptService | undefined
+  const log = channel(ctx)
   if (!systemPrompt) {
-    ctx.logger('auto-rd').warn(
-      'systemPrompt service not available; auto-rd prompt section will not be registered',
-    )
+    log.warn('systemPrompt service not available; auto-rd prompt section will not be registered')
     return false
   }
 
@@ -43,13 +59,11 @@ export function registerAutoRdPromptSection(ctx: Context): boolean {
   } catch (err) {
     // Registration throws on a duplicate name or a non-finite order. That
     // must not take the rest of the mount down with it.
-    ctx.logger('auto-rd').error(
-      `failed to register system-prompt section: ${(err as Error).message}`,
-    )
+    log.error(`failed to register system-prompt section: ${(err as Error).message}`)
     return false
   }
 
-  ctx.logger('auto-rd').info('Registered system-prompt section: auto-rd-overview')
+  log.info('Registered system-prompt section: auto-rd-overview')
   return true
 }
 

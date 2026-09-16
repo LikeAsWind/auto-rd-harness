@@ -229,19 +229,22 @@ export const CLIENT_PANEL_LABEL = 'Auto-RD'
  */
 export function registerAutoRdPanel(ctx: Context, deps: AutoRdPanelDeps): boolean {
   const clientSlotsAvailable = ctx.get('slots' as never) as unknown
+  // `deps.logger` is the plugin's own Logger, which already resolves the
+  // host channel defensively; use it rather than ctx.logger directly.
+  const log = deps.logger
 
   if (clientSlotsAvailable) {
     // Unexpected: a `slots` service appeared on the host. Do not guess at
     // its contract — the verified client contract has no host-side
     // renderer parameter, so registering here could corrupt the panel.
-    deps.logger.warn(
-      `[auto-rd] a host 'slots' service is present, but its contract is unverified; ` +
+    log.warn(
+      `a host 'slots' service is present, but its contract is unverified; ` +
         `the sidebar panel is intentionally NOT registered from the host. ` +
         `Expected client key: ${CLIENT_PANEL_SLOT}#${CLIENT_PANEL_ID}.`,
     )
   } else {
-    deps.logger.info(
-      `[auto-rd] sidebar panel is a client-side contribution (${CLIENT_PANEL_SLOT}#${CLIENT_PANEL_ID}); ` +
+    log.info(
+      `sidebar panel is a client-side contribution (${CLIENT_PANEL_SLOT}#${CLIENT_PANEL_ID}); ` +
         `the host renders the same data through the auto_rd_status tool instead`,
     )
   }
@@ -249,7 +252,7 @@ export function registerAutoRdPanel(ctx: Context, deps: AutoRdPanelDeps): boolea
   // The host-side surface that always works.
   const model = buildPanelModel(deps.storage)
   const text = renderPanelText(model)
-  deps.logger.debug(`[auto-rd] panel snapshot:\n${text}`)
+  log.debug(`panel snapshot:\n${text}`)
 
   // Nothing was registered into a UI; report that honestly.
   return false

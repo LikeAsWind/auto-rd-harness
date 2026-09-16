@@ -27,6 +27,7 @@
     "test:ui": "node scripts/test-ui-panel.mjs",
     "test:tools": "node scripts/test-tool-contract.mjs",
     "test:host": "node scripts/test-host-contract.mjs",
+    "test:mount": "node scripts/test-mount-smoke.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },

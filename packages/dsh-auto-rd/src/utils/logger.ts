@@ -151,6 +151,21 @@ export class Logger {
   }
 
   private emit(level: LogLevel, msg: string, args: unknown[]): void {
+    // Prefer the host's log channel. `ctx.logger` appears in two shapes
+    // across Cordis/DSH builds — a logger instance (`ctx.logger.warn(..)`)
+    // and a factory (`ctx.logger('tag').warn(..)`) — and there is no
+    // `logger` entry in the host service catalog to settle which one this
+    // runtime uses. resolveLogChannel accepts either, so we never lose the
+    // host log through a shape mismatch. Console is the fallback only.
+    const channel = resolveLogChannel(this.ctx, this.tag)
+    if (channel && typeof channel[level] === 'function') {
+      try {
+        channel[level](msg, ...args)
+        return
+      } catch {
+        // Never let logger failures break the plugin; fall through to console.
+      }
+    }
     const line = `[${this.tag}] ${level} ${msg}`
     if (args.length > 0) {
       // console has the original methods; format args plainly to keep output deterministic
@@ -158,14 +173,58 @@ export class Logger {
     } else {
       console[level === 'debug' ? 'log' : level](line)
     }
-    // Mirror to DSH logger so it shows up in the plugin's cordis logs.
-    const dshLog = (this.ctx as any).logger?.[level === 'debug' ? 'debug' : level]
-    if (typeof dshLog === 'function') {
-      try {
-        dshLog.call((this.ctx as any).logger, msg, ...args)
-      } catch {
-        // Never let logger failures break the plugin
-      }
-    }
   }
+}
+
+/** The method subset of a logger this plugin uses. */
+export interface LogChannel {
+  debug(msg: string, ...args: unknown[]): void
+  info(msg: string, ...args: unknown[]): void
+  warn(msg: string, ...args: unknown[]): void
+  error(msg: string, ...args: unknown[]): void
+}
+
+/**
+ * Resolve the host log channel for `tag`, tolerating both shapes:
+ *
+ *   A. `ctx.logger` is a factory:  `ctx.logger('tag')` -> channel
+ *   B. `ctx.logger` is an instance: `ctx.logger` -> channel
+ *
+ * Returns null when neither shape yields an object with the level
+ * methods, in which case the caller falls back to console.
+ */
+export function resolveLogChannel(ctx: unknown, tag: string): LogChannel | null {
+  const raw = (ctx as { logger?: unknown } | null | undefined)?.logger
+  if (raw === undefined || raw === null) return null
+
+  if (typeof raw === 'function') {
+    // Shape A: try the factory form first.
+    try {
+      const produced = (raw as (t: string) => unknown).call(ctx, tag)
+      if (produced && typeof produced === 'object') {
+        const ch = asLogChannel(produced)
+        if (ch) return ch
+      }
+    } catch {
+      // A logger that is callable but rejects a tag argument — try shape B.
+    }
+    // Shape B: the function itself carries the methods.
+    return asLogChannel(raw)
+  }
+
+  return asLogChannel(raw)
+}
+
+/** Narrow an unknown to a LogChannel when it exposes warn/info/error. */
+function asLogChannel(value: unknown): LogChannel | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Partial<Record<keyof LogChannel, unknown>>
+  if (
+    typeof candidate.warn !== 'function' ||
+    typeof candidate.info !== 'function' ||
+    typeof candidate.error !== 'function'
+  ) {
+    return null
+  }
+  return value as LogChannel
 }
