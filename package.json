@@ -14,6 +14,7 @@
     "test": "npm run test --workspaces --if-present",
     "test:m4": "node scripts/test-planner-parser.mjs && node scripts/test-m4-fakes.mjs",
     "test:m5": "node scripts/test-m5-integration.mjs",
+    "test:patterns": "node scripts/audit-patterns.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },

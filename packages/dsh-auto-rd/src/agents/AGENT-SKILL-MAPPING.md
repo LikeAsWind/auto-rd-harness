@@ -132,14 +132,14 @@
 | **ClarificationAgent** | B-1（Three Paths） / B-2（One Question） / B-3（Multiple-Choice） / B-4（HARD-GATE） / G-1（Grill Relentlessly） | 5 |
 | **BrainstormAgent** | B-5（Propose 2-3） / B-6（Lead With Recommended） / B-7（YAGNI Ruthlessly） | 3 |
 | **CriticAgent** | CR-3（Spec Line-by-Line） / RC-2（Severity Scale） / RC-4（Reviewer Can Be Wrong） | 3 |
-| **DecisionAgent** | SD-1（Rulings, Not Stalls） / SD-7（Ledger Cross-Compaction） / PL-7（Execution Handoff） | 3 |
+| **DecisionAgent** | SD-1（Rulings, Not Stalls） / SD-7（Ledger Cross-Compaction） / PL-7（Execution Handoff） / RC-4（Reviewer Can Be Wrong） | 4 |
 | **SpecAgent** | B-8（Spec Self-Review） / PL-5（No Placeholders） | 2 |
 | **PlannerAgent** | PL-1（File Structure） / PL-2（Task Right-Sizing） / PL-3（Bite-Sized Steps） / PL-4（TDD Step Template） / PL-5（No Placeholders） / PL-6（Plan Self-Review） | 6 |
 | **ImplementationAgent** | T-1（Iron Law No Code Without Test） / T-4（Code Before Test? Delete It） / SD-2（Fresh Subagent Per Task） / SD-3（No-Subagents Contract） / SD-8（Hand Artifacts As Files） | 5 |
-| **TestAgent** | T-2（Verify RED Before GREEN） / T-3（Verify GREEN Pristine） / V-1（Fresh Evidence） / V-2（Gate Function） | 4 |
-| **FixAgent** | D-1（Iron Law No Fix Without Root Cause） / D-2（Four Phases） / D-3（3-Fix Architectural Question） / D-4（Multi-Component Boundary Check） / T-5（Never Fix Bug Without Test） / SD-4（5-Round Fix Loop + Breaker） | 6 |
+| **TestAgent** | T-2（Verify RED Before GREEN） / T-3（Verify GREEN Pristine） / T-4（Code Before Test? Delete It） / V-1（Fresh Evidence） / V-2（Gate Function） / V-3（Common Failures Table） | 6 |
+| **FixAgent** | D-1（Iron Law No Fix Without Root Cause） / D-2（Four Phases） / D-3（3-Fix Architectural Question） / D-4（Multi-Component Boundary Check） / T-4（Code Before Test? Delete It） / T-5（Never Fix Bug Without Test） / SD-4（5-Round Fix Loop + Breaker） | 7 |
 | **VerificationAgent** | V-1（Fresh Evidence） / V-2（Gate Function） / V-3（Common Failures） / F-1（Re-Run on Integration Tree） | 4 |
-| **ReviewAgent** | CR-1（Two-Axis Review） / CR-2（Standards = Repo + Fowler） / CR-3（Spec Line-by-Line） / CR-4（Don't Merge or Rerank） / CR-5（Fowler 12 Smell） / RC-1（Diff Range） / RC-2（Severity Scale） / RC-3（⚠️ Cannot Verify） / SD-5（Two-Stage Review） | 9 |
+| **ReviewAgent** | CR-1（Two-Axis Review） / CR-2（Standards = Repo + Fowler） / CR-3（Spec Line-by-Line） / CR-4（Don't Merge or Rerank） / CR-5（Fowler 12 Smell） / RC-1（Diff Range） / RC-2（Severity Scale） / RC-3（⚠️ Cannot Verify） / RC-4（Reviewer Can Be Wrong） / SD-5（Two-Stage Review） | 10 |
 | **FinalVerifyAgent** | CR-1（Two-Axis Review） / CR-2（Standards = Repo + Fowler） / CR-3（Spec Line-by-Line） / CR-4（Don't Merge or Rerank） / CR-5（Fowler 12 Smell） / DP-1（One Agent Per Domain） / DP-2（Parallel Dispatch in One Response） / F-1（Re-Run on Integration Tree） / V-1（Fresh Evidence） / SD-6（Final Review = Whole-Branch） / SD-7（Ledger Cross-Compaction） | 11 |
 
 ## 关键发现：哪些 Pattern 被多个 Agent 共享
@@ -150,12 +150,14 @@
 |---|---|---|
 | **V-1: Fresh Evidence** | 3 | TestAgent, VerificationAgent, FinalVerifyAgent |
 | **V-2: Gate Function** | 2 | TestAgent, VerificationAgent |
+| **V-3: Common Failures Table** | 1 | TestAgent |
 | **CR-1: Two-Axis Review** | 2 | ReviewAgent, FinalVerifyAgent |
 | **CR-2: Standards Axis** | 2 | ReviewAgent, FinalVerifyAgent |
 | **CR-3: Spec Line-by-Line** | 3 | CriticAgent, ReviewAgent, FinalVerifyAgent |
 | **CR-4: Don't Merge/Rerank** | 2 | ReviewAgent, FinalVerifyAgent |
 | **CR-5: Fowler 12** | 2 | ReviewAgent, FinalVerifyAgent |
 | **RC-2: Severity Scale** | 2 | CriticAgent, ReviewAgent |
+| **RC-4: Reviewer Can Be Wrong** | 2 | DecisionAgent, ReviewAgent |
 | **SD-7: Ledger** | 2 | DecisionAgent, FinalVerifyAgent |
 | **F-1: Re-Run on Integration Tree** | 2 | VerificationAgent, FinalVerifyAgent |
 | **PL-5: No Placeholders** | 2 | SpecAgent, PlannerAgent |
@@ -163,6 +165,7 @@
 | **B-2: One Question At A Time** | 1（但 G-2 也类似） | ClarificationAgent |
 | **B-4: HARD-GATE** | 1 | ClarificationAgent |
 | **T-1: Iron Law (No Code Without Test)** | 1 | ImplementationAgent |
+| **T-4: Code Before Test? Delete It** | 3 | ImplementationAgent, TestAgent, FixAgent |
 | **D-1: Iron Law (No Fix Without Root Cause)** | 1 | FixAgent |
 
 **没有重复对标**：每个 Pattern 只属于一个或少数几个职能相关的 Agent。

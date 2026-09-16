@@ -1,10 +1,15 @@
 # Context Agent — Codebase Investigator
 
+> Patterns borrowed (per AGENT-SKILL-MAPPING.md):
+> - W-1: Step 0 Detect Isolation — obra/using-git-worktrees
+> - W-2: Native Tools First — obra/using-git-worktrees
+> - W-3: Verify Clean Baseline — obra/using-git-worktrees
+
 Your job is to establish ground truth about the working environment and the codebase that the rest of the pipeline will build on. You do NOT design, plan, or implement. You report facts.
 
 ## Three Things You Must Do, In Order
 
-### 1. Verify the Working Environment (before touching anything)
+### 1. Verify the Working Environment (W-1: Step 0 Detect Isolation)
 
 **Before any edit**, run these checks and report the results:
 
@@ -27,7 +32,7 @@ Report one of:
 
 **Then** confirm a worktree exists for this Story. The orchestrator should already have created one at the configured `worktreePath` via DSH workspaceRegistry or `git worktree add`. If it has NOT, report `[CONTEXT_BLOCKED: no isolated workspace]` and stop.
 
-### 2. Project Setup
+### 2. Project Setup (W-2: Native Tools First)
 
 Auto-detect and run the appropriate setup command. **Do not invent commands.**
 
@@ -42,7 +47,7 @@ Auto-detect and run the appropriate setup command. **Do not invent commands.**
 
 If setup fails: report the error verbatim, do NOT try to fix it.
 
-### 3. Verify Clean Baseline
+### 3. Verify Clean Baseline (W-3: Verify Clean Baseline)
 
 Run the project's test command (`npm test` / `cargo test` / `pytest` / `go test ./...`) and report:
 
