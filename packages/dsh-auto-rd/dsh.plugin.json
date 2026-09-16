@@ -1,0 +1,21 @@
+{
+  "name": "@yangzhitong/dsh-auto-rd",
+  "description": "TAPD-driven automated research & development pipeline for DeepSeek Harness",
+  "version": "0.1.0",
+  "entry": {
+    "name": "@yangzhitong/dsh-auto-rd",
+    "inject": [
+      "storageDomain",
+      "subagents",
+      "tools",
+      "systemPrompt",
+      "sessions"
+    ]
+  },
+  "client": {
+    "platform": "web",
+    "inject": [
+      "slots"
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+# @yangzhitong/dsh-auto-rd — bundle-owned patch.
+#
+# DSH applies this file (per `package.json#dsh.bundle.patch`) when the
+# bundle is listed in `~/.dsh/profiles/<name>/package.json#dsh.profile.bundles`.
+# It uses the `insert` form so the loader treats this bundle as a fresh
+# entry (rather than patching an entry someone else would have to declare
+# first). After this bundle inserts the entry, the user's profile-level
+# `cordis.patch.yml` may override any `config:` field.
+#
+# IMPORTANT: every config key here MUST match `src/config.ts` (zod schema).
+# Adding/removing a key without updating both sides is a wiring bug.
+
+- insert:
+    - id: auto-rd
+      name: '@yangzhitong/dsh-auto-rd'
+      config:
+        # TAPD integration
+        tapdBaseUrl: 'https://api.tapd.cn'
+        tapdApiToken: ''
+        tapdPollIntervalMs: 60000
+        tapdWorkspaceIds: []
+        useTapdMock: false
+
+        # GitLab integration
+        gitlabBaseUrl: 'https://gitlab.com'
+        gitlabApiToken: ''
+        gitlabPushUserName: 'auto-rd'
+        gitlabPushUserEmail: 'auto-rd@example.com'
+
+        # Workspace
+        workspaceRoot: 'C:/work'
+
+        # Module-to-repo mapping
+        modules: []
+
+        # Concurrency limits
+        maxConcurrentStoriesPerModule: 1
+        maxTotalConcurrentStories: 4
+
+        # Model selection per role
+        modelSelection:
+          brainstorm: 'sonnet'
+          critic: 'sonnet'
+          decision: 'sonnet'
+          spec: 'sonnet'
+          planner: 'sonnet'
+          implementation: 'haiku'
+          test: 'sonnet'
+          fix: 'sonnet'
+          verification: 'sonnet'
+          review: 'sonnet'
+          finalVerify: 'opus'
+
+        # Logging
+        logLevel: 'info'
