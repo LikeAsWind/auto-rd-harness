@@ -193,7 +193,8 @@ function mod(over = {}) {
     }),
   )
   const text = renderPanelText(model)
-  check('text: header carries the totals', text.includes('1 module(s)') && text.includes('1 story(ies)'))
+  check('text: header carries the modules/stories totals', text.includes('Modules: 1') && text.includes('stories: 1'))
+  check('text: header carries the uptime + last poll', text.includes('mounted for') && text.includes('last TAPD poll'))
   check('text: module line has id and target branch', text.includes('Payment (m1)') && text.includes('target: main'))
   check('text: story line has id, title, state', text.includes('S1: Refund endpoint') && text.includes('[implementing]'))
   check('text: MR link rendered', text.includes('[MR](https://gitlab/mr/1)'))
@@ -203,6 +204,74 @@ function mod(over = {}) {
   const model = buildPanelModel(fakeStorage({ modules: [mod()], stories: [] }))
   const text = renderPanelText(model)
   check('text: empty module says "no stories"', text.includes('no stories'))
+}
+
+// ---- health block + setup checklist ----------------------------------
+
+{
+  // Empty config: every required-looking field is missing. The health
+  // block must enumerate each missing piece in plain text.
+  const { ConfigSchema } = await import(
+    (await import('node:url')).pathToFileURL(resolve(libBase, 'config.js')).href
+  )
+  const emptyConfig = ConfigSchema.parse({})
+  const model = buildPanelModel(fakeStorage({ modules: [], stories: [] }), emptyConfig, {
+    mountedAt: new Date(Date.now() - 30_000),
+    lastTapdPollAt: null,
+    lastTapdError: null,
+  })
+  check('health: setupRequired is true on empty config', model.health.setupRequired === true)
+  check('health: emits a tapd_token issue', model.health.issues.some((i) => i.key === 'tapd_token'))
+  check('health: emits a gitlab_token issue', model.health.issues.some((i) => i.key === 'gitlab_token'))
+  check('health: emits a workspace_root issue', model.health.issues.some((i) => i.key === 'workspace_root'))
+  check('health: emits a modules issue', model.health.issues.some((i) => i.key === 'modules'))
+  check('health: mountedForSec reflects the runtime gap', model.health.mountedForSec >= 30)
+  check(
+    'health: tapd_workspaces issue appears when token is set but workspace ids empty',
+    (() => {
+      const cfg2 = ConfigSchema.parse({
+        tapdApiToken: 'x',
+        tapdWorkspaceIds: [],
+        useTapdMock: false,
+        workspaceRoot: '/w',
+        modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git' }],
+      })
+      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
+        mountedAt: new Date(),
+        lastTapdPollAt: null,
+        lastTapdError: null,
+      })
+      return m2.health.issues.some((i) => i.key === 'tapd_workspaces')
+    })(),
+  )
+  // Render text surfaces the setup checklist.
+  const text = renderPanelText(model)
+  check('health text: setup section header', text.includes('Setup required'))
+  check('health text: tapd_token line', text.includes('[tapd_token]'))
+  check('health text: workspace_root line', text.includes('[workspace_root]'))
+}
+
+{
+  // Fully configured: no setup issues; mock mode hides the workspaces issue.
+  const { ConfigSchema } = await import(
+    (await import('node:url')).pathToFileURL(resolve(libBase, 'config.js')).href
+  )
+  const cfg = ConfigSchema.parse({
+    tapdApiToken: 'tok',
+    gitlabApiToken: 'gtok',
+    useTapdMock: true,
+    workspaceRoot: '/w',
+    modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git' }],
+  })
+  const model = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg, {
+    mountedAt: new Date(),
+    lastTapdPollAt: new Date(),
+    lastTapdError: null,
+  })
+  check('health: setupRequired is false when fully configured', model.health.setupRequired === false)
+  check('health: issues array is empty when fully configured', model.health.issues.length === 0)
+  check('health: lastTapdPollAt propagates', model.health.lastTapdPollAt !== null)
+  check('health: lastTapdError propagates', model.health.lastTapdError === null)
 }
 
 // ---- client coordinates ---------------------------------------------
@@ -216,4 +285,4 @@ function mod(over = {}) {
 // ---- Summary --------------------------------------------------------
 
 process.stdout.write(`\nUiPanel tests: ${pass} pass, ${fail} fail\n`)
-if (fail > 0) process.exitCode = 1
+process.exit(fail > 0 ? 1 : 0)

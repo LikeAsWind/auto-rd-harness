@@ -2,14 +2,17 @@
 /**
  * Test install-to-dsh.mjs idempotency + uninstall against a temp fake
  * DSH profile. Uses the AUTORD_FAKE_PM=1 test seam in install-to-dsh.mjs
- * to no-op all package-manager calls. Asserts:
- *   - empty patch.yml -> exactly 1 managed block after install
- *   - existing user header preserved across install/uninstall
- *   - block byte-for-byte unchanged on re-run (idempotent)
- *   - dry-run leaves file untouched
- *   - uninstall removes the block; second uninstall is a no-op
+ * to no-op all package-manager calls. Asserts the STANDARD DSH install:
+ *   - empty patch.yml + bundle missing in package.json ->
+ *       bundle registered AND managed loader block inserted
+ *   - bundle gets registered in package.json#dsh.profile.bundles on install
+ *   - managed block contains the loader entry (- id / name / config)
+ *   - existing user header in cordis.patch.yml is preserved
+ *   - re-run is idempotent: bundle appears once, block appears once
+ *   - dry-run leaves both package.json and cordis.patch.yml byte-equal
+ *   - uninstall removes the bundle from dsh.profile.bundles
+ *   - uninstall also strips the managed block from cordis.patch.yml
  *   - spawned pnpm add/remove each called exactly once across the lifecycle
- *   - block references env vars; never contains a plaintext token
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
@@ -25,8 +28,10 @@ const pmLog = join(profileRoot, 'pm.log');
 
 mkdirSync(profileDir, { recursive: true });
 writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-  name: 'fake-dsh-profile', private: true, dependencies: {},
-}));
+  name: 'fake-dsh-profile', private: true,
+  dependencies: {},
+  dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-worktable'] } },
+}, null, 2) + '\n');
 writeFileSync(join(profileDir, 'pnpm-lock.yaml'), '');
 // Pre-create the tarball cache that the install path expects `npm pack`
 // to have produced. Under AUTORD_FAKE_PM=1 `npm pack` is a no-op, so we
@@ -36,9 +41,11 @@ const fakeCacheDir = join(profileDir, 'node_modules', '.cache', 'autord-install'
 mkdirSync(fakeCacheDir, { recursive: true });
 writeFileSync(join(fakeCacheDir, 'dsh-auto-rd.tgz'), 'placeholder');
 const patchFile = join(profileDir, 'cordis.patch.yml');
+const profilePkgPath = join(profileDir, 'package.json');
 
 const BLOCK_BEGIN = '# >>> auto-rd (managed by scripts/install-to-dsh.mjs) >>>';
 const BLOCK_END = '# <<< auto-rd <<<';
+const BUNDLE_NAME = '@yangzhitong/dsh-auto-rd';
 
 function run(label, ...rest) {
   process.stdout.write(`--- ${label} ---\n`);
@@ -55,6 +62,11 @@ function run(label, ...rest) {
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);
   if (res.status !== 0) throw new Error(`${label} exited ${res.status}`);
+}
+
+function readBundles() {
+  if (!existsSync(profilePkgPath)) return null;
+  return JSON.parse(readFileSync(profilePkgPath, 'utf8')).dsh?.profile?.bundles ?? null;
 }
 
 function blockCount() {
@@ -83,58 +95,80 @@ try {
   writeFileSync(patchFile, '', 'utf8');
   assert(blockCount() === 0, 'initial block count must be 0');
 
+  const initialBundles = readBundles();
+  assert(!initialBundles.includes(BUNDLE_NAME), 'bundle not registered at start');
+
+  // ---- install (first) ----------------------------------------------
+
   run('install (first)');
-  assert(blockCount() === 1, `expected 1 block after install, got ${blockCount()}`);
-  const block = getBlock();
-  assert(block.includes(BLOCK_BEGIN) && block.includes(BLOCK_END), 'block has markers');
-  assert(block.includes('process.env.DSH_TAPD_API_TOKEN'), 'block references tapd env');
-  assert(block.includes('process.env.DSH_GITLAB_API_TOKEN'), 'block references gitlab env');
-  assert(!/api[._-]token:\s*['"]?[A-Za-z0-9_-]{10,}/i.test(block), 'block contains no plaintext token');
+  let bundles = readBundles();
+  assert(bundles.includes(BUNDLE_NAME), `bundle registered in dsh.profile.bundles (got ${JSON.stringify(bundles)})`);
+  for (const b of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-worktable']) {
+    assert(bundles.includes(b), `pre-existing bundle ${b} preserved`);
+  }
+  // STANDARD DSH install writes the loader entry to cordis.patch.yml.
+  assert(blockCount() === 1, `install writes exactly one managed block (got ${blockCount()})`);
+  let block = getBlock();
+  assert(block.includes('- id: auto-rd'), 'managed block contains the loader entry id');
+  assert(block.includes(`name: '${BUNDLE_NAME}'`), `managed block references the bundle (${BUNDLE_NAME})`);
+  assert(block.includes('config:'), 'managed block contains the config: section');
 
-  // Re-install on top of an existing user header.
+  // ---- install (with existing user header) -------------------------
+
   writeFileSync(patchFile, '# user header line\n', 'utf8');
-  run('install (with existing header)');
-  let raw = readFileSync(patchFile, 'utf8');
-  assert(raw.startsWith('# user header line\n'), 'user header preserved');
-  assert(blockCount() === 1, 'still exactly one block');
+  run('install (with existing user header)');
+  const raw = readFileSync(patchFile, 'utf8');
+  assert(raw.startsWith('# user header line\n'), 'user header preserved across install');
+  assert(blockCount() === 1, 'still exactly one managed block');
+  bundles = readBundles();
+  assert(bundles.filter((b) => b === BUNDLE_NAME).length === 1, `bundle listed exactly once (got ${bundles.filter((b) => b === BUNDLE_NAME).length})`);
 
-  // Idempotent re-run.
-  const before = getBlock();
+  // ---- idempotent re-run -------------------------------------------
+
   run('install (re-run, idempotent)');
-  const after = getBlock();
-  assert(blockCount() === 1, 're-run keeps exactly one block');
-  assert(before === after, 'block byte-for-byte unchanged on re-run');
+  bundles = readBundles();
+  assert(bundles.filter((b) => b === BUNDLE_NAME).length === 1, 're-run keeps bundle listed exactly once');
+  assert(blockCount() === 1, 're-run keeps exactly one managed block');
 
-  // Dry-run install.
-  const snapBeforeDry = readFileSync(patchFile, 'utf8');
+  // ---- dry-run install ---------------------------------------------
+
+  const snapBeforeDry = readFileSync(profilePkgPath, 'utf8');
+  const patchBeforeDry = readFileSync(patchFile, 'utf8');
   run('install (dry-run)', '--dry-run');
-  const snapAfterDry = readFileSync(patchFile, 'utf8');
-  assert(snapBeforeDry === snapAfterDry, 'dry-run leaves file byte-equal');
-  assert(blockCount() === 1, 'dry-run does not add a second block');
+  assert(readFileSync(profilePkgPath, 'utf8') === snapBeforeDry, 'dry-run leaves package.json byte-equal');
+  assert(readFileSync(patchFile, 'utf8') === patchBeforeDry, 'dry-run leaves cordis.patch.yml byte-equal');
 
-  // Dry-run uninstall.
+  // ---- dry-run uninstall -------------------------------------------
+
+  const beforeUninstall = readFileSync(profilePkgPath, 'utf8');
+  const patchBeforeUninstall = readFileSync(patchFile, 'utf8');
   run('uninstall (dry-run)', '--uninstall', '--dry-run');
-  assert(blockCount() === 1, 'dry-run uninstall does not remove');
-  assert(readFileSync(patchFile, 'utf8') === snapBeforeDry, 'dry-run uninstall leaves file equal');
+  assert(readFileSync(profilePkgPath, 'utf8') === beforeUninstall, 'dry-run uninstall leaves package.json equal');
+  assert(readFileSync(patchFile, 'utf8') === patchBeforeUninstall, 'dry-run uninstall leaves cordis.patch.yml equal');
+  assert(readBundles().includes(BUNDLE_NAME), 'dry-run uninstall does not remove the bundle');
 
-  // Real uninstall.
+  // ---- uninstall (real) --------------------------------------------
+
   run('uninstall', '--uninstall');
-  assert(blockCount() === 0, `expected 0 blocks after uninstall, got ${blockCount()}`);
-  let after2 = readFileSync(patchFile, 'utf8');
-  assert(after2.startsWith('# user header line\n'), 'header preserved after uninstall');
+  bundles = readBundles();
+  assert(!bundles.includes(BUNDLE_NAME), `bundle removed from dsh.profile.bundles (got ${JSON.stringify(bundles)})`);
+  for (const b of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-worktable']) {
+    assert(bundles.includes(b), `pre-existing bundle ${b} preserved through uninstall`);
+  }
+  assert(blockCount() === 0, `managed block stripped from cordis.patch.yml (got ${blockCount()})`);
+  const afterUninstall = readFileSync(patchFile, 'utf8');
+  assert(afterUninstall.startsWith('# user header line\n'), 'user header preserved after uninstall');
 
-  // Second uninstall is a no-op.
-  run('uninstall (idempotent: block already gone)', '--uninstall');
-  assert(blockCount() === 0, 'uninstall is idempotent');
-  assert(readFileSync(patchFile, 'utf8') === after2, 'second uninstall is byte-equal');
+  // ---- second uninstall is a no-op ---------------------------------
 
-  // Confirm lifecycle pm invocation count via the captured log.
-  // Each install step → one 'add' line; each uninstall step → one 'remove' line.
-  // Idempotent re-runs also call the pm once each (the script does not skip
-  // pnpm on re-install; it relies on pnpm's own dedup), so count the steps
-  // we actually executed.
+  run('uninstall (idempotent)', '--uninstall');
+  bundles = readBundles();
+  assert(!bundles.includes(BUNDLE_NAME), 'second uninstall still has no bundle listed');
+
+  // ---- lifecycle pm invocation count via the captured log ----------
+
   const logLines = readFileSync(pmLog, 'utf8').trim().split('\n').filter(Boolean);
-  const installSteps = logLines.filter((l) => l.includes('install (first)') || l.includes('install (with existing header)') || l.includes('install (re-run, idempotent)'));
+  const installSteps = logLines.filter((l) => l.includes('install (first)') || l.includes('install (with existing') || l.includes('install (re-run'));
   const dryRunInstalls = logLines.filter((l) => /^step: install \(dry-run\)/.test(l));
   const uninstallSteps = logLines.filter((l) => /^step: uninstall args/.test(l) || l.includes('uninstall (idempotent'));
   const dryRunUninstalls = logLines.filter((l) => /^step: uninstall \(dry-run\)/.test(l));

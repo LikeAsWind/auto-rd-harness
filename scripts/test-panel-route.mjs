@@ -6,8 +6,10 @@
 //
 // Covers:
 //   - registers kind:'exact' at the documented path
-//   - returns false and logs (not throws) when webServer is absent,
-//     which is the headless deployment case
+//   - returns the disposer from webServer.register on success; returns
+//     null (and logs at info, not error) when webServer is absent, which
+//     is the headless deployment case
+//   - the returned disposer removes the route from the webserver
 //   - GET -> 200, application/json, no-store, and the real panel model
 //   - HEAD -> 200 with content-length and no body
 //   - POST -> 405 with an allow header
@@ -111,29 +113,33 @@ const STORIES = [
 {
   const ws = fakeWebServer()
   const logger = silentLogger()
-  const ok = registerPanelRoute(ctxWith(ws), { storage: fakeStorage(), logger })
+  const dispose = registerPanelRoute(ctxWith(ws), { storage: fakeStorage(), logger })
 
-  check('register: reports success', ok === true)
+  check('register: reports success (disposer is a function)', typeof dispose === 'function')
   check('register: exactly one route', ws.routes.length === 1, String(ws.routes.length))
   check('register: kind is exact', ws.routes[0]?.kind === 'exact', String(ws.routes[0]?.kind))
   check('register: path is the documented one', ws.routes[0]?.path === PANEL_ROUTE_PATH, String(ws.routes[0]?.path))
   check('register: path is /auto-rd/panel', PANEL_ROUTE_PATH === '/auto-rd/panel', PANEL_ROUTE_PATH)
   check('register: handler is a function', typeof ws.routes[0]?.handler === 'function')
   check('register: logs the route', logger.lines.some(([l, m]) => l === 'info' && m.includes(PANEL_ROUTE_PATH)))
+
+  // The disposer removes the route so the webserver can be torn down cleanly.
+  if (typeof dispose === 'function') dispose()
+  check('register: disposer removes the route', ws.routes.length === 0, String(ws.routes.length))
 }
 
 {
   // Headless: no web server. Must degrade quietly.
   const logger = silentLogger()
   let threw = false
-  let ok
+  let dispose
   try {
-    ok = registerPanelRoute(ctxWith(undefined), { storage: fakeStorage(), logger })
+    dispose = registerPanelRoute(ctxWith(undefined), { storage: fakeStorage(), logger })
   } catch {
     threw = true
   }
   check('headless: does not throw', threw === false)
-  check('headless: returns false', ok === false)
+  check('headless: returns null', dispose === null)
   check(
     'headless: explains itself at info level (not an error)',
     logger.lines.some(([l, m]) => l === 'info' && /headless/.test(m)),
@@ -147,14 +153,14 @@ const STORIES = [
   const ws = fakeWebServer({ throwOnRegister: 'duplicate route' })
   const logger = silentLogger()
   let threw = false
-  let ok
+  let dispose
   try {
-    ok = registerPanelRoute(ctxWith(ws), { storage: fakeStorage(), logger })
+    dispose = registerPanelRoute(ctxWith(ws), { storage: fakeStorage(), logger })
   } catch {
     threw = true
   }
   check('duplicate: does not throw out of the mount', threw === false)
-  check('duplicate: returns false', ok === false)
+  check('duplicate: returns null', dispose === null)
   check(
     'duplicate: logs the reason',
     logger.lines.some(([l, m]) => l === 'error' && /duplicate route/.test(m)),
@@ -270,7 +276,240 @@ for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
   }
 }
 
+// ---- getConfig() reads live config on every request -----------------
+
+{
+  // Simulate the reconfigure flow: the panel route is bound once, but
+  // `getConfig` returns a different value on each request. The route
+  // must read the live config (not the snapshot taken at registration)
+  // so that after a /auto-rd/reconfigure call the very next fetch sees
+  // the new state.
+  const ws = fakeWebServer()
+  let currentConfig = { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] }
+  registerPanelRoute(ctxWith(ws), {
+    storage: fakeStorage({ stories: STORIES, modules: MODULES }),
+    logger: silentLogger(),
+    getConfig: () => currentConfig,
+  })
+
+  // Empty config: setupRequired must be true.
+  const res1 = fakeRes()
+  await ws.routes[0].handler({ method: 'GET' }, res1)
+  const body1 = JSON.parse(res1.body)
+  check('getConfig: setupRequired reflects current empty config', body1.model.health.setupRequired === true)
+
+  // Flip the live config: full setup. The next fetch must report
+  // setupRequired=false WITHOUT re-binding the route.
+  currentConfig = {
+    tapdApiToken: 'tok',
+    gitlabApiToken: 'gtok',
+    useTapdMock: true,
+    workspaceRoot: '/w',
+    modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', defaultBranch: 'main' }],
+  }
+  const res2 = fakeRes()
+  await ws.routes[0].handler({ method: 'GET' }, res2)
+  const body2 = JSON.parse(res2.body)
+  check('getConfig: setupRequired reflects the flipped live config', body2.model.health.setupRequired === false)
+  check('getConfig: issues array empty when flipped to full config', body2.model.health.issues.length === 0)
+}
+
+// ---- ReconfigureRoute end-to-end ------------------------------------
+
+// Quick test of the reconfigure-route module. We exercise the bare
+// helper (no cordis context, just a fake webServer) against a real
+// storageDomain-shaped double.
+const { registerReconfigureRoute, RECONFIGURE_ROUTE_PATH } = await import(
+  pathToFileURL(resolve(libBase, 'services', 'reconfigure-route.js')).href
+)
+
+// fakeStorage that respects put / get / update against an in-memory
+// map (so the reconfigure handler's "re-seed module records" step
+// actually mutates state).
+function liveStorage() {
+  const modules = new Map()
+  return {
+    modules: () => ({
+      get: (k) => modules.get(k),
+      put: async (k, v) => { modules.set(k, v) },
+      delete: async (k) => modules.delete(k),
+      update: async (k, fn) => { const v = fn(modules.get(k)); modules.set(k, v); return v },
+      entries: () => modules.entries(),
+      keys: () => modules.keys(),
+      get size() { return modules.size },
+      *values() { for (const v of modules.values()) yield v },
+    }),
+    stories: () => ({ get: () => undefined, put: async () => {}, delete: async () => true, update: async () => ({}), entries: () => [].entries(), keys: () => [].keys(), get size() { return 0 }, *values() {} }),
+    tasks: () => ({ get: () => undefined, put: async () => {}, delete: async () => true, update: async () => ({}), entries: () => [].entries(), keys: () => [].keys(), get size() { return 0 }, *values() {} }),
+  }
+}
+
+const silentLog = silentLogger()
+
+{
+  // Happy path: POST a valid config, get a new health snapshot.
+  const ws = fakeWebServer()
+  const liveConfig = { current: { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] } }
+  const runtime = { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null }
+  let newSvcsStartCount = 0
+  let stopCount = 0
+
+  // minimal services fake
+  const oldSvcs = {
+    queue: { start: () => {}, stop: () => { stopCount += 1 } },
+    poller: { start: () => {}, stop: () => {} },
+    notifier: { start: () => {}, stop: () => {} },
+  }
+  const newSvcs = {
+    queue: { start: () => { newSvcsStartCount += 1 }, stop: () => {} },
+    poller: { start: () => {}, stop: () => {} },
+    notifier: { start: () => {}, stop: () => {} },
+  }
+
+  let currentServices = oldSvcs
+  registerReconfigureRoute(ctxWith(ws), {
+    storage: liveStorage(),
+    logger: silentLog,
+    liveConfig,
+    runtime,
+    startServices: (cfg) => {
+      // Pretend a successful build.
+      return newSvcs
+    },
+    stopServices: (svcs) => svcs.queue.stop(),
+    currentServices,
+  })
+
+  check('reconfigure: route is bound', ws.routes.length === 1, String(ws.routes.length))
+  check('reconfigure: route path is /auto-rd/reconfigure', ws.routes[0]?.path === RECONFIGURE_ROUTE_PATH, String(ws.routes[0]?.path))
+  check('reconfigure: route kind is exact', ws.routes[0]?.kind === 'exact')
+
+  // POST a valid config.
+  const req = await makeJsonReq('POST', {
+    config: {
+      tapdApiToken: 'new-tok',
+      gitlabApiToken: 'new-gtok',
+      workspaceRoot: 'C:/work',
+      useTapdMock: true,
+      modules: [{ id: 'payment', title: 'Payment', repoUrl: 'https://gitlab.example.com/pay.git' }],
+    },
+  })
+  const res = fakeRes()
+  await ws.routes[0].handler(req, res)
+  check('reconfigure: POST returns 200', res.statusCode === 200, String(res.statusCode))
+  check('reconfigure: POST body is application/json', (res.headers['content-type'] ?? '').includes('application/json'))
+  const body = JSON.parse(res.body)
+  check('reconfigure: body.ok is true', body.ok === true)
+  check('reconfigure: liveConfig was swapped', liveConfig.current.tapdApiToken === 'new-tok')
+  check('reconfigure: setupRequired is now false', body.model.health.setupRequired === false)
+  check('reconfigure: stopServices was called on the old services', stopCount === 1)
+  check('reconfigure: new services were started', newSvcsStartCount === 1)
+  check('reconfigure: newModules records which modules were seeded', Array.isArray(body.newModules) && body.newModules.some((m) => m.id === 'payment'))
+}
+
+{
+  // Validation: POST an invalid config — host returns 400 with zod issues.
+  const ws = fakeWebServer()
+  const liveConfig = { current: { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] } }
+  const runtime = { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null }
+  let stopCount = 0
+  registerReconfigureRoute(ctxWith(ws), {
+    storage: liveStorage(),
+    logger: silentLog,
+    liveConfig,
+    runtime,
+    startServices: () => ({ queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } }),
+    stopServices: () => { stopCount += 1 },
+    currentServices: { queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } },
+  })
+
+  // tapdBaseUrl is not a valid URL — zod should reject.
+  const req = await makeJsonReq('POST', { config: { tapdApiToken: 'x', tapdBaseUrl: 'not-a-url' } })
+  const res = fakeRes()
+  await ws.routes[0].handler(req, res)
+  check('reconfigure invalid: returns 400', res.statusCode === 400, String(res.statusCode))
+  const body = JSON.parse(res.body)
+  check('reconfigure invalid: error is invalid_config', body.error === 'invalid_config', body.error)
+  check('reconfigure invalid: issues array is present', Array.isArray(body.issues))
+  check('reconfigure invalid: liveConfig was NOT swapped', liveConfig.current.tapdApiToken === '')
+  check('reconfigure invalid: old services were NOT stopped', stopCount === 0)
+}
+
+{
+  // Method gate: GET on the reconfigure route must be 405.
+  const ws = fakeWebServer()
+  registerReconfigureRoute(ctxWith(ws), {
+    storage: liveStorage(),
+    logger: silentLog,
+    liveConfig: { current: { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] } },
+    runtime: { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+    startServices: () => ({ queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } }),
+    stopServices: () => {},
+    currentServices: { queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } },
+  })
+  const res = fakeRes()
+  await ws.routes[0].handler({ method: 'GET' }, res)
+  check('reconfigure method gate: GET -> 405', res.statusCode === 405, String(res.statusCode))
+  check('reconfigure method gate: allow header advertises POST', res.headers.allow === 'POST', res.headers.allow)
+}
+
+{
+  // Body parser: malformed JSON body -> 400 bad_request.
+  const ws = fakeWebServer()
+  registerReconfigureRoute(ctxWith(ws), {
+    storage: liveStorage(),
+    logger: silentLog,
+    liveConfig: { current: { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] } },
+    runtime: { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+    startServices: () => ({ queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } }),
+    stopServices: () => {},
+    currentServices: { queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } },
+  })
+  const req = await makeJsonReq('POST', '{this is not valid json')
+  const res = fakeRes()
+  await ws.routes[0].handler(req, res)
+  check('reconfigure bad body: returns 400', res.statusCode === 400, String(res.statusCode))
+  const body = JSON.parse(res.body)
+  check('reconfigure bad body: error is bad_request', body.error === 'bad_request', body.error)
+}
+
+{
+  // Missing config field in payload -> 400 missing_config_field.
+  const ws = fakeWebServer()
+  registerReconfigureRoute(ctxWith(ws), {
+    storage: liveStorage(),
+    logger: silentLog,
+    liveConfig: { current: { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] } },
+    runtime: { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+    startServices: () => ({ queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } }),
+    stopServices: () => {},
+    currentServices: { queue: { start: () => {}, stop: () => {} }, poller: { start: () => {}, stop: () => {} }, notifier: { start: () => {}, stop: () => {} } },
+  })
+  const req = await makeJsonReq('POST', { foo: 'bar' })
+  const res = fakeRes()
+  await ws.routes[0].handler(req, res)
+  check('reconfigure missing field: returns 400', res.statusCode === 400, String(res.statusCode))
+  const body = JSON.parse(res.body)
+  check('reconfigure missing field: error is missing_config_field', body.error === 'missing_config_field', body.error)
+}
+
+// ---- helpers used by the reconfigure block ---------------------------
+
+async function makeJsonReq(method, body) {
+  // Returns a real-ish IncomingMessage-like object with a node Stream
+  // interface so the handler's `on('data')` / `on('end')` listeners
+  // run. Most of the surface stays unused; we only need `method` and
+  // a `Readable` stream that emits the body once.
+  const { Readable } = await import('node:stream')
+  const raw = typeof body === 'string' ? body : JSON.stringify(body)
+  const stream = Readable.from([Buffer.from(raw, 'utf8')])
+  stream.method = method
+  stream.headers = { 'content-type': 'application/json' }
+  stream.url = RECONFIGURE_ROUTE_PATH
+  return stream
+}
+
 // ---- Summary --------------------------------------------------------
 
 process.stdout.write(`\nPanelRoute tests: ${pass} pass, ${fail} fail\n`)
-if (fail > 0) process.exitCode = 1
+process.exit(fail > 0 ? 1 : 0)
