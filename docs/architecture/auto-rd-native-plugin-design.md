@@ -1654,6 +1654,57 @@ ctx.tools.register({
 
 ## 13. 依赖关系图
 
+### 13.1 Plugin apply 顺序
+
+DSH 启动时按以下顺序 mount auto-rd plugin（真实实现 `src/index.ts`，M4-UI 后 6 步）：
+
+```
+1. validate config (ConfigSchema.parse)
+2. construct logger
+3. open storageDomain (AutoRdStorage opens domain v3)
+4. seed modules from config.modules (idempotent)
+5. construct services
+     ├─ workspaceManager
+     ├─ agentProvider
+     ├─ storyRunner
+     ├─ storyQueue
+     ├─ tapdPoller
+     └─ storyNotifier
+6. recoverStories(storage, logger)         // fire-and-log
+7. ctx.effect('auto-rd:timers'):           // timer block
+     ├─ queue.start()
+     ├─ poller.start()
+     └─ notifier.start()
+8. ctx.effect('auto-rd:ui'):               // UI block (best-effort)
+     ├─ tools: register auto_rd_status / auto_rd_trigger / auto_rd_retry
+     ├─ registerAutoRdPromptSection()
+     └─ registerAutoRdPanel()
+```
+
+**为什么分两个 ctx.effect**：timer effect 必须在 storage + services 准备好之后启动；UI effect 是 best-effort（DSH service 缺就 warn），独立 effect 让 UI 注册失败不影响 backend 运行。
+
+**inject 列表**（`src/index.ts`）：
+```typescript
+export const inject = [
+  'storageDomain',      // AutoRdStorage
+  'workspaceRegistry',  // WorkspaceManager
+  'timer',              // ctx.effect
+  'web',                // tapdPoller (useTapdMock=false)
+  'fs', 'shell', 'subprocess',  // git / file ops
+  'subagents',          // storyNotifier
+  'agents',
+  'sessionPersistence',
+  'tools',              // 3 model-callable tools
+  'slots',              // Sidebar UI
+  'systemPrompt',       // system prompt section
+  'sessions',           // storyNotifier.findUserSessionId
+] as const
+```
+
+DSH 必须在所有 inject 都可用时才激活 plugin；缺一个 → plugin 不 mount + 报错。这是 DSH 强制的"软依赖"——我们可以容忍 inject service 在运行时偶尔不可用，但启动期必须齐。
+
+### 13.2 依赖关系图
+
 ```
                     ┌─────────────────────────────────┐
                     │         外部系统                  │
@@ -1661,7 +1712,24 @@ ctx.tools.register({
                        │ TAPD API          │ GitLab API
                        ▼                   ▼
         ┌────────────────────────────────────────────┐
-        │        @your-org/dsh-auto-rd 真 Plugin       │
+        │        @yangzhitong/dsh-auto-rd 真 Plugin   │
+        │                                            │
+        │  ┌─────────────────────────────────┐      │
+        │  │ backend:  13 service / utility  │      │
+        │  │  - TapdPoller / StoryQueue /     │      │
+        │  │    StoryRunner / AgentProvider / │      │
+        │  │    WorkspaceManager /            │      │
+        │  │    GitLabMerger / Recover /      │      │
+        │  │    StoryNotifier /               │      │
+        │  │    HttpClient / PlannerParser /  │      │
+        │  │    PersonaLoader                 │      │
+        │  └─────────────────────────────────┘      │
+        │  ┌─────────────────────────────────┐      │
+        │  │ UI: best-effort (DSH host only) │      │
+        │  │  - SidebarPanel                 │      │
+        │  │  - 3 tools (auto_rd_*)         │      │
+        │  │  - SystemPromptSection          │      │
+        │  └─────────────────────────────────┘      │
         └────────────────────────────────────────────┘
             │          │            │           │
             ▼          ▼            ▼           ▼
