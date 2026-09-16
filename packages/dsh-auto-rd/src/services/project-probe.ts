@@ -29,6 +29,8 @@ import { join, extname } from 'node:path'
 const MAX_WALK_DEPTH = 4
 /** Max files counted before the walk short-circuits. */
 const MAX_WALK_FILES = 5_000
+/** Max relative paths retained in `sourceFiles`. */
+const MAX_LISTED_FILES = 300
 
 /** Directories that are never part of "the codebase" for our purposes. */
 const IGNORED_DIRS = new Set([
@@ -100,6 +102,12 @@ export interface ProjectProbeResult {
    * as "source", and the language breakdown is the signal for that.
    */
   fileCount: number
+  /**
+   * Relative paths of up to MAX_LISTED_FILES walked files, sorted.
+   * Capped so the probe stays cheap on a large repo; consumers that
+   * need "does a similarly named file already exist?" use this.
+   */
+  sourceFiles: string[]
   /** True when the walk hit MAX_WALK_FILES and stopped early. */
   walkTruncated: boolean
   error?: string
@@ -123,6 +131,7 @@ export function probeProject(worktreePath: string): ProjectProbeResult {
     topLevelFiles: [],
     languageBreakdown: {},
     fileCount: 0,
+    sourceFiles: [],
     walkTruncated: false,
   }
 
@@ -179,6 +188,7 @@ export function probeProject(worktreePath: string): ProjectProbeResult {
   const walk = countFiles(worktreePath)
   base.languageBreakdown = walk.breakdown
   base.fileCount = walk.total
+  base.sourceFiles = walk.paths
   base.walkTruncated = walk.truncated
 
   return base
@@ -288,6 +298,8 @@ function buildScriptCommand(
 interface FileWalk {
   breakdown: Record<string, number>
   total: number
+  /** Relative paths, capped at MAX_LISTED_FILES, sorted. */
+  paths: string[]
   truncated: boolean
 }
 
@@ -298,10 +310,11 @@ interface FileWalk {
  */
 function countFiles(root: string): FileWalk {
   const breakdown: Record<string, number> = {}
+  const paths: string[] = []
   let total = 0
   let truncated = false
 
-  const walk = (dir: string, depth: number): void => {
+  const walk = (dir: string, depth: number, prefix: string): void => {
     if (truncated || depth > MAX_WALK_DEPTH) return
     let entries: string[]
     try {
@@ -319,8 +332,9 @@ function countFiles(root: string): FileWalk {
       } catch {
         continue
       }
+      const relative = prefix ? `${prefix}/${entry}` : entry
       if (isDir) {
-        walk(full, depth + 1)
+        walk(full, depth + 1, relative)
         continue
       }
       if (total >= MAX_WALK_FILES) {
@@ -330,9 +344,11 @@ function countFiles(root: string): FileWalk {
       total += 1
       const ext = extname(entry).toLowerCase() || '(none)'
       breakdown[ext] = (breakdown[ext] ?? 0) + 1
+      if (paths.length < MAX_LISTED_FILES) paths.push(relative)
     }
   }
 
-  walk(root, 1)
-  return { breakdown, total, truncated }
+  walk(root, 1, '')
+  paths.sort()
+  return { breakdown, total, paths, truncated }
 }

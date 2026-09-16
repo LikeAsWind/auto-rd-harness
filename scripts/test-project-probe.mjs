@@ -254,6 +254,26 @@ function mkNodeProject(files = {}) {
     JSON.stringify(r.languageBreakdown),
   )
   check('probe: walk not truncated on a small repo', r.walkTruncated === false)
+  check(
+    'probe: sourceFiles lists the walked files as relative paths',
+    r.sourceFiles.includes('src/a.ts') &&
+      r.sourceFiles.includes('src/nested/c.tsx') &&
+      r.sourceFiles.includes('src/nested/d.js'),
+    JSON.stringify(r.sourceFiles),
+  )
+  check(
+    'probe: sourceFiles sorted',
+    JSON.stringify(r.sourceFiles) === JSON.stringify([...r.sourceFiles].sort()),
+  )
+  check(
+    'probe: sourceFiles excludes node_modules',
+    !r.sourceFiles.some((f) => f.includes('node_modules')),
+  )
+  check(
+    'probe: sourceFiles length never exceeds the count',
+    r.sourceFiles.length <= r.fileCount,
+    `${r.sourceFiles.length} vs ${r.fileCount}`,
+  )
 }
 
 // ---- Git metadata ------------------------------------------------

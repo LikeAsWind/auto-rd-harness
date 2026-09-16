@@ -50,6 +50,14 @@ import { probeProject } from './project-probe.js'
 import { buildPlan } from './plan-builder.js'
 import { clarifyStory } from './clarify.js'
 import { buildSpec } from './spec-builder.js'
+import {
+  buildProposals,
+  critiqueProposals,
+  decideFromCritique,
+  effortOf,
+  type Proposal,
+  type Variation,
+} from './design-loop.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -566,135 +574,308 @@ async function runBrainstormStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description?: string
+    acceptanceCriteria?: string
+  }
   const variation = req.variation ?? 'minimal'
-  deps.logger.info(`BrainstormAgent stub running for story ${story.id} variation=${variation}`)
+  deps.logger.info(`BrainstormAgent running for story ${story.id} variation=${variation}`)
+
+  // ---- Real proposals grounded in the repository ----
+  //
+  // All three variations are derived deterministically so that the
+  // Critic can re-derive the identical set without state passing
+  // between dispatches (SD-2 keeps each stage a fresh subagent).
+  const probe = probeProject(req.worktreePath)
+  const input = {
+    storyTitle: story.title,
+    description: story.description ?? '',
+    acceptanceCriteria: story.acceptanceCriteria,
+  }
+  const proposals = buildProposals(input, probe)
+  const proposal = proposals.find((p) => p.variation === variation)
+
+  if (!proposal) {
+    return { status: 'failed', reason: `unknown brainstorm variation: ${variation}` }
+  }
 
   const report = [
     `# Proposal (${variation}) — ${story.title}`,
     ``,
-    `**Recommended because**: this is the stub path; the real model will fill in trade-offs.`,
+    `**Approach name**: ${proposal.title}`,
     ``,
     `## Approach`,
-    `Stub ${variation} approach.`,
+    proposal.approach,
     ``,
     `## Files Affected`,
-    `- \`<worktree>/src/<feature>.ts\` — create — primary change`,
-    `- \`<worktree>/tests/<feature>.test.ts\` — create — test coverage`,
+    proposal.files.length > 0
+      ? proposal.files
+          .map(
+            (f) =>
+              `- \`${f}\` — ${probe.sourceFiles.includes(f) ? 'modify' : 'create'}${
+                proposal.reuses.includes(f) ? ' (reused)' : ''
+              }`,
+          )
+          .join('\n')
+      : '- _none identified_',
     ``,
-    `## Code Sketch`,
-    '```ts',
-    `// signature only — real impl in the implementing stage`,
-    `export function handle<Feature>(req: Request): Response { /* TODO */ }`,
-    '```',
+    proposal.reuses.length > 0
+      ? `## Reuses\n${proposal.reuses.map((f) => `- \`${f}\``).join('\n')}`
+      : null,
     ``,
     `## Trade-offs`,
-    `- ✅ Smallest change — impact: low risk`,
-    `- ⚠️ Reuses existing helper — impact: couples to its quirks`,
-    `- ❌ Test surface is small — impact: less safety net`,
+    proposal.tradeoffs.map((t) => `- ${t}`).join('\n'),
     ``,
     `## YAGNI Dropped`,
-    `- Generic retry abstraction — Reason: one call site`,
+    proposal.yagniDropped.map((t) => `- ${t}`).join('\n'),
     ``,
     `## Spec Coverage`,
-    `- AC: "<see story description>" → satisfied by \`<worktree>/src/<feature>.ts\``,
+    proposal.covers.length > 0
+      ? proposal.covers.map((c) => `- ${c}`).join('\n')
+      : `- _no acceptance criteria were provided, so no scope is claimed_`,
     ``,
     `[BRAINSTORM_${variation.toUpperCase()}_COMPLETE]`,
-  ].join('\n')
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, `03-proposal-${variation}.md`), report, 'utf-8')
 
-  return { status: 'success', summary: `Stub Brainstorm proposal (${variation}).` }
+  return {
+    status: 'success',
+    summary: `Proposal ${variation}: ${proposal.title} (${proposal.files.length} file(s), covers ${proposal.covers.join('/') || 'nothing'})`,
+  }
 }
 
 async function runCriticStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
-  deps.logger.info(`CriticAgent stub running for story ${story.id}`)
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description?: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`CriticAgent running for story ${story.id}`)
+
+  // ---- Real critique over the real proposals ----
+  //
+  // The proposals are re-derived deterministically (see runBrainstormStub)
+  // so the critique measures the same artefacts the Brainstorm stage
+  // produced without any state passing between subagents.
+  const probe = probeProject(req.worktreePath)
+  const input = {
+    storyTitle: story.title,
+    description: story.description ?? '',
+    acceptanceCriteria: story.acceptanceCriteria,
+  }
+  const proposals = buildProposals(input, probe)
+  const critique = critiqueProposals(proposals, input, probe)
+
+  const variations: Variation[] = ['minimal', 'clean', 'novel']
+
+  const coverageHeader = `| Acceptance criterion | Category | ${variations.join(' | ')} |`
+  const coverageSep = `|${'---|'.repeat(variations.length + 2)}`
+  const coverageRows = critique.coverage.map((r) => {
+    const cells = variations.map((v) => (r.covered[v] ? '✅' : '❌')).join(' | ')
+    return `| ${escapePipe(r.criterion)} | ${r.category ?? '—'} | ${cells} |`
+  })
+
+  const findingsFor = (v: Variation): string => {
+    const items = critique.findings.filter((f) => f.proposal === v)
+    if (items.length === 0) return '_No findings._'
+    return items
+      .map((f) => `- **${f.severity}**: ${f.detail}`)
+      .join('\n')
+  }
+
+  const countLine = (v: Variation): string => {
+    const c = critique.counts[v] ?? { critical: 0, important: 0, minor: 0 }
+    return `- \`${v}\`: ${c.critical} Critical, ${c.important} Important, ${c.minor} Minor`
+  }
+
+  const systemic =
+    critique.systemic.length > 0
+      ? critique.systemic.map((s) => `- "${s}"`).join('\n')
+      : '- none — every criterion is covered by at least one proposal'
 
   const report = [
     `# Critique — ${story.title}`,
     ``,
     `## Spec Line-by-Line`,
-    `| AC | minimal | clean | novel |`,
-    `|----|---------|-------|-------|`,
-    `| (stub) | ✅ | ✅ | ✅ |`,
+    coverageHeader,
+    coverageSep,
+    coverageRows.length > 0
+      ? coverageRows.join('\n')
+      : `| _no acceptance criteria provided_ | — | ❌ | ❌ | ❌ |`,
+    ``,
+    `Coverage is decided by whether a proposal's declared scope covers the criterion's category.`,
     ``,
     `## Findings — Proposal: minimal`,
-    `_No Critical findings in stub._`,
+    findingsFor('minimal'),
     ``,
     `## Findings — Proposal: clean`,
-    `_No Critical findings in stub._`,
+    findingsFor('clean'),
     ``,
     `## Findings — Proposal: novel`,
-    `_No Critical findings in stub._`,
+    findingsFor('novel'),
+    ``,
+    `## Finding Counts`,
+    variations.map(countLine).join('\n'),
     ``,
     `## Cross-Proposal Comparison`,
-    `- Fewest Critical findings: minimal (tied with clean and novel — all zero)`,
-    `- Systemic issues (appear in all three): none in stub`,
-    `- Novel-only risks: none in stub`,
+    `- Fewest Critical findings: ${fewestCritical(critique.counts)}`,
+    `- Uncovered criteria: ${critique.uncovered.length > 0 ? critique.uncovered.length : '0'}`,
+    `- Systemic issues (appear in all three):`,
+    systemic,
     ``,
     `## Handoff`,
-    `Stub. Decision Agent may pick freely — no Critical blockers.`,
+    critique.uncovered.length > 0
+      ? `${critique.uncovered.length} acceptance criterion(a) are uncovered by every proposal. ${'Decision Agent must address this before implementation.'}`
+      : `Every acceptance criterion is covered by at least one proposal. Decision Agent may proceed.`,
     ``,
     `[CRITIQUE_COMPLETE]`,
   ].join('\n')
 
   writeFileSync(join(req.artifactsDir, '04-critique.md'), report, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Critique report.' }
+  // [CRITIQUE_BLOCKED] rolls the story back to clarification (design §6.7).
+  if (critique.systemic.length > 0 && critique.coverage.length === 0) {
+    return {
+      status: 'blocked',
+      reason: `critique found a systemic gap: ${critique.systemic[0]}`,
+    }
+  }
+
+  return {
+    status: 'success',
+    summary: `Critique: ${critique.coverage.length} criteria, ${critique.findings.length} finding(s), ${critique.uncovered.length} uncovered`,
+  }
+}
+
+/** Name the variation(s) with the fewest Critical findings. */
+function fewestCritical(counts: Record<string, { critical: number }>): string {
+  const entries = Object.entries(counts)
+  if (entries.length === 0) return 'n/a'
+  const min = Math.min(...entries.map(([, c]) => c.critical))
+  const winners = entries.filter(([, c]) => c.critical === min).map(([v]) => v)
+  return winners.length === entries.length
+    ? `${winners.join(', ')} (all tied at ${min})`
+    : `${winners.join(', ')} (${min})`
+}
+
+/** Escape a value so it cannot break a markdown table row. */
+function escapePipe(text: string): string {
+  return text.replace(/\|/g, '\\|').replace(/\n/g, ' ').trim()
 }
 
 async function runDecisionStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
-  deps.logger.info(`DecisionAgent stub running for story ${story.id}`)
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description?: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`DecisionAgent running for story ${story.id}`)
+
+  // ---- Real scoring over the real critique ----
+  const probe = probeProject(req.worktreePath)
+  const input = {
+    storyTitle: story.title,
+    description: story.description ?? '',
+    acceptanceCriteria: story.acceptanceCriteria,
+  }
+  const proposals = buildProposals(input, probe)
+  const critique = critiqueProposals(proposals, input, probe)
+  const decision = decideFromCritique(proposals, critique, input)
+  const chosen = proposals.find((p) => p.variation === decision.chosen)!
+
+  const scoreRows = decision.scores
+    .map(
+      (s) =>
+        `| ${s.variation} | ${s.specCoverage} | ${s.critical} | ${s.effort} | ${s.total} |`,
+    )
+    .join('\n')
+
+  const criticalOpen = critique.findings.filter(
+    (f) => f.severity === 'Critical' && f.proposal === decision.chosen,
+  )
 
   const report = [
     `# Decision — ${story.title}`,
     ``,
     `## Chosen`,
-    `\`minimal\` — stub chose the lightest path; real Decision will pick on trade-offs.`,
+    `\`${decision.chosen}\` — ${chosen.title}.`,
+    ``,
+    decision.rationale,
+    ``,
+    `### Files this commits us to`,
+    chosen.files.length > 0
+      ? chosen.files.map((f) => `- \`${f}\``).join('\n')
+      : '- _none_',
     ``,
     `## Score Breakdown`,
     `| Proposal | Spec Coverage | Critical Count | Effort | Total |`,
     `|----------|---------------|----------------|--------|-------|`,
-    `| minimal  | 5/5           | 0              | S      | 5     |`,
-    `| clean    | 5/5           | 0              | M      | 4     |`,
-    `| novel    | 5/5           | 0              | L      | 3     |`,
+    scoreRows,
     ``,
-    `Tiebreaker applied: least effort.`,
+    `Scoring: \`coverage_ratio * 5 - 2*Critical - 1*Important\`, rounded. Effort is reported for cost`,
+    `visibility and used only to break ties (correctness before cost).`,
+    ``,
+    decision.tiebreaker
+      ? `Tiebreaker applied: ${decision.tiebreaker}.`
+      : `No tiebreaker was needed — the leader was strictly highest.`,
     ``,
     `## Critical Findings — Resolution`,
-    `_None — stub has no Critical findings to resolve._`,
+    criticalOpen.length > 0
+      ? criticalOpen.map((f) => `- ${f.detail}`).join('\n')
+      : `_None open on the chosen proposal._`,
     ``,
     `## Rejected Findings (with reasoning)`,
-    `_None._`,
+    critique.findings.filter((f) => f.proposal !== decision.chosen).length > 0
+      ? critique.findings
+          .filter((f) => f.proposal !== decision.chosen)
+          .map((f) => `- (${f.severity}, ${f.proposal}) ${f.detail} — does not apply to the chosen proposal`)
+          .join('\n')
+      : `_None._`,
     ``,
     `## Carried-Forward Clarifications`,
-    `_None._`,
+    `_None — see \`02-clarification.md\` for the gate that cleared them._`,
     ``,
     `## Ledger`,
     `- Decision made at: ${new Date().toISOString()}`,
     `- Story state at decision: decision`,
-    `- Proposal chosen: minimal`,
-    `- Critical findings open at handoff: 0`,
+    `- Proposal chosen: ${decision.chosen}`,
+    `- Spec coverage of the choice: ${decision.scores.find((s) => s.variation === decision.chosen)?.specCoverage}`,
+    `- Critical findings open at handoff: ${criticalOpen.length}`,
+    `- Uncovered criteria carried forward: ${critique.uncovered.length}`,
     `- Open Clarifications: none`,
     ``,
     `## Execution Handoff`,
     `**Available modes**: Subagent-Driven | Inline`,
-    `**Recommendation**: Stub recommends Subagent-Driven for clarity, even on small bounded stories.`,
+    `**Recommendation**: Subagent-Driven — this story has ${critique.coverage.length} acceptance criterion(a) and ${queryEffort(decision.chosen, proposals)} effort, which suits one subagent per task.`,
     ``,
     `[DECISION_COMPLETE]`,
   ].join('\n')
 
   writeFileSync(join(req.artifactsDir, '05-decision.md'), report, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Decision (chose minimal).' }
+  return {
+    status: 'success',
+    summary: `Decision: chose ${decision.chosen} (${decision.rationale})`,
+  }
+}
+
+/** Find the recorded effort label for a variation. */
+function queryEffort(variation: Variation, proposals: Proposal[]): string {
+  const p = proposals.find((x) => x.variation === variation)
+  return p ? effortOf(p) : '?'
 }
 
 async function runSpecStub(
