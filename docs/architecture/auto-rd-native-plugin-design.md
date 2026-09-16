@@ -1401,6 +1401,115 @@ ctx.tools.register({
 
 ---
 
+## 15. 实施落地总结（M1-M4 已完成）
+
+> 截至 `feature/m4-ui` HEAD (`58a5945`)，M1-M4 全部落地。每个里程碑的核心 commit hash 与设计要点如下。
+
+### 15.1 M1 — 关闭验证循环
+
+Commit: `0dfda44` "M1: close the verification loop"
+
+要点：
+- `services/tapd-poller.ts` 的 `enqueueIfNew()` 在 enqueue 时预填 `story.worktreePath`
+- `services/agent-provider.ts` 探测 `ctx.get('subagents')` —— 有真服务则走真 SubAgentProvider，缺则走 stub handler（M1 跑通 fake 路径）
+- `services/recover.ts`（新建）：`recoverStories(storage, logger)` 把 ACTIVE 状态 story 重置回 `pending`（清 `retryCount: 0`），支持跨重启
+- `index.ts` 在 timer 启动前调 recoverStories
+
+### 15.2 M2 — 接通 pre-spec 7 个 stage
+
+Commit: `a3d17bb` "M2: wire the seven pre-spec stages end to end"
+
+要点：
+- 6 个新 persona：`clarification.md` / `brainstorm.md`（从 `.md.tmpl` 重整）/ `critic.md` / `decision.md` / `spec.md` / `planner.md` —— 每个引用具体 pattern id + sentinel
+- `brainstorm.ts` 重整到 `minimal` / `clean` / `novel` 三 variation（对齐 §6.6）
+- `agent-provider.ts` 加 Brainstorm 三路 variation lookup + 6 stub handler + sentinel token
+- `persona-loader.ts` 三路查找（lib/ + src/ + cwd fallback）+ miss 时返回空串（非 fatal）
+- `package.json` `build` 链 `tsc && copy:personas`，`copy:personas` 把 `*.md` 复制到 `lib/agents/personas/`
+- `story-runner.ts` 6 个 stage handler 接通；spec 之后用 `notInM2Yet` 短路到 `completed`
+
+### 15.3 M3 — 19 state 端到端打通
+
+Commits（5 个）：
+- `ad3318d` M3 personas：implementation / test / fix / verification / review / final-verify
+- `2c90f2a` M3 agents：implementation（重整）+ fix（新建）
+- `f7a49d5` M3 schema + planner parser
+- `9e8c3b9` M3 agent-provider：6 个 stub + per-task / per-axis dispatch
+- `10d9c6f` M3 story-runner：19 state 全打通
+
+要点：
+- **Schema v3**：`TaskRecord` 加 `payload`（taskId, title, files, dependsOn, estimatedMinutes, red, green, verify, commit, specExcerpt）、`attemptCount`、`blockedReason`、`status` 增 `'blocked'`；`AUTORD_DOMAIN_VERSION` 从 1 升到 3
+- **Planner markdown parser**：解析 `### TXXX` 头，分容忍自由格式、缺可选步骤、内联 `**bold**` 标记；`findKvLine` 用 `line.replace(/\*\*/g, '')` 剥所有 `**`——早期版本只剥边缘，导致 T002 `**Depends on**` 解析失败
+- **5-round fix breaker（SD-4）**：`fixing` stage 用 story 所有 task 的 `attemptCount` 之和作 breaker——≥ 5 → `blocked`
+- **双轴并行 review（CR-1 / SD-6）**：`reviewing` 和 `final_verifying` 都用 `Promise.allSettled` over `['standards', 'spec']`——任一 reject → `fixing`
+- **Fresh subagent per task（SD-2）**：`ImplementationAgent` 按 taskId 实例化，dispatch 时按 taskId lookup
+- **No-subagents contract（SD-3）**：ImplementationAgent spec 不含 subagent-tool 权限，AgentProvider 不暴露 spawn-other-subagent
+- **M3 stub 行为**：每个 stage handler 调用 AgentProvider stub handler，stub 写 `08-impl-<taskId>.md` / `09-test-report.md` / `10-fix-report.md` / `11-verify-report.md` / `12-review-<taskId>-<axis>.md` / `13-final-verify-<axis>.md` + sentinel token 供状态机解析
+- **MR / TAPD stub**：`mr_creating` 写 `99-mr.md`（无真 push），`tapd_syncing` 写 `98-tapd-sync.md`（无真 TAPD API）—— M4-A 接真服务
+
+### 15.4 M4-A — GitLab MR + TAPD 真接
+
+Commits（6 个，`feature/m4-integration` 分支，merge 到 `main` as `bf8ab05`）：
+- `583e121` A1: HttpClient（timeout / retry / 错误分类 / 429 Retry-After）
+- `da9b7dc` A2: TAPD poller 真接（`useTapdMock` 开关 + 多 envelope + 多 workspace）
+- `06ec568` A3: syncTapd（POST `/changes` + 404→PATCH 回落）
+- `5a51d76` A4: GitLabMerger（push + findExistingMR + createOrReuseMR + projectIdFromRepoUrl）
+- `4b4a41d` A5: runner 接真调用（checkpoint 模式 + 重启可恢复）
+- `bf8ab05` A6: ESM `.js` 后缀修复 + 22 测试
+
+要点（M4-A 核心设计）：
+- **Checkpoint + Idempotent Recovery**（M4 灵魂）：mr_creating / tapd_syncing 每个外部副作用写 checkpoint 进 StoryRecord：
+  - `pushedSha` / `pushedAt`：已 push 则跳过
+  - `mrIid` / `mrUrl` / `mrCreatedAt` / `mrReused`：已建 MR 则跳过（list 已有则 reused=true）
+  - `tapdSyncedAt` / `tapdSyncAttempts`：已 sync 则跳过；≥ 20 次失败 → `failed`（非 `blocked`）
+- **失败哲学**：transient（5xx / 超时 / 网络）→ 保持当前 state 重试；non-transient（401 / 403 / 404 项目不存在）→ `blocked`（config error）
+- **HttpClient** 错误分类：`HttpError(transient)` / `HttpTimeoutError` / `HttpNetworkError`，重试策略：5xx / 408 / 429 → backoff（250ms × 2^n，上限 5s），其它 4xx 立即抛
+- **TAPD fetch** 多 envelope 兼容（`{data}` / `{stories}` / `{items}` / top-level array）；`name → title`、`acceptance_criteria → acceptanceCriteria`、`module.{id,name} → category` 字段映射
+- **GitLabMerger** 用 URL-encoded project id（`group%2Frepo`）—— 兼容 SaaS 与 self-hosted
+- **22 个 fake-server test** 覆盖 HttpClient / TAPD / GitLab 全部路径
+
+### 15.5 M4-UI — Sidebar UI + Tools + Notifier + System Prompt
+
+Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
+- `86bd47e` U1: DSH service 类型声明（本地 narrow types）
+- `5c2412b` U2: `auto_rd_status` tool（summary / stories / tasks 三 scope）
+- `8a6c129` U3: `auto_rd_trigger` tool（poll_now / advance_story / mark_reviewed）
+- `33f949e` U4: `auto_rd_retry` tool（retry / skip / reset_to_pending）
+- `02f5757` U5: StoryNotifier（5s 轮询 blocked stories + 推送 user session）
+- `81fedac` U6: System prompt section 注册
+- `4a259b1` U7: Sidebar 面板（`sidebar.worktable.project` slot，JSON tree 渲染）
+- `58a5945` U8: `index.ts` 接线全部 UI
+
+要点（M4-UI 核心设计）：
+- **Best-effort 容错**：所有 DSH service 通过 `ctx.get('slots') as SlotsService | undefined` 获取——拿不到就 `warn + skip`，plugin 在 DSH 进程外也能跑
+- **本地类型声明**（`src/types/dsh-services.ts`）：cordis 包不暴露 slots / tools / systemPrompt——这些是 DSH 注入的；用本地 narrow 接口声明依赖，runtime 不引用私有 DSH 包
+- **Sidebar renderer 返回 JSON tree**：`{type:'div'|'span'|..., children:[...]}`——host 进程不依赖 React runtime，由 DSH client side 转译
+- **Notifier 用轮询而非 Cordis event**：Cordis 没 `storage-changed` event；notifier 每 5s 扫 storage，已通知过的进 Set 避免重复
+- **3 tool zod 校验**：discriminatedUnion / strict object——错参数返回 `{ok:false, error:'invalid_parameters'}` 而非 throw（DSH 处理 throw 差）
+- **inject 列表扩展**：`slots` / `systemPrompt` / `sessions` 加入 inject，Cordis 在 DSH 提供全部 service 后才激活
+
+### 15.6 后续里程碑状态
+
+| 里程碑 | 文档定义 | 落地状态 |
+|---|---|---|
+| M5 限流 | §11 | 部分落地：`StoryQueue.tick()` 已实现全局 + per-module 限流（§11.1 匹配） |
+| M5 错误恢复 | §10.2 | 部分落地：`recoverStories` 在 mount 前调用；**缺 checkpoint 模式文档**（M4-A 已实现但 §10.2 没补） |
+| M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section |
+| M5 端到端测试 | §13.3 + 附录 A.3 | **未落地**：仅 M4-A 的 22 个 fake-server 单元测试，**无真凭据 / 真 DSH 进程的 e2e** |
+
+**M5 e2e 是当前最大缺口**——需要：
+1. TAPD 公司内网 / 公网凭据
+2. GitLab 自部署 / SaaS 凭据 + 测试 project
+3. 真 DSH runtime（`~/.dsh/profiles/web/cordis.patch.yml` 配置）+ 真 plugin mount
+4. 跑通 story 端到端 → 验证 sidebar 渲染 / tool 调用 / notifier 推送
+
+---
+
+文档版本：v0.2  
+最后更新：M4-UI 完成后（commit `58a5945` + gap-analysis `0992eba`）  
+下一步：M5 e2e + 文档与代码同步（见 `gap-analysis.md`）
+
+---
+
 ## 附录 A：关键问题与答案
 
 ### A.1 为什么不直接用 dynamic plugin？
