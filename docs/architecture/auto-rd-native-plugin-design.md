@@ -148,7 +148,7 @@ auto-rd 是一个**部署级真 Plugin**，作为 DeepSeek Harness 的扩展组�
 │   │   ├── tapd-poller.ts          # TAPD 拉取 + syncTapd 导出函数
 │   │   ├── story-queue.ts          # Story 队列 + 调度（10s tick）
 │   │   ├── story-runner.ts         # 19-state 状态机 + 5-round breaker
-│   │   ├── agent-provider.ts       # 13 agent dispatch + stub handler
+│   │   ├── agent-provider.ts       # 13 agent dispatch (model-backed + deterministic)
 │   │   ├── workspace-manager.ts    # Workspace + Worktree
 │   │   ├── gitlab-merger.ts        # GitLab MR（M4-A 真接）
 │   │   ├── recover.ts              # 跨重启 ACTIVE state → pending
@@ -473,7 +473,7 @@ If a story is blocked, the system will notify you with details and required acti
 | `syncTapd` (exported fn) | `services/tapd-poller.ts` | 回写 story 状态到 TAPD | `tapd_syncing` stage 调用 | 按需 |
 | `storyQueue` | `services/story-queue.ts` | 扫 pending story + 并发限流 + 调 `storyRunner.runStory` | 10s timer | 后台 |
 | `storyRunner` | `services/story-runner.ts` | 19-state 状态机推进 | 同步调用 | 按需 |
-| `agentProvider` | `services/agent-provider.ts` | 13 个 agent 模板 + SubAgent provider + stub handler | 同步调用 | 按需 |
+| `agentProvider` | `services/agent-provider.ts` | 13 个 agent 模板 + subagent dispatch + deterministic handler | 同步调用 | 按需 |
 | `workspaceManager` | `services/workspace-manager.ts` | Module Workspace + Story Worktree 创建/清理 | 同步调用 | 按需 |
 | `gitlabMerger` | `services/gitlab-merger.ts` | pushBranch + findExistingMR + createOrReuseMR | `mr_creating` stage 调用 | 按需 |
 | `recoverStories` (exported fn) | `services/recover.ts` | Plugin mount 时把 ACTIVE state story 重置回 `pending` | mount 时一次 | 一次性 |
@@ -487,7 +487,7 @@ If a story is blocked, the system will notify you with details and required acti
 | `autoRdTriggerTool` | `tools/auto-rd-trigger.ts` | 模型可调：poll_now / advance_story / mark_reviewed | 模型调用 | 一次性注册 |
 | `autoRdRetryTool` | `tools/auto-rd-retry.ts` | 模型可调：retry / skip / reset_to_pending | 模型调用 | 一次性注册 |
 
-### 3.1.1 Agents（13 个，模板 + stub handler）
+### 3.1.1 Agents（13 个，模板 + 双路径 handler）
 
 每个 agent 文件都在 `packages/dsh-auto-rd/src/agents/`：
 
@@ -502,12 +502,21 @@ If a story is blocked, the system will notify you with details and required acti
 | `PlannerAgent` | `planner.ts` | `07-tasks.md` | `planning` |
 | `ImplementationAgent` | `implementation.ts` | `08-impl-<taskId>.md` | `implementing` (per-task) |
 | `TestAgent` | `test.ts` | `09-test-report.md` | `testing` |
-| `FixAgent` | `fix.ts` | `10-fix-report.md` | `fixing` |
+| `FixAgent` | `fix.ts` | `10-fix-report-attempt-<n>.md` | `fixing` |
 | `VerificationAgent` | `verification.ts` | `11-verify-report.md` | `verifying` |
 | `ReviewAgent` | `review.ts` | `12-review-<taskId>-<axis>.md` | `reviewing` (2 轴并行) |
 | `FinalVerifyAgent` | `final-verify.ts` | `13-final-verify-<axis>.md` | `final_verifying` (2 轴并行) |
 
 每个 agent 都有同名 persona markdown 在 `packages/dsh-auto-rd/src/agents/personas/`，由 `persona-loader.ts` 三路查找加载，运行时通过 SubAgent provider 注入到子 session 的 system prompt。
+
+**双路径 handler**（见 `services/agent-provider.ts` 模块文档）：
+
+| 路径 | 触发条件 | 行为 |
+|---|---|---|
+| model-backed | `ctx.subagents.start()` 可用 | 把 persona + toolFilter + worktree 交给真 subagent |
+| deterministic | 无 subagent service（standalone build / 无该服务的 harness） | 做该 stage **不需要模型**的那部分**真实工作**，并在 artifact 里明说自己是哪条路径 |
+
+deterministic 路径下各 stage 的真实动作：context 探测 worktree + 跑 baseline；clarification 做歧义检测；brainstorm/critic/decision 基于真实文件布局产出三方案 + 覆盖矩阵 + 打分；spec 从 story 文本抽取义务；planning 按 AC 拆任务并锚定真实路径；implementation/fix **真 git commit**；test **真 subprocess 跑测试**；verification **真读 diff + 真重跑**；review/final-verify **真读 diff**。仍然需要模型判断的只有两件事：实现文件的内容，以及 reviewer 会提出的 findings。
 
 ### 3.2 服务依赖图
 
@@ -1176,7 +1185,7 @@ export class AgentProvider {
 
 **关键不变式**：
 - 所有 agent 走同一个 `dispatch()` 入口，差异在 registry lookup（按 name / taskId / variation / axis）
-- SubAgentsService **best-effort**——拿不到时 dispatch 走 stub handler（写 artifact + emit sentinel），不抛错（见 §7.5）
+- SubAgentsService **best-effort**——拿不到时 dispatch 走 deterministic handler（做该 stage 不需要模型的那部分真实工作 + emit sentinel），不抛错（见 §7.5）
 - 每个 agent handler 返回 `AgentDispatchResult`，**不 throw**——runner 在 §5.3 中处理 transient 错误
 
 ### 6.3 Agent 基类
@@ -1349,7 +1358,7 @@ export const ContextAgent: AgentSpec = {
 
 **反向 contract**：persona 文档**不能**改 sentinel 字面量。改 sentinel 必须同步改：
 1. `agents/personas/*.md` 文档
-2. `services/agent-provider.ts` stub handler 输出的字符串
+2. `services/agent-provider.ts` 的 deterministic handler 输出的字符串
 3. `services/story-runner.ts` 解析逻辑
 4. `docs/architecture/auto-rd-native-plugin-design.md` §6.7（本节）
 
@@ -2535,9 +2544,9 @@ Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
 
 ---
 
-文档版本：v1.5  
-最后更新：Round 14 后（commit + M5 Logger rate limit + §10.5 文档 + clarification persona stale TODO 清除）  
-下一步：M5 e2e（需用户主动提供凭据走安全通道）+ 探索报告归档
+文档版本：v1.6  
+最后更新：19 个 stage handler 全部改为真实实现 + host 契约按真实运行时核验并修正 + client UI 半实现 + §7 / §10.4 / §15 重写  
+下一步：4 项真实环境验收（见 §15.7 与 `packages/dsh-auto-rd/README.md#verifying-a-deployment`）——真 DSH mount、subagent 派发、TAPD/GitLab 网络、浏览器渲染
 
 ---
 
