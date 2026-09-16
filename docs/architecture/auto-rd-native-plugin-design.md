@@ -2039,26 +2039,123 @@ Dynamic Plugin 在源码层明确声明**不跨 DSH 重启持久**（参考 `dsh
 
 ```bash
 echo '- id: auto-rd
-  name: "@your-org/dsh-auto-rd"
+  name: "@yangzhitong/dsh-auto-rd"
   config: {...}' >> ~/.dsh/profiles/web/cordis.patch.yml
 ```
 
 ### A.3 部署 / 测试流程
 
-1. 开发：本地 `~/.dsh/profiles/web/node_modules/@your-org/dsh-auto-rd/`
+1. 开发：本地 `~/.dsh/profiles/web/node_modules/@yangzhitong/dsh-auto-rd/`
 2. 编译：`pnpm run build`（产物在 `lib/`）
 3. 修改 cordis.patch.yml 添加 auto-rd 行
 4. 重启 DSH → auto-rd 自动加载
 5. 在 DSH console 中查看 `[cordis:auto-rd]` 标签的 log
+6. 跑测试：`npm run test:m4`（fake-server 22 pass + parser 10 pass）
 
 ### A.4 调试
 
 - Plugin 自己的 console.log 带 `[auto-rd]` 前缀
 - storageDomain 数据：`~/.dsh/storages/auto-rd.json` + per-record `auto-rd/stories/*.json`
 - 文件系统 artifact：`workspaceRoot/<module>/.auto-rd/stories/<story-id>/artifacts/*.md`
+- Storage inspect：`npx dsh storage inspect auto-rd` 列出所有 record
+
+### A.5 M4-A: Checkpoint + Idempotent Recovery 设计回顾
+
+> M4-A 是整个 plugin 最关键的设计决策——**外部副作用必须可恢复**。
+
+#### 问题
+
+TAPD API + GitLab API + 网络瞬时故障是常态。Plugin 重启 / 任务中断不应该让 story 卡在 `mr_creating` 或 `tapd_syncing`。
+
+#### 解法
+
+1. **每个外部副作用对应 StoryRecord 一个 checkpoint 字段**（§4.1.2）：
+   - `pushBranch` → `pushedSha` / `pushedAt`
+   - `createOrReuseMR` → `mrIid` / `mrUrl` / `mrCreatedAt` / `mrReused`
+   - `syncTapd` → `tapdSyncedAt` / `tapdSyncAttempts`
+
+2. **Stage handler 入口先检查 checkpoint**：字段非空 → 跳过对应副作用，直接进入下一段
+
+3. **recoverStories 粗暴重置 ACTIVE state story → pending**（§10.2）：runner 重跑时会从 checkpoint 字段恢复"已完成"上下文
+
+4. **20 次 transient cap**：tapd_syncing 失败计数 ≥ 20 → `failed`（不是 blocked——网络问题不该让人介入）
+
+#### 案例
+
+```
+push 成功 → MR create 401 → plugin 重启
+  ↓ recoverStories
+state = pending, retryCount = 0
+  ↓ runner 重跑 → ... → mr_creating
+push 检查：pushedSha 存在 → skip
+createOrReuseMR：list existing 复用 → success
+  ↓ state = tapd_syncing
+tapd 检查：tapdSyncedAt 不存在 → 调 syncTapd → success
+  ↓ state = completed
+```
+
+**M1-M3 没有 checkpoint 模式**——它们没有外部副作用，只在 worktree + storage 里跑。Checkpoint 是 M4 引入，专门解决"plugin 重启 + 外部副作用 + 网络故障"三角。
+
+#### 权衡
+
+- ❌ 旧 record 在 v3 schema 下缺 checkpoint 字段 → 跑旧 record 时**会自动补做**（unpushed code 重新 push）
+- ❌ partial state 风险：push 成功但 MR 失败时，"未 MR" 状态用户可见 30s（等 next tick）
+- ✅ 99% 网络瞬时故障无需人工
+- ✅ idempotent recovery 不需要 Cold Resume session ID（M1 决策）
+
+### A.6 M4-UI: Best-Effort UI 设计回顾
+
+> Sidebar / 3 tool / system prompt 都是 M4-UI 加的——它们的共性是 **best-effort**。
+
+#### 问题
+
+DSH 进程注入的 service（`slots` / `tools` / `systemPrompt` / `subagents` / `sessions`）不一定可用：
+- Standalone build（CI / 测试）跑在裸 Node，无 DSH host
+- DSH 版本升级可能改 API 形状
+- 部署时可能禁用某些 service
+
+#### 解法
+
+```typescript
+// 每个 DSH service 调用都通过 ctx.get('xxx') 而不是 inject:['xxx']
+const slots = ctx.get('slots') as SlotsService | undefined
+if (!slots) {
+  ctx.logger('auto-rd').warn('slots service not available; sidebar will not register')
+  return false  // 不抛错
+}
+// ... 正常使用 slots
+```
+
+- **inject 列表只放真正必需的**（storageDomain / timer / web / fs / shell 等）—— 缺一 plugin 不能 mount
+- **DSH host-only services 用 ctx.get**—— 拿不到就 warn + skip，plugin 其余功能全活
+
+#### 应用
+
+| Service | 用法 | 缺时行为 |
+|---|---|---|
+| `storageDomain` | `inject` | DSH 不挂（plugin 不 mount） |
+| `timer` | `inject` | DSH 不挂 |
+| `subagents` (notifier 用) | `ctx.get` | 跳过 notifier，story 仍 blocked 在 storage—— sidebar / status 仍能查 |
+| `slots` (sidebar 用) | `ctx.get` | 跳过 sidebar |
+| `tools` (3 model-callable) | `ctx.get` | 跳过 3 tool—— plugin 自己仍能跑 |
+| `systemPrompt` (section) | `ctx.get` | 跳过 section |
+| `sessions` (notifier 找 user session) | `ctx.get` | notifier 全静默 |
+
+#### 权衡
+
+- ✅ Plugin 在所有 DSH 形态都跑得起来（CI / dev / production / 不同 DSH 版本）
+- ✅ UI surface 可逐步启用，新 DSH service 出现时不需要 plugin 改
+- ❌ DSH service 实际 API 改变时**不会立即发现**——本地 narrow 类型不强制 contract（依赖 DSH runtime assertion / 测试发现）
+- ❌ warn log 可能淹没正常 log（待优化——M5 加 warning rate limit）
+
+#### 关键不变式
+
+> **Plugin 的"核心功能"（runner / queue / poller / recovery）绝不能依赖 DSH UI service。**
+
+UI 是 **advisor + controller**，不是 **driver**。这是 M4-UI 加完后 plugin 仍然可以"跑通骨架 + TAPD 拉取 + Context Agent"的根本原因——M1 验证标准在 M4-UI 后仍然成立。
 
 ---
 
-文档版本：v0.1  
-最后更新：架构重设计阶段  
-下一步：实施 M1 骨架
+文档版本：v1.1  
+最后更新：Round 10（§12 + 附录 A retrospective）后 `8846b81`  
+下一步：M5 e2e（需真 TAPD / GitLab 凭据 + DSH runtime）+ 探索报告归档
