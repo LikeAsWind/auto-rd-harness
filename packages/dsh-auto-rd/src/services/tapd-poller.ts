@@ -36,6 +36,12 @@ export interface TapdPollerDeps {
    * supplied. Test harness can pass one with a fake fetcher.
    */
   httpClient?: HttpClient
+  /**
+   * Optional callback fired at the end of every tick (success or error).
+   * Used by the host plugin to publish live runtime stats to the panel
+   * route. Errors thrown by this callback do NOT propagate.
+   */
+  onTickEnd?: (info: { at: Date; error: Error | null }) => void
 }
 
 export interface TapdStory {
@@ -137,8 +143,24 @@ export class TapdPoller {
       for (const t of stories) {
         await this.enqueueIfNew(t)
       }
+      this.notifyTickEnd(null)
     } catch (err) {
       this.deps.logger.error(`TapdPoller tick failed: ${(err as Error).message}`)
+      this.notifyTickEnd(err as Error)
+    }
+  }
+
+  /**
+   * Fire the `onTickEnd` callback if provided. Swallow any callback error
+   * so a broken stats sink can never take the poller down.
+   */
+  private notifyTickEnd(err: Error | null): void {
+    const cb = this.deps.onTickEnd
+    if (!cb) return
+    try {
+      cb({ at: new Date(), error: err })
+    } catch (cbErr) {
+      this.deps.logger.warn(`TapdPoller onTickEnd callback threw: ${(cbErr as Error).message}`)
     }
   }
 
