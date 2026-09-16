@@ -49,6 +49,7 @@ import {
 import { probeProject } from './project-probe.js'
 import { buildPlan } from './plan-builder.js'
 import { clarifyStory } from './clarify.js'
+import { buildSpec } from './spec-builder.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -700,58 +701,54 @@ async function runSpecStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string; description: string; acceptanceCriteria?: string }
-  deps.logger.info(`SpecAgent stub running for story ${story.id}`)
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`SpecAgent running for story ${story.id}`)
 
-  const report = [
-    `# Spec — ${story.title}`,
-    ``,
-    `## Context`,
-    `Stub spec generated from story ${story.id}. Classification: bounded.`,
-    ``,
-    `## Goal`,
-    `${story.description}`,
-    ``,
-    `## Non-Goals`,
-    `- Anything outside the acceptance criteria.`,
-    ``,
-    `## Behavior`,
-    story.acceptanceCriteria
-      ? `1. ${story.acceptanceCriteria}`
-      : `1. Stub behavior: satisfies the story description.`,
-    ``,
-    `## API or Interface`,
-    '```ts',
-    `// Stub signature — real impl in implementing stage.`,
-    `export function handle<Feature>(req: Request): Response`,
-    '```',
-    ``,
-    `## Data Model Changes`,
-    `No schema changes.`,
-    ``,
-    `## Error Contract`,
-    `| Error | Status | Log | User message | Retry |`,
-    `|-------|--------|-----|--------------|-------|`,
-    `| ValidationError | 400 | warn | "Invalid input" | no |`,
-    ``,
-    `## Test Plan`,
-    `- tests/<feature>.test.ts — covers Behavior §1`,
-    ``,
-    `## Compatibility`,
-    `No breaking changes.`,
-    ``,
-    `## Security & Privacy`,
-    `No PII or authz changes.`,
-    ``,
-    `## Open Questions`,
-    `_None._`,
-    ``,
-    `[SPEC_COMPLETE]`,
-  ].join('\n')
+  // ---- Real spec derivation ----
+  //
+  // The spec is the contract every later stage is verified against, so
+  // its content must come from the story rather than from a template.
+  // Each criterion is classified by the kind of obligation it carries
+  // and the sections are populated from that classification.
+  const probe = probeProject(req.worktreePath)
+  const plan = buildPlan(
+    {
+      id: story.id,
+      title: story.title,
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria,
+    },
+    probe,
+  )
+  const spec = buildSpec(
+    {
+      id: story.id,
+      title: story.title,
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria,
+    },
+    probe,
+    { plan },
+  )
 
-  writeFileSync(join(req.artifactsDir, '06-spec.md'), report, 'utf-8')
+  writeFileSync(join(req.artifactsDir, '06-spec.md'), spec.markdown, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Spec.' }
+  if (spec.criteria.length === 0) {
+    // The Clarification gate should have caught this. If a story reached
+    // Spec with no criteria, the spec is unverifiable — say so loudly
+    // rather than emitting a spec that cannot fail.
+    deps.logger.warn(`SpecAgent: story ${story.id} reached spec with zero acceptance criteria`)
+  }
+
+  return {
+    status: 'success',
+    summary: `Spec: ${spec.criteria.length} criterion(a), sections covered=[${spec.coveredCategories.join(',') || 'none'}]`,
+  }
 }
 
 async function runPlannerStub(

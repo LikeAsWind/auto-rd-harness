@@ -21,6 +21,7 @@
     "test:probe": "node scripts/test-project-probe.mjs",
     "test:plan": "node scripts/test-plan-builder.mjs",
     "test:clarify": "node scripts/test-clarify.mjs",
+    "test:spec": "node scripts/test-spec-builder.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },
