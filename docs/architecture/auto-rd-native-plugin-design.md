@@ -411,29 +411,77 @@ If a story is blocked, the system will notify you with details and required acti
 
 ## 3. 核心服务设计
 
-### 3.1 服务列表
+### 3.1 服务 / 文件清单
 
-| 服务 | 职责 | 触发频率 | 状态 |
+> 截至 `feature/m4-ui` HEAD（`58a5945`），`packages/dsh-auto-rd/src/` 下 13 个服务/工具/工具类 + 13 个 agent + 4 个 misc。
+
+| 名称 | 文件 | 角色 | 触发 | 状态 |
+|---|---|---|---|---|
+| `tapdPoller` | `services/tapd-poller.ts` | 拉 TAPD story 入队 | `tapdPollIntervalMs`（默认 60s）timer | 后台 |
+| `syncTapd` (exported fn) | `services/tapd-poller.ts` | 回写 story 状态到 TAPD | `tapd_syncing` stage 调用 | 按需 |
+| `storyQueue` | `services/story-queue.ts` | 扫 pending story + 并发限流 + 调 `storyRunner.runStory` | 10s timer | 后台 |
+| `storyRunner` | `services/story-runner.ts` | 19-state 状态机推进 | 同步调用 | 按需 |
+| `agentProvider` | `services/agent-provider.ts` | 13 个 agent 模板 + SubAgent provider + stub handler | 同步调用 | 按需 |
+| `workspaceManager` | `services/workspace-manager.ts` | Module Workspace + Story Worktree 创建/清理 | 同步调用 | 按需 |
+| `gitlabMerger` | `services/gitlab-merger.ts` | pushBranch + findExistingMR + createOrReuseMR | `mr_creating` stage 调用 | 按需 |
+| `recoverStories` (exported fn) | `services/recover.ts` | Plugin mount 时把 ACTIVE state story 重置回 `pending` | mount 时一次 | 一次性 |
+| `storyNotifier` | `services/story-notifier.ts` | 5s 扫 blocked story，推送到 user session | 5s timer | 后台 |
+| `autoRdSidebarPanel` | `services/ui-panel.ts` | Sidebar UI（`sidebar.worktable.project` slot） | DSH mount 时注册 | 一次性 |
+| `autoRdPromptSection` | `services/system-prompt-section.ts` | System prompt section 注册 | mount 时一次 | 一次性 |
+| `httpClient` | `utils/http-client.ts` | 通用 HTTP wrapper：timeout/retry/错误分类 | `gitlabMerger` / `tapdPoller` / `syncTapd` 用 | 共享工具 |
+| `plannerParser` | `services/planner-parser.ts` | 解析 Planner markdown 为 `ParsedPlannerTask[]` | `planning` stage 用 | 共享工具 |
+| `personaLoader` | `agents/persona-loader.ts` | tri 路径加载 persona markdown（lib/src/cwd） | 每个 agent dispatch | 共享工具 |
+| `autoRdStatusTool` | `tools/auto-rd-status.ts` | 模型可调：summary/stories/tasks 查询 | 模型调用 | 一次性注册 |
+| `autoRdTriggerTool` | `tools/auto-rd-trigger.ts` | 模型可调：poll_now / advance_story / mark_reviewed | 模型调用 | 一次性注册 |
+| `autoRdRetryTool` | `tools/auto-rd-retry.ts` | 模型可调：retry / skip / reset_to_pending | 模型调用 | 一次性注册 |
+
+### 3.1.1 Agents（13 个，模板 + stub handler）
+
+每个 agent 文件都在 `packages/dsh-auto-rd/src/agents/`：
+
+| Agent | 文件 | 输出 artifact | 对应 stage |
 |---|---|---|---|
-| `tapdPoller` | 拉取 TAPD Story | 每 60s | 后台 timer |
-| `storyQueue` | 扫描 pending Story，调用 agentRunner | 每 10s | 后台 timer |
-| `agentRunner` | 根据 Story state 执行对应 Agent | 同步调用 | 按需 |
-| `workspaceManager` | 创建/清理 Module Workspace 和 Story Worktree | 按需 | 按需 |
-| `gitlabMerger` | Push branch + 创建 MR | Story 进入 MR 阶段 | 按需 |
-| `storyNotifier` | blocked 时通知用户主 session | Event-driven | 按需 |
-| `autoRdSidebarPanel` | Sidebar UI 面板 | 注册时挂载 | 一次性 |
-| `autoRdSubagentProvider` | SubAgent Provider 注册 | 启动时 | 一次性 |
+| `ContextAgent` | `context.ts` | `01-context.md` | `context` |
+| `ClarificationAgent` | `clarification.ts` | `02-clarification.md` | `clarification` |
+| `BrainstormAgent` | `brainstorm.ts` | `03-proposal-{1,2,3}.md` | `brainstorm` (3 路并行: minimal/clean/novel) |
+| `CriticAgent` | `critic.ts` | `04-critique.md` | `critic` |
+| `DecisionAgent` | `decision.ts` | `05-decision.md` | `decision` |
+| `SpecAgent` | `spec.ts` | `06-spec.md` | `spec` |
+| `PlannerAgent` | `planner.ts` | `07-tasks.md` | `planning` |
+| `ImplementationAgent` | `implementation.ts` | `08-impl-<taskId>.md` | `implementing` (per-task) |
+| `TestAgent` | `test.ts` | `09-test-report.md` | `testing` |
+| `FixAgent` | `fix.ts` | `10-fix-report.md` | `fixing` |
+| `VerificationAgent` | `verification.ts` | `11-verify-report.md` | `verifying` |
+| `ReviewAgent` | `review.ts` | `12-review-<taskId>-<axis>.md` | `reviewing` (2 轴并行) |
+| `FinalVerifyAgent` | `final-verify.ts` | `13-final-verify-<axis>.md` | `final_verifying` (2 轴并行) |
+
+每个 agent 都有同名 persona markdown 在 `packages/dsh-auto-rd/src/agents/personas/`，由 `persona-loader.ts` 三路查找加载，运行时通过 SubAgent provider 注入到子 session 的 system prompt。
 
 ### 3.2 服务依赖图
 
 ```
-tapdPoller → storyQueue → agentRunner → workspaceManager
-                          → notifier
-                          → gitlabMerger
+[Plugin mount]
+  ├─ tapdPoller ──┐
+  ├─ storyQueue ──┤─── timers
+  ├─ storyNotifier┘
+       ↓
+  storyQueue.tick() → storyRunner.runStory()
+                          ↓
+                       agentProvider.dispatch()
+                          ↓              ├─→ workspaceManager
+                       (any of 13)      ├─→ gitlabMerger (push + createMR)
+                          ↓              └─→ tapdPoller.syncTapd
 
-autoRdSubagentProvider (独立)
-autoRdSidebarPanel (独立)
-autoRdStatusTool / autoRdTriggerTool / autoRdRetryTool (独立)
+[Plugin mount / best-effort UI effect]
+  ├─ tools:    autoRdStatusTool / autoRdTriggerTool / autoRdRetryTool
+  ├─ slots:    autoRdSidebarPanel (sidebar.worktable.project)
+  └─ prompt:   autoRdPromptSection
+
+[Plugin mount / once]
+  └─ recoverStories (mount 前调)
+```
+
+每个服务都通过 Cordis inject 或 ctx.get('xxx') 获取依赖。`tools` / `slots` / `systemPrompt` / `sessions` 在 DSH 进程里提供，**best-effort** —— 拿不到就 warn + skip，plugin 在 DSH 进程外跑只缺 UI 表面。
 ```
 
 ### 3.3 src/services/tapd-poller.ts (TAPD 轮询服务)
