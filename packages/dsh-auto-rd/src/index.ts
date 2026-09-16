@@ -38,6 +38,7 @@ import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
 import { registerPanelRoute, registerPanelRouteWithRetry } from './services/panel-route.js'
 import { registerReconfigureRoute } from './services/reconfigure-route.js'
+import { registerPickDirectoryRoute } from './services/pick-directory-route.js'
 import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
 import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
@@ -309,6 +310,19 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         if (dispose) dispose()
       }
     }, 'auto-rd:reconfigure-route')
+
+    // Pick-directory route — GET/POST /auto-rd/pick-directory.
+    // Bridges the browser-side "Browse" button to DSH's host-side
+    // directoryPicker service, which calls the OS native chooser
+    // (koffi+COM on Windows, osascript on macOS, zenity on Linux).
+    // Falls back gracefully when the service is unavailable (logged
+    // on the host, surfaced in the UI as a tooltip).
+    ctx.effect(() => {
+      const dispose = registerPickDirectoryRoute(ctx, logger)
+      return () => {
+        if (dispose) dispose()
+      }
+    }, 'auto-rd:pick-directory-route')
 
     return () => {
       // Cordis tears down tool / prompt registrations when the parent
