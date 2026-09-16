@@ -162,17 +162,46 @@ export interface ToolsService {
 
 // ---- systemPrompt ----------------------------------------------------
 
+/**
+ * An ordered prompt section.
+ *
+ * Verified shape: the identifier field is `name` (NOT `id`) and the body
+ * field is `text` (NOT `content`). Registering `{ id, content }` gives
+ * the service an undefined name and an undefined body.
+ *
+ * `text` may be a function, evaluated on every assembly, so a section can
+ * reflect live state without being re-registered.
+ */
 export interface PromptSection {
-  id: string
-  order?: number
-  content: string
+  readonly name: string
+  readonly order: number
+  readonly text: string | ((context: unknown) => string)
+  /** Marks the section as the sole prompt body when set. */
+  readonly complete?: boolean
+}
+
+export interface PromptContext {
+  readonly name: string
+  readonly order: number
+  readonly text: string | ((context: unknown) => string)
+}
+
+export interface PromptAssembly {
+  sections: Array<{ name: string; text: string }>
+  contexts: Array<{ name: string; text: string }>
+  tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+  variables: Record<string, string | undefined>
 }
 
 export interface SystemPromptService {
-  /** Returns a disposer. */
+  /** Returns the exact Cordis effect disposer. */
   section(section: PromptSection): () => void
-  context(context: unknown): () => void
+  context(context: PromptContext): () => void
+  suppressRuntimeContext(): () => void
+  getSectionOrder(name: string): number
+  getContextOrder(name: string): number
   variable(name: string, provider: (context: unknown) => string | undefined): () => void
+  assemble(context?: unknown): Promise<PromptAssembly>
 }
 
 // ---- Subagent handlers (internal) ------------------------------------

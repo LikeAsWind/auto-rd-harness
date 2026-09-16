@@ -26,14 +26,29 @@ export function registerAutoRdPromptSection(ctx: Context): boolean {
     return false
   }
 
+  // Field names matter: the verified PromptSection is
+  // `{ name, order, text }`. An earlier revision passed
+  // `{ id, order, content }`, which the service would have received as an
+  // undefined name and an undefined body.
   const section: PromptSection = {
-    id: 'auto-rd-overview',
+    name: 'auto-rd-overview',
     order: 50,
-    content: AUTORD_PROMPT_SECTION.trim(),
+    text: AUTORD_PROMPT_SECTION.trim(),
   }
-  // `section()` returns a disposer; DSH tears the section down with the
-  // parent context, so we don't need to retain it here.
-  systemPrompt.section(section)
+
+  try {
+    // `section()` returns the exact Cordis effect disposer; DSH tears the
+    // section down with the parent context, so we don't retain it here.
+    systemPrompt.section(section)
+  } catch (err) {
+    // Registration throws on a duplicate name or a non-finite order. That
+    // must not take the rest of the mount down with it.
+    ctx.logger('auto-rd').error(
+      `failed to register system-prompt section: ${(err as Error).message}`,
+    )
+    return false
+  }
+
   ctx.logger('auto-rd').info('Registered system-prompt section: auto-rd-overview')
   return true
 }
