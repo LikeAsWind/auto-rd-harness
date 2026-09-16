@@ -95,6 +95,27 @@ export const StoryRecordSchema = z.object({
   retryCount: z.number().int().min(0).default(0),
   blockedReason: z.string().optional(),
   mrUrl: z.string().optional(),
+
+  /**
+   * M4-A checkpoint fields for idempotent recovery across the
+   * mr_creating -> tapd_syncing -> completed tail. Each is set when
+   * the corresponding external side effect succeeds; the stage handler
+   * re-checks these on entry and skips work already done.
+   */
+  pushedSha: z.string().optional().describe('Last commit SHA pushed to origin by mr_creating'),
+  pushedAt: z.string().optional().describe('ISO timestamp of the last successful push'),
+  mrIid: z.number().int().optional().describe('GitLab MR iid; set when createOrReuseMR succeeds'),
+  mrCreatedAt: z.string().optional().describe('ISO timestamp of the last MR createOrReuse'),
+  /** True if the last MR lookup found an existing MR (replayed across runs). */
+  mrReused: z.boolean().optional(),
+  tapdSyncedAt: z.string().optional().describe('ISO timestamp of the last successful TAPD sync'),
+  /**
+   * Count of failed TAPD-sync attempts. We use this for exponential
+   * backoff in the runner, not as a hard breaker (network flakiness is
+   * not a story-level failure).
+   */
+  tapdSyncAttempts: z.number().int().min(0).optional(),
+
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -177,7 +198,7 @@ export type TaskRecord = z.infer<typeof TaskRecordSchema>
  * can `import { z } from 'zod'` directly and pass schemas as-is.
  */
 export const AUTORD_DOMAIN_NAME = 'auto-rd'
-export const AUTORD_DOMAIN_VERSION = 2
+export const AUTORD_DOMAIN_VERSION = 3
 
 export function buildAutoRdDomainTables() {
   return {

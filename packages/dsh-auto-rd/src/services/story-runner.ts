@@ -30,6 +30,14 @@ import { AgentProvider } from './agent-provider'
 import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  pushBranch,
+  createOrReuseMR,
+  buildMRDescription,
+  projectIdFromRepoUrl,
+} from './gitlab-merger'
+import { syncTapd } from './tapd-poller'
+import { HttpClient } from '../utils/http-client'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage
@@ -822,94 +830,240 @@ async function runFinalVerifyingStage(
 }
 
 /**
- * mr_creating — write a 99-mr.md describing what the real MR call would do.
- * We do NOT actually push or call GitLab in M3; that lands in M4.
+ * mr_creating — push the story branch and create (or reuse) the MR.
+ *
+ * M4-A: real HTTP via gitlab-merger. Two checkpoints are persisted in
+ * the StoryRecord so a partial failure can be replayed:
+ *
+ *   1. pushBranch -> story.pushedSha + story.pushedAt
+ *   2. createOrReuseMR -> story.mrIid + story.mrCreatedAt + story.mrUrl + story.mrReused
+ *
+ * Failure handling — checkpoint pattern (NOT blocked):
+ *   - push throws      -> story stays in mr_creating; runner re-tries
+ *                         next tick. The next push will be a no-op if
+ *                         origin/<branch> is already at pushedSha.
+ *   - MR create throws -> same: replay will list existing MRs and reuse
+ *                         it (alreadyUpToDate + reused=true).
+ *   - We do NOT park the story in 'blocked' for transient HTTP / shell
+ *     failures. Network blips are not story-level failures.
+ *
+ * True configuration errors (missing moduleId / repoUrl / token) DO
+ * park the story in 'blocked' — they will never resolve on retry.
  */
 async function runMrCreatingStage(
   story: StoryRecord,
   deps: StoryRunnerDeps,
 ): Promise<StoryState> {
   const artifactsDir = await ensureArtifacts(story, deps)
-  const now = new Date().toISOString()
+  const stories = deps.storage.stories()
+  const modules = deps.storage.modules()
+  const module = modules.get(story.moduleId)
+  if (!module) {
+    story.blockedReason = `mr_creating: module ${story.moduleId} not found in storage`
+    return 'blocked'
+  }
+  if (!story.worktreePath) {
+    story.blockedReason = `mr_creating: story has no worktree path (cannot push)`
+    return 'blocked'
+  }
 
-  const mrDoc = [
-    `# MR Stub — ${story.id}`,
-    ``,
-    `**Story**: ${story.title}`,
-    `**Branch**: \`${story.branch}\``,
-    `**Module**: ${story.moduleId}`,
-    `**Generated**: ${now}`,
-    ``,
-    `## What a real GitLab MR call would do`,
-    ``,
-    `1. \`git push origin ${story.branch}\` from \`${story.worktreePath ?? '<worktree>'}\``,
-    `2. \`POST /api/v4/projects/:id/merge_requests\` with:`,
-    `   - source_branch: \`${story.branch}\``,
-    `   - target_branch: \`${story.moduleId}/main\` (resolved via Module record)`,
-    `   - title: \`[Auto-RD] ${story.title} (TAPD-${story.tapdId})\``,
-    `   - description: rendered from 06-spec.md + 11-verify-report.md + 13-final-verify-*.md`,
-    `3. Persist returned \`web_url\` into \`story.mrUrl\``,
-    ``,
-    `## Why this is a stub in M3`,
-    ``,
-    `M3 hardens the state machine through \`final_verifying\`. The real`,
-    `GitLab API integration (push, project lookup, MR creation, webhook)`,
-    `lands in M4 alongside the \`gitlabMerger\` service. This file is the`,
-    `seam: a later M4 commit will replace this stub with a real call.`,
-    ``,
-    `## State transition`,
-    `This artifact's existence marks the story as having cleared`,
-    `final_verifying. Story advances to \`tapd_syncing\`.`,
-    ``,
-  ].join('\n')
+  const httpClient =
+    (deps as unknown as { httpClient?: import('../utils/http-client').HttpClient }).httpClient ??
+    new HttpClient({ tag: 'gitlab-merger' })
+  const mergerDeps = { httpClient, logger: deps.logger }
 
+  // ---- Checkpoint 1: push branch ----
+  if (!story.pushedSha) {
+    try {
+      const pushResult = await pushBranch(mergerDeps, {
+        worktreePath: story.worktreePath,
+        branch: story.branch,
+        remote: 'origin',
+        userName: deps.config.gitlabPushUserName,
+        userEmail: deps.config.gitlabPushUserEmail,
+      })
+      story.pushedSha = pushResult.pushedSha ?? undefined
+      story.pushedAt = new Date().toISOString()
+      deps.logger.info(
+        `mr_creating: pushed ${story.branch} (sha=${story.pushedSha ?? '<none>'}, up-to-date=${pushResult.alreadyUpToDate})`,
+      )
+      await stories.put(story.id, story)
+    } catch (err) {
+      // Transient — stay in mr_creating, let the next tick retry.
+      const msg = (err as Error).message
+      deps.logger.warn(`mr_creating: push failed (will retry next tick): ${msg}`)
+      story.blockedReason = `mr_creating: push failed: ${msg}`
+      // We keep story.state unchanged by returning the same state; the
+      // outer while-loop will see no state advancement and re-dispatch.
+      await stories.put(story.id, story)
+      return 'mr_creating'
+    }
+  } else {
+    deps.logger.info(
+      `mr_creating: branch ${story.branch} already pushed at sha=${story.pushedSha}; skipping`,
+    )
+  }
+
+  // ---- Checkpoint 2: create / reuse MR ----
+  if (!story.mrUrl) {
+    const projectId = projectIdFromRepoUrl(module.repoUrl)
+    const description = buildMRDescription(
+      story,
+      [
+        `### Auto-RD spec`,
+        'See the artifact directory for the full `06-spec.md`.',
+        ``,
+        `### Verification`,
+        'See `11-verify-report.md`.',
+        ``,
+        `### Final review`,
+        'See `13-final-verify-standards.md` and `13-final-verify-spec.md`.',
+      ].join('\n'),
+    )
+    try {
+      const mr = await createOrReuseMR(mergerDeps, {
+        gitlabBaseUrl: deps.config.gitlabBaseUrl,
+        gitlabApiToken: deps.config.gitlabApiToken,
+        projectId,
+        sourceBranch: story.branch,
+        targetBranch: module.defaultBranch,
+        title: `[Auto-RD] ${story.title} (TAPD-${story.tapdId})`,
+        description,
+      })
+      story.mrIid = mr.mrIid
+      story.mrUrl = mr.webUrl
+      story.mrCreatedAt = new Date().toISOString()
+      story.mrReused = mr.reused
+      deps.logger.info(
+        `mr_creating: ${mr.reused ? 'reused' : 'created'} MR !${mr.mrIid} for ${story.branch}`,
+      )
+      await stories.put(story.id, story)
+    } catch (err) {
+      const msg = (err as Error).message
+      // 401 / 403 / 404 on project are config errors — block the story.
+      const transient = !(err as { transient?: boolean }).transient === false
+      if (!transient) {
+        story.blockedReason = `mr_creating: GitLab rejected the request (config error): ${msg}`
+        return 'blocked'
+      }
+      deps.logger.warn(`mr_creating: MR create failed (will retry next tick): ${msg}`)
+      story.blockedReason = `mr_creating: ${msg}`
+      await stories.put(story.id, story)
+      return 'mr_creating'
+    }
+  } else {
+    deps.logger.info(
+      `mr_creating: MR already exists at ${story.mrUrl}; skipping create`,
+    )
+  }
+
+  // Write a checkpoint file summarizing the actual side effects. Useful
+  // for auditing without trawling through logs.
+  const mrDoc = renderMrCheckpoint(story)
   writeFileSyncOrLog(artifactsDir, '99-mr.md', mrDoc, deps.logger)
-  story.mrUrl = `<stub>:${story.branch}`
-  deps.logger.info(`mr_creating stub wrote 99-mr.md for story ${story.id}`)
   return 'tapd_syncing'
 }
 
+function renderMrCheckpoint(story: StoryRecord): string {
+  return [
+    `# MR — ${story.id}`,
+    ``,
+    `**Branch**: \`${story.branch}\``,
+    `**Pushed sha**: \`${story.pushedSha ?? '<not pushed>'}\``,
+    `**Pushed at**: ${story.pushedAt ?? '<n/a>'}`,
+    `**MR iid**: !${story.mrIid ?? '<n/a>'}`,
+    `**MR url**: ${story.mrUrl ?? '<not created>'}`,
+    `**MR created at**: ${story.mrCreatedAt ?? '<n/a>'}`,
+    `**Reused**: ${story.mrReused ?? false}`,
+    ``,
+    `Re-running this stage is safe: the runner checks \`story.pushedSha\``,
+    `and \`story.mrUrl\` and skips work already done.`,
+  ].join('\n')
+}
+
 /**
- * tapd_syncing — write a 98-tapd-sync.md describing what the real TAPD
- * sync would do. No network call in M3.
+ * tapd_syncing — POST the MR link + status back to TAPD.
+ *
+ * M4-A: real HTTP via syncTapd. Checkpointed via story.tapdSyncedAt.
+ *
+ * Failure handling:
+ *   - Transient HTTP / timeout / 5xx: increment tapdSyncAttempts; stay
+ *     in tapd_syncing; runner re-tries next tick. The sync is
+ *     idempotent so replays are safe.
+ *   - 4xx other than 404: config error -> blocked.
+ *   - Hard cap at 20 attempts: log error, park the story in 'failed'
+ *     so the user can intervene. (Distinct from the SD-4 5-round
+ *     breaker because a network outage lasting hours should not look
+ *     the same as a code-level architecture issue.)
  */
 async function runTapdSyncingStage(
   story: StoryRecord,
   deps: StoryRunnerDeps,
 ): Promise<StoryState> {
   const artifactsDir = await ensureArtifacts(story, deps)
-  const now = new Date().toISOString()
 
+  if (!story.mrUrl) {
+    story.blockedReason = `tapd_syncing: cannot sync without story.mrUrl (mr_creating must succeed first)`
+    return 'blocked'
+  }
+
+  if (!story.tapdSyncedAt) {
+    if ((story.tapdSyncAttempts ?? 0) >= 20) {
+      deps.logger.error(
+        `tapd_syncing: gave up after ${story.tapdSyncAttempts} attempts for story ${story.id}`,
+      )
+      story.blockedReason = `tapd_syncing: gave up after ${story.tapdSyncAttempts} transient attempts; manual intervention needed`
+      return 'failed'
+    }
+
+    try {
+      await syncTapd({
+        tapdBaseUrl: deps.config.tapdBaseUrl,
+        tapdApiToken: deps.config.tapdApiToken,
+        tapdId: story.tapdId,
+        mrUrl: story.mrUrl,
+        gitBranch: story.branch,
+      })
+      story.tapdSyncedAt = new Date().toISOString()
+      story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
+      deps.logger.info(`tapd_syncing: synced TAPD story ${story.tapdId}`)
+      await deps.storage.stories().put(story.id, story)
+    } catch (err) {
+      story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
+      const msg = (err as Error).message
+      const transient = (err as { transient?: boolean }).transient !== false
+      if (!transient) {
+        story.blockedReason = `tapd_syncing: TAPD rejected the sync (config error): ${msg}`
+        return 'blocked'
+      }
+      deps.logger.warn(
+        `tapd_syncing: sync failed (attempt ${story.tapdSyncAttempts}/20, will retry): ${msg}`,
+      )
+      story.blockedReason = `tapd_syncing: ${msg}`
+      await deps.storage.stories().put(story.id, story)
+      return 'tapd_syncing'
+    }
+  } else {
+    deps.logger.info(
+      `tapd_syncing: TAPD already synced at ${story.tapdSyncedAt}; skipping`,
+    )
+  }
+
+  // Write the audit file (replacing the old M3 stub).
   const tapdDoc = [
-    `# TAPD Sync Stub — ${story.id}`,
+    `# TAPD Sync — ${story.id}`,
     ``,
     `**Story**: ${story.title}`,
     `**TAPD id**: ${story.tapdId}`,
-    `**MR url**: ${story.mrUrl ?? '<stub>'}`,
-    `**Generated**: ${now}`,
+    `**MR url**: ${story.mrUrl}`,
+    `**Synced at**: ${story.tapdSyncedAt}`,
+    `**Attempts**: ${story.tapdSyncAttempts ?? 0}`,
     ``,
-    `## What a real TAPD sync would do`,
-    ``,
-    `1. \`PATCH /v1/stories/${story.tapdId}\` with:`,
-    `   - status: \`completed\``,
-    `   - mr_url: \`${story.mrUrl ?? '<stub>'}\``,
-    `   - git_branch: \`${story.branch}\``,
-    `   - story_actor: auto-rd`,
-    `2. Optionally add a comment with the artifact summary`,
-    ``,
-    `## Why this is a stub in M3`,
-    ``,
-    `M4 will introduce the real \`tapdPoller.syncTapd\` service that`,
-    `consumes the GitLab URL and posts back to TAPD. The orchestrator`,
-    `will replace this stub with that service call.`,
-    ``,
-    `## State transition`,
-    `Story advances to \`completed\` after this artifact is written.`,
-    ``,
+    `Re-running this stage is safe: the runner checks \`story.tapdSyncedAt\``,
+    `and skips the network call.`,
   ].join('\n')
 
   writeFileSyncOrLog(artifactsDir, '98-tapd-sync.md', tapdDoc, deps.logger)
-  deps.logger.info(`tapd_syncing stub wrote 98-tapd-sync.md for story ${story.id}`)
   return 'completed'
 }
 
