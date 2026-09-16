@@ -2054,22 +2054,35 @@ Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
 
 | 里程碑 | 文档定义 | 落地状态 |
 |---|---|---|
-| M5 限流 | §11 | 部分落地：`StoryQueue.tick()` 已实现全局 + per-module 限流（§11.1 匹配） |
-| M5 错误恢复 | §10.2 | 部分落地：`recoverStories` 在 mount 前调用；**缺 checkpoint 模式文档**（M4-A 已实现但 §10.2 没补） |
-| M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section |
-| M5 端到端测试 | §13.3 + 附录 A.3 | **未落地**：仅 M4-A 的 22 个 fake-server 单元测试，**无真凭据 / 真 DSH 进程的 e2e** |
+| M5 限流 | §11 | 全部落地：`StoryQueue.tick()` 全局 + per-module 限流 + 3 个 StoryQueue 集成测试（`npm run test:m5`） |
+| M5 错误恢复 | §10.2 | 全部落地：`recoverStories` mount 前调用 + 7 个 checkpoint 字段 + §10 双层保护文档补齐 |
+| M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section（**`test:m5` 覆盖 19 个 tool / recover 用例**） |
+| M5 集成测试 | §13.3 + 附录 A.3 | 部分落地：**`test:m5` 42 pass**（recover / 3 tool / queue 限流 / status 查询 / state transitions），**e2e 仍待真凭据 + 真 DSH 进程** |
 
-**M5 e2e 是当前最大缺口**——需要：
+**测试矩阵总览**：
+
+| 测试集 | 覆盖范围 | 用例数 |
+|---|---|---|
+| `npm run test:m4` | HttpClient / syncTapd / gitlab-merger（fake-server in-process） | 22 pass + 10 parser pass |
+| `npm run test:m5` | recover / 3 tool / StoryQueue / status | 42 pass |
+
+**M5 e2e 是唯一外部缺口**——需要：
 1. TAPD 公司内网 / 公网凭据
 2. GitLab 自部署 / SaaS 凭据 + 测试 project
 3. 真 DSH runtime（`~/.dsh/profiles/web/cordis.patch.yml` 配置）+ 真 plugin mount
 4. 跑通 story 端到端 → 验证 sidebar 渲染 / tool 调用 / notifier 推送
 
+**凭据安全约束**：M5 e2e 真凭据**绝不**再贴文本。走：
+- `process.env` + 子进程注入
+- DSH secret reference（`@secret:tapd_api_token` 形式）
+- `.gitignore` 排除 `~/.dsh/secrets/` 目录
+- 已泄露的 chat 内 token（`81b6d71f...` / `LCxXUtsJ...`）需用户**主动 revoke**
+
 ---
 
-文档版本：v0.2  
-最后更新：M4-UI 完成后（commit `58a5945` + gap-analysis `0992eba`）  
-下一步：M5 e2e + 文档与代码同步（见 `gap-analysis.md`）
+文档版本：v1.3  
+最后更新：Round 13 后（commit `4072113` + M5 integration tests）  
+下一步：M5 e2e（需用户主动提供凭据走安全通道）+ 探索报告归档
 
 ---
 
