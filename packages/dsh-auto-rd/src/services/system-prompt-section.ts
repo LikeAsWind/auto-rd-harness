@@ -15,7 +15,7 @@
  * environment, etc.) but before any plugin-specific extras.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { SystemPromptService, SystemPromptSection } from '../types/dsh-services.js'
+import type { SystemPromptService, PromptSection } from '../types/dsh-services.js'
 
 export function registerAutoRdPromptSection(ctx: Context): boolean {
   const systemPrompt = ctx.get('systemPrompt') as SystemPromptService | undefined
@@ -26,11 +26,13 @@ export function registerAutoRdPromptSection(ctx: Context): boolean {
     return false
   }
 
-  const section: SystemPromptSection = {
+  const section: PromptSection = {
     id: 'auto-rd-overview',
     order: 50,
     content: AUTORD_PROMPT_SECTION.trim(),
   }
+  // `section()` returns a disposer; DSH tears the section down with the
+  // parent context, so we don't need to retain it here.
   systemPrompt.section(section)
   ctx.logger('auto-rd').info('Registered system-prompt section: auto-rd-overview')
   return true

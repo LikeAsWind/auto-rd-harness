@@ -40,28 +40,32 @@ import { registerAutoRdPromptSection } from './services/system-prompt-section.js
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
 import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
 import { autoRdRetryTool } from './tools/auto-rd-retry.js'
-import type { ToolsService } from './types/dsh-services.js'
+import type { ToolsService, StorageDomainService } from './types/dsh-services.js'
 import { Logger } from './utils/logger.js'
 
 /**
- * Cordis inject contract.
+ * Cordis inject contract — the HARD dependencies this plugin needs
+ * before it can mount.
  *
- * DSH provides these services through the Cordis scope when the plugin
- * mounts. Anything not in this list is unavailable to the plugin body.
+ * Every entry here was checked against the live host service catalog.
+ * `inject` is a hard-dependency list: Cordis holds the plugin until each
+ * named service appears, so naming a service the host never provides
+ * means the plugin never mounts. Two corrections were made after that
+ * check:
+ *
+ *   - `slots` was REMOVED. It is not a host service at all — slots are
+ *     a client-realm concern (see services/ui-panel.ts). Declaring it
+ *     here would have blocked the plugin from ever mounting.
+ *   - `workspaceRegistry`, `timer`, `fs`, `shell`, `subprocess`,
+ *     `agents` and `sessionPersistence` were REMOVED because nothing in
+ *     the plugin reads them; they were dead wait-conditions.
+ *
+ * The remaining five are all used and all verified present.
  */
 export const inject = [
   'storageDomain',
-  'workspaceRegistry',
-  'timer',
-  'web',
-  'fs',
-  'shell',
-  'subprocess',
   'subagents',
-  'agents',
-  'sessionPersistence',
   'tools',
-  'slots',
   'systemPrompt',
   'sessions',
 ] as const
@@ -79,8 +83,14 @@ export type { Config as PluginConfig }
 
 /**
  * Apply — called once per process by DSH at startup.
+ *
+ * Async because `storageDomain.open()` is async: there is no
+ * synchronous way to obtain the domain handle, and every service below
+ * depends on it. Cordis awaits the returned promise before considering
+ * the plugin mounted, so a storage failure surfaces as a mount failure
+ * rather than as a half-initialised plugin.
  */
-export function apply(ctx: Context, rawConfig: unknown): void {
+export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   // Validate config eagerly so failures show up at mount time, not at first poll.
   const config = ConfigSchema.parse(rawConfig)
   const logger = new Logger(ctx, config.logLevel)
@@ -94,18 +104,39 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   logger.info('='.repeat(60))
 
   if (!config.tapdApiToken) {
-    logger.warn('tapdApiToken is empty — M1 uses mock fixtures, but production needs a real token')
+    logger.warn('tapdApiToken is empty — the poller will use the mock fixture, but production needs a real token')
   }
 
-  // 1. Storage
-  const storageDomain = ctx.get('storageDomain' as never) as unknown as ConstructorParameters<typeof AutoRdStorage>[1]
-  const storage = new AutoRdStorage(ctx, storageDomain)
+  // 1. Storage. `storageDomain` is declared in `inject`, so Cordis has
+  // already guaranteed it exists by the time apply() runs; the explicit
+  // check documents that invariant and gives a clear error if the
+  // declaration and the runtime ever disagree.
+  const storageDomain = ctx.get('storageDomain' as never) as unknown as
+    | StorageDomainService
+    | undefined
+  if (!storageDomain) {
+    throw new Error(
+      'auto-rd: storageDomain is declared in `inject` but was not resolvable at mount time',
+    )
+  }
+  const storage = await AutoRdStorage.open(ctx, storageDomain)
+
+  // The caller owns the domain handle. Release it when this plugin's
+  // fiber is disposed so a reload does not leave the domain open (which
+  // would make the next mount fail with `already-open`).
+  ctx.effect(() => {
+    return () => {
+      void storage.close().catch((err: unknown) => {
+        logger.error(`[auto-rd] failed to close storage domain: ${(err as Error).message}`)
+      })
+    }
+  }, 'auto-rd:storage')
 
   // 2. Seed module records from config (idempotent).
   for (const m of config.modules) {
     const existing = storage.modules().get(m.id)
     if (existing) continue
-    void storage.modules().put(m.id, {
+    await storage.modules().put(m.id, {
       id: m.id,
       title: m.title,
       repoUrl: m.repoUrl,

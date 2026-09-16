@@ -26,7 +26,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
-import type { SubagentsService } from '../types/dsh-services.js'
+import type { SubagentsService, AgentsService, SessionsService } from '../types/dsh-services.js'
 
 export interface StoryNotifierDeps {
   storage: AutoRdStorage
@@ -82,22 +82,37 @@ export class StoryNotifierService {
   private async notify(story: { id: string; title: string; state: string; blockedReason?: string }): Promise<void> {
     const subagents = this.ctx.get('subagents') as SubagentsService | undefined
     if (!subagents) {
-      // No DSH subagent service available -- log and bail. The user
-      // can still see the block via auto_rd_status or the sidebar.
       this.deps.logger.warn(
         `StoryNotifier: story ${story.id} blocked but subagents service not available; user nudge skipped`,
       )
       return
     }
 
-    // Find a 'user' session to ping. We use the Cordis convention:
-    // any session with role 'user'. For now, the sender is the
-    // auto-rd initiator; DSH routes the message into the user's
-    // active conversation.
-    const userSessionId = await this.findUserSessionId()
+    // `subagents.sendMessage` requires a real Agent as its SENDER (the
+    // first parameter is an Agent, not a provider name). The only
+    // supported way to obtain one is `agents.currentInitiator()`, which
+    // resolves the initiating Agent of the current process-local
+    // asynchronous driver chain.
+    //
+    // This notifier runs from a bare interval callback, which has no
+    // initiator. When that is the case we cannot legally send, so we log
+    // exactly why and let `auto_rd_status` carry the information instead
+    // of attempting a call that would throw.
+    const agents = this.ctx.get('agents') as AgentsService | undefined
+    const sender = agents?.currentInitiator?.()
+    if (!sender) {
+      this.deps.logger.info(
+        `StoryNotifier: story ${story.id} blocked, but no initiating Agent is in scope from the ` +
+          `polling context, so no message can be sent (subagents.sendMessage requires an Agent sender). ` +
+          `Use auto_rd_status to inspect the block.`,
+      )
+      return
+    }
+
+    const userSessionId = this.findUserSessionId()
     if (!userSessionId) {
       this.deps.logger.info(
-        `StoryNotifier: story ${story.id} blocked, but no active user session; skipping nudge`,
+        `StoryNotifier: story ${story.id} blocked, but no active session; skipping nudge`,
       )
       return
     }
@@ -113,15 +128,11 @@ export class StoryNotifierService {
     ].join('\n')
 
     try {
-      await subagents.sendMessage('auto-rd', userSessionId, [{ type: 'text', text }], {
-        // Pin as low-priority so we don't barge into whatever the user
-        // is currently looking at.
-        priority: 'background',
-      })
-      this.deps.logger.info(`StoryNotifier: pinged user session ${userSessionId} for story ${story.id}`)
+      await subagents.sendMessage(sender, userSessionId, [{ type: 'text', text }])
+      this.deps.logger.info(`StoryNotifier: pinged session ${userSessionId} for story ${story.id}`)
     } catch (err) {
-      // Don't bubble. The story is still blocked; the user just
-      // doesn't get the auto-prompt. auto_rd_status still surfaces it.
+      // Don't bubble. The story is still blocked; the user just doesn't
+      // get the auto-prompt. auto_rd_status still surfaces it.
       this.deps.logger.warn(
         `StoryNotifier: failed to send nudge for story ${story.id}: ${(err as Error).message}`,
       )
@@ -129,19 +140,22 @@ export class StoryNotifierService {
   }
 
   /**
-   * Look up an active user session id. DSH exposes a sessions API
-   * that we don't import directly; we use ctx.get('sessions') with a
-   * local-narrowed shape. If absent, return null.
+   * Look up a live session id to notify.
+   *
+   * The real `sessions.list()` takes NO arguments (the previous revision
+   * passed a `{ role: 'user' }` filter, which the API does not accept)
+   * and returns every live session. We take the most recently created
+   * one, which is the best available proxy for "the session the user is
+   * looking at".
    */
-  private async findUserSessionId(): Promise<string | null> {
-    const sessions = this.ctx.get('sessions') as
-      | { list?(filter?: { role?: string }): Array<{ id: string; role?: string }> }
-      | undefined
-    if (!sessions?.list) return null
+  private findUserSessionId(): string | null {
+    const sessions = this.ctx.get('sessions') as SessionsService | undefined
+    if (!sessions || typeof sessions.list !== 'function') return null
     try {
-      const list = sessions.list({ role: 'user' })
-      // Pick the most recent (DSH sorts by createdAt desc by convention).
-      return list[0]?.id ?? null
+      const list = sessions.list()
+      if (!Array.isArray(list) || list.length === 0) return null
+      const last = list[list.length - 1]
+      return last && typeof last.id === 'string' ? last.id : null
     } catch {
       return null
     }

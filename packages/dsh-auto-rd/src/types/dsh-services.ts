@@ -1,148 +1,169 @@
 /**
- * Type declarations for DSH services that the auto-rd plugin consumes.
+ * Type declarations for the DSH Host services the auto-rd plugin consumes.
  *
  * Why a local copy?
- *   The DSH host process provides `slots`, `tools`, `systemPrompt`, and
- *   other extension services that this plugin depends on. Those services
- *   live inside the proprietary DSH distribution and are not exported as
- *   a public npm package. Importing from `@deepseek-ai/dsh-*` here would
- *   resolve only when this package is being built inside the DSH monorepo;
- *   in standalone builds (e.g. CI on GitHub), the imports would fail.
+ *   The DSH host process provides these services, but the distribution
+ *   does not export them as a public npm package. Importing from
+ *   `@deepseek-ai/dsh-*` here would resolve only when this package is
+ *   built inside the DSH monorepo; in standalone builds (CI on GitHub)
+ *   the imports would fail.
  *
- *   Instead, we declare the shapes we depend on. The plugin reads these
- *   services via `ctx.get('slots')` etc., and narrows with `instanceof`
- *   on locally-defined symbol sentinels. If DSH's actual implementation
- *   drifts from these shapes, runtime errors surface when the slot / tool
- *   registration attempts to call into them -- the contract violation is
- *   loud and immediate, not silent.
+ *   The shapes below are NOT guesses. They were taken from the live
+ *   runtime's service catalog via the Cordis Inspect `Service` provider
+ *   (host platform) and trimmed to the members this plugin calls. Keep
+ *   them in sync with that source of truth rather than with what the
+ *   call sites happen to assume.
  *
- *   When DSH ships a public type package, this file becomes a thin shim
- *   that re-exports from it; the rest of the plugin code does not need
- *   to change.
+ * Scope note — Slots are CLIENT-ONLY:
+ *   The host service catalog contains no `slots` key. Slot registration
+ *   happens in the browser realm, and a slot's cell is a React
+ *   component that receives typed owner props plus injected hooks (for
+ *   `sidebar.panellist`, `SidebarPanelIconOwnerProps { size, active }`).
+ *   A host-only Node plugin therefore cannot register a sidebar panel
+ *   itself; see services/ui-panel.ts for how this plugin handles that.
+ */
+
+// ---- storageDomain ----------------------------------------------------
+
+/**
+ * A key/value table as exposed by `Domain.table()`.
  *
- * IMPORTANT: keep the shape minimal. We only declare what we call.
+ * NOTE: there is deliberately no `values()` method — the real table
+ * exposes `entries()` / `keys()` / `size`. `AutoRdStorage` adds a
+ * `values()` convenience on its own adapter; do not assume it here.
  */
+export interface KvTable<K extends string = string, V = unknown> {
+  get(key: K): V | undefined
+  entries(): IterableIterator<[K, V]>
+  keys(): IterableIterator<K>
+  readonly size: number
+  put(key: K, value: V): Promise<void>
+  delete(key: K): Promise<boolean>
+  update(key: K, fn: (current: V) => V): Promise<V>
+}
 
-import type { StoryRecord } from '../domain/schema.js'
+export interface DomainTableSpec<K extends string = string, V = unknown> {
+  readonly valueSchema: unknown
+  readonly __key?: K
+}
 
-// ---- Slots service ----------------------------------------------------
+export interface DomainSpec {
+  readonly name: string
+  readonly version: number
+  /** Note: `'single'`, not `'single-file'`. */
+  readonly layout?: 'single' | 'per-record'
+  readonly compatibleVersions?: readonly number[]
+  readonly invalidRecords?: 'backup-and-skip'
+  readonly tables: Record<string, DomainTableSpec>
+}
+
+export interface Domain {
+  readonly name: string
+  table<N extends string = string, V = unknown>(name: N): KvTable<string, V>
+  close(): Promise<void>
+}
 
 /**
- * A slot renderer is a pure function: it takes the current DSH theme /
- * user / storage context and returns a React node (or, in our world,
- * a serialized element tree that the browser side renders). We type the
- * return as `unknown` so this file does not depend on a React runtime.
+ * The `storageDomain` facility.
+ *
+ * IMPORTANT: `open()` is ASYNC and rejects a name that is already open
+ * (`already-open`). The caller owns the returned handle and is expected
+ * to close it from its own disposer.
  */
-export type SlotRenderer = (...args: unknown[]) => unknown
+export interface StorageDomainService {
+  open(spec: DomainSpec): Promise<Domain>
+  get(name: string): unknown
+  closeAll(): Promise<void>
+}
+
+// ---- agents / subagents ----------------------------------------------
 
 /**
- * Minimal declaration of the slot registration contract. DSH exposes
- * many registration flavours (header / footer / context-menu / etc.);
- * we only declare the `list` flavour used by the auto-rd sidebar.
+ * An initiating Agent. `subagents.sendMessage` requires a real Agent as
+ * its sender, and `agents.currentInitiator()` is the supported way to
+ * obtain one for the current asynchronous driver chain (it is
+ * process-local, so a bare timer callback has no initiator).
  */
-export interface SlotsService {
-  /**
-   * Register a slot entry. The third argument is a renderer that DSH
-   * re-evaluates whenever the underlying storage mutates.
-   *
-   * M4-U: `slot` is one of the documented DSH slot names such as
-   * 'sidebar.worktable.project'.
-   */
-  register(
-    slot: string,
-    entry: {
-      id: string
-      /** Lower renders first. */
-      order?: number
-      label?: string | (() => string)
-    },
-    renderer: SlotRenderer,
-  ): () => void
+export interface AgentRef {
+  readonly id?: string
 }
 
-// ---- Tools service ----------------------------------------------------
-
-/**
- * A DSH tool is a model-callable function. The auto-rd plugin registers
- * three tools: auto_rd_status, auto_rd_trigger, auto_rd_retry. Each is
- * typed here by name; the implementation lives in `src/tools/*.ts`.
- */
-export interface ToolDefinition {
-  name: string
-  description: string
-  /**
-   * JSON Schema describing the parameters. DSH serializes this into
-   * the model's function-call spec.
-   */
-  parameters: Record<string, unknown>
-  /**
-   * The actual implementation. Receives the parsed args plus an
-   * exec-helper for nested tool calls. We type the args loosely here
-   * so each tool's .ts file can narrow with zod at the boundary.
-   */
-  execute: (args: any, exec?: unknown) => Promise<unknown>
-}
-
-export interface ToolsService {
-  register(tool: ToolDefinition): () => void
-}
-
-// ---- System-prompt section --------------------------------------------
-
-export interface SystemPromptSection {
-  /** Stable id so DSH can de-duplicate if a plugin is loaded twice. */
-  id: string
-  /** Lower renders first within the system prompt. */
-  order?: number
-  /** Markdown body. DSH joins sections together to form the prompt. */
-  content: string
-}
-
-export interface SystemPromptService {
-  section(section: SystemPromptSection): void
-}
-
-// ---- Subagent / session helpers --------------------------------------
-
-/**
- * Minimal surface used by the StoryNotifier. DSH exposes a richer
- * session API; we only need "send a text message to a user-facing
- * session".
- */
-export interface SessionRef {
-  id: string
+export interface AgentsService {
+  currentInitiator(): AgentRef | undefined
+  requireInitiator(): AgentRef
+  get(id: string): AgentRef | undefined
 }
 
 export interface SubagentsService {
+  /**
+   * Send a message from `sender` into `targetId`.
+   *
+   * The first parameter is an Agent, NOT a provider name — passing a
+   * string here fails at runtime.
+   */
   sendMessage(
-    agentName: string,
-    sessionId: string,
+    sender: AgentRef,
+    targetId: string,
     content: Array<{ type: 'text'; text: string }>,
     options?: Record<string, unknown>,
   ): Promise<unknown>
 }
 
-// ---- Cordis context shape we assume DSH augments ---------------------
+// ---- sessions --------------------------------------------------------
 
-/**
- * The auto-rd plugin reads DSH services through `ctx.get('slots')` etc.
- * To make those calls type-safe without depending on a DSH types
- * package, we declare the slot names as keys on `ctx`. Cordis's reflect
- * layer (`ctx.get` / `ctx.inject`) does not require the service to be
- * typed here -- runtime resolution still goes through the registry.
- *
- * This declaration is consumed via:
- *   const slots = ctx.get('slots') as SlotsService | undefined
- *
- * The `as` cast is local; it does not leak into storage / domain.
- */
-export interface DshAugmentedContext {
-  slots?: SlotsService
-  tools?: ToolsService
-  systemPrompt?: SystemPromptService
-  subagents?: SubagentsService
+/** A live session. We only rely on the id. */
+export interface SessionRef {
+  id: string
 }
 
-// ---- Local StoryRecord re-export (so the file is self-contained) ----
+export interface SessionsService {
+  /** Takes NO arguments and returns every live session. */
+  list(): SessionRef[]
+  get(id: string): SessionRef | undefined
+}
 
-export type { StoryRecord }
+// ---- tools -----------------------------------------------------------
+
+export interface ToolDefinition {
+  name: string
+  description: string
+  /** JSON Schema describing the parameters. */
+  parameters: Record<string, unknown>
+  execute: (args: any, exec?: unknown) => Promise<unknown>
+}
+
+export interface ToolsService {
+  register(definition: ToolDefinition): () => void
+  get(name: string, scope?: string): ToolDefinition | undefined
+  restrict(filter: unknown): () => void
+}
+
+// ---- systemPrompt ----------------------------------------------------
+
+export interface PromptSection {
+  id: string
+  order?: number
+  content: string
+}
+
+export interface SystemPromptService {
+  /** Returns a disposer. */
+  section(section: PromptSection): () => void
+  context(context: unknown): () => void
+  variable(name: string, provider: (context: unknown) => string | undefined): () => void
+}
+
+// ---- Subagent handlers (internal) ------------------------------------
+
+/**
+ * The narrow shape AgentProvider uses to launch a subagent run. The
+ * real service also offers continuable children and discovery; we only
+ * use the one-shot start.
+ */
+export interface SubagentsStartService {
+  start(name: string, request: Record<string, unknown>): Promise<unknown>
+}
+
+// ---- Local StoryRecord re-export -------------------------------------
+
+export type { StoryRecord } from '../domain/schema.js'

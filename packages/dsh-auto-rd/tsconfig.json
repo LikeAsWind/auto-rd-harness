@@ -1,8 +1,15 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    // NodeNext (not ESNext + bundler): this package's output is real ESM
+    // executed by Node, and Node requires explicit `.js` extensions on
+    // relative imports. `moduleResolution: "bundler"` silently accepted
+    // extensionless imports that compiled fine and then threw
+    // ERR_MODULE_NOT_FOUND at load time — which is how the StoryRunner
+    // came to import './gitlab-merger' without an extension and fail to
+    // load at all. NodeNext makes that a compile error.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "outDir": "./lib",
     "rootDir": "./src",
     "strict": true,

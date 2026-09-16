@@ -1,183 +1,152 @@
 /**
- * UI panel — register the auto-rd sidebar entry.
+ * UI panel — the auto-rd sidebar surface.
  *
- * Design doc §7.1: a list-type sidebar entry on the
- * 'sidebar.worktable.project' slot, showing every module + the
- * stories currently in flight.
+ * Design doc §7.1 asks for a list-type sidebar entry showing every
+ * module and the stories in flight. Two facts about the real DSH runtime
+ * decide how much of that this plugin can do, and both were verified
+ * against the live slot registry rather than assumed:
  *
- * Implementation note: DSH's sidebar renderer runs in the browser
- * process and uses React. The plugin (running in the DSH host Node
- * process) cannot ship a React tree directly; it sends a JSON
- * description that the browser side renders. We do not depend on a
- * React import here -- the renderer returns a plain JS object tree
- * keyed by element type, and the DSH client translates it into
- * React elements.
+ *   1. Slots are a CLIENT-realm concept. The host service catalog has no
+ *      `slots` key; the `Slots` inspect provider lives on the client.
+ *      A host-only Node plugin cannot register into a slot.
  *
- * Re-evaluation: the slot registration's renderer is called by DSH
- * whenever the storage changes (DSH observes storage-domain writes
- * and re-renders). We read fresh state from storage on each call.
- * No caching, no subscriptions; correctness > micro-perf.
+ *   2. A list slot's cell is a React component. Its registration
+ *      metadata is only `{ id, order?, label? }`, and the cell receives
+ *      typed owner props plus injected hooks — for `sidebar.panellist`
+ *      (`"Global panel icons. Each list id addresses the matching main
+ *      panel"`) the owner props are
+ *      `SidebarPanelIconOwnerProps { size: number; active: boolean }`.
+ *      There is no "renderer function" parameter, and no JSON element
+ *      tree is accepted. An earlier revision of this file passed a
+ *      renderer as a third argument to `slots.register`, which the real
+ *      API does not have.
+ *
+ * So this module does NOT pretend to render. Instead it:
+ *
+ *   - keeps `buildPanelModel()`, the pure data projection the sidebar
+ *     needs (modules -> stories -> state badge). It is host-side,
+ *     framework-free and fully testable, and a client contribution can
+ *     consume the same shape.
+ *   - exposes `renderPanelText()`, a plain-text rendering of that model.
+ *     This is what the host CAN produce, and it is what the
+ *     `auto_rd_status` tool returns, so the information is reachable
+ *     from the conversation even without a client plugin.
+ *   - reports precisely, once at mount, that the sidebar panel requires
+ *     a client-side contribution, instead of silently registering
+ *     something that would never appear.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
-import type { SlotsService, SlotRenderer } from '../types/dsh-services.js'
+import type { ModuleRecord, StoryRecord } from '../domain/schema.js'
 
 export interface AutoRdPanelDeps {
   storage: AutoRdStorage
   logger: Logger
 }
 
-const SLOT_NAME = 'sidebar.worktable.project'
-const PANEL_ID = 'auto-rd-modules'
-const PANEL_ORDER = 100
-const PANEL_LABEL = 'Auto-RD Modules'
+/** How many stories to show per module before summarising the rest. */
+export const PANEL_STORY_LIMIT = 10
 
-/**
- * Element node shape -- intentionally minimal. DSH's slot renderer
- * accepts a JSON tree of `{ type: 'div' | 'span' | 'ul' | ..., props,
- * children }` which the client side maps to React.createElement.
- *
- * We use 'string' leaf nodes for text and a fixed set of element
- * types. Anything more elaborate belongs in a client-side render
- * helper; this file deliberately stays UI-framework-agnostic.
- */
-type PanelNode =
-  | { type: 'div'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'span'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'h4'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'ul'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'li'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'small'; props?: Record<string, unknown>; children: PanelNode[] }
-  | { type: 'a'; props?: { href: string; target?: string }; children: PanelNode[] }
-  | string
-
-/**
- * Register the auto-rd panel. Returns true on success, false if the
- * DSH slots service is unavailable. The caller can use the return
- * value to decide whether to surface a console hint.
- */
-export function registerAutoRdPanel(ctx: Context, deps: AutoRdPanelDeps): boolean {
-  const slots = ctx.get('slots') as SlotsService | undefined
-  if (!slots) {
-    ctx.logger('auto-rd').warn(
-      `slots service not available; ${SLOT_NAME}#${PANEL_ID} will not be registered`,
-    )
-    return false
-  }
-
-  const renderer: SlotRenderer = () => renderPanel(deps)
-
-  slots.register(
-    SLOT_NAME,
-    {
-      id: PANEL_ID,
-      order: PANEL_ORDER,
-      label: () => PANEL_LABEL,
-    },
-    renderer,
-  )
-  ctx.logger('auto-rd').info(`Registered sidebar panel: ${SLOT_NAME}#${PANEL_ID}`)
-  return true
-}
-
-/**
- * Build the panel tree. Pure function over the storage snapshot.
- * Each section groups stories by module; within a section we list
- * stories by updatedAt desc, capped at 10 to keep the sidebar tidy.
- */
-function renderPanel(deps: AutoRdPanelDeps): PanelNode {
-  const modules = [...deps.storage.modules().values()]
-  const stories = [...deps.storage.stories().values()]
-  const storiesByModule = new Map<string, typeof stories>()
-  for (const s of stories) {
-    const arr = storiesByModule.get(s.moduleId) ?? []
-    arr.push(s)
-    storiesByModule.set(s.moduleId, arr)
-  }
-
-  if (modules.length === 0) {
-    return {
-      type: 'div',
-      children: [
-        { type: 'small', children: ['No modules configured.'] },
-      ],
-    }
-  }
-
-  return {
-    type: 'div',
-    props: { className: 'auto-rd-panel' },
-    children: modules.map((m) => renderModuleSection(m, storiesByModule.get(m.id) ?? [])),
-  }
-}
-
-function renderModuleSection(
-  m: { id: string; title: string; repoUrl: string; defaultBranch: string },
-  stories: Array<{
-    id: string
-    title: string
-    state: string
-    mrUrl?: string
-    updatedAt: string
-  }>,
-): PanelNode {
-  stories.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
-  const visible = stories.slice(0, 10)
-  const overflow = stories.length - visible.length
-
-  return {
-    type: 'div',
-    props: { className: 'auto-rd-module' },
-    children: [
-      {
-        type: 'h4',
-        children: [
-          { type: 'span', children: [`${m.title} `] },
-          { type: 'small', children: [`(${m.id})`] },
-        ],
-      },
-      visible.length === 0
-        ? { type: 'small', children: ['No stories.'] }
-        : {
-            type: 'ul',
-            children: visible.map(renderStoryRow),
-          },
-      overflow > 0
-        ? { type: 'small', children: [`+${overflow} more (use auto_rd_status to query)`] }
-        : { type: 'small', children: [`target: ${m.defaultBranch}`] },
-    ],
-  }
-}
-
-function renderStoryRow(s: {
+export interface PanelStory {
   id: string
   title: string
   state: string
   mrUrl?: string
   updatedAt: string
-}): PanelNode {
-  return {
-    type: 'li',
-    children: [
-      { type: 'span', children: [stateBadge(s.state)] },
-      { type: 'span', children: [` ${s.id}: ${s.title}`] },
-      s.mrUrl
-        ? {
-            type: 'a',
-            props: { href: s.mrUrl, target: '_blank' },
-            children: [' [MR]'],
-          }
-        : { type: 'small', children: [''] },
-    ],
+  badge: string
+}
+
+export interface PanelModule {
+  id: string
+  title: string
+  defaultBranch: string
+  stories: PanelStory[]
+  /** Count hidden by PANEL_STORY_LIMIT. */
+  overflow: number
+  /** Stories that are neither completed nor failed. */
+  inFlight: number
+}
+
+export interface PanelModel {
+  modules: PanelModule[]
+  totals: {
+    modules: number
+    stories: number
+    inFlight: number
+    blocked: number
+    completed: number
+    failed: number
   }
 }
 
+const TERMINAL_STATES = new Set(['completed', 'failed'])
+
 /**
- * Render the state as a short badge. The full text is returned so the
- * DSH client can apply its own colour mapping based on the string.
+ * Build the sidebar model from a storage snapshot.
+ *
+ * Pure over its inputs so it can be unit-tested without a runtime, and
+ * so the same projection can serve a client-side renderer.
  */
-function stateBadge(state: string): string {
+export function buildPanelModel(storage: AutoRdStorage): PanelModel {
+  const modules: ModuleRecord[] = [...storage.modules().values()]
+  const stories: StoryRecord[] = [...storage.stories().values()]
+
+  const byModule = new Map<string, StoryRecord[]>()
+  for (const s of stories) {
+    const arr = byModule.get(s.moduleId) ?? []
+    arr.push(s)
+    byModule.set(s.moduleId, arr)
+  }
+
+  let inFlightTotal = 0
+  let blockedTotal = 0
+  let completedTotal = 0
+  let failedTotal = 0
+
+  const panelModules: PanelModule[] = modules.map((m) => {
+    const all = [...(byModule.get(m.id) ?? [])].sort((a, b) =>
+      a.updatedAt < b.updatedAt ? 1 : -1,
+    )
+    const inFlight = all.filter((s) => !TERMINAL_STATES.has(s.state)).length
+    inFlightTotal += inFlight
+    blockedTotal += all.filter((s) => s.state === 'blocked').length
+    completedTotal += all.filter((s) => s.state === 'completed').length
+    failedTotal += all.filter((s) => s.state === 'failed').length
+
+    const visible = all.slice(0, PANEL_STORY_LIMIT)
+    return {
+      id: m.id,
+      title: m.title,
+      defaultBranch: m.defaultBranch,
+      stories: visible.map((s) => ({
+        id: s.id,
+        title: s.title,
+        state: s.state,
+        mrUrl: s.mrUrl,
+        updatedAt: s.updatedAt,
+        badge: stateBadge(s.state),
+      })),
+      overflow: Math.max(0, all.length - visible.length),
+      inFlight,
+    }
+  })
+
+  return {
+    modules: panelModules,
+    totals: {
+      modules: modules.length,
+      stories: stories.length,
+      inFlight: inFlightTotal,
+      blocked: blockedTotal,
+      completed: completedTotal,
+      failed: failedTotal,
+    },
+  }
+}
+
+/** Short glyph for a state. The client maps these to colours. */
+export function stateBadge(state: string): string {
   switch (state) {
     case 'completed':
       return '\u2713'
@@ -199,4 +168,89 @@ function stateBadge(state: string): string {
     default:
       return '\u00B7'
   }
+}
+
+/**
+ * Plain-text rendering of the panel model. This is the host-side
+ * substitute for the graphical sidebar: the same information, reachable
+ * from the conversation.
+ */
+export function renderPanelText(model: PanelModel): string {
+  const lines: string[] = []
+  const t = model.totals
+  lines.push(
+    `Auto-RD: ${t.modules} module(s), ${t.stories} story(ies) — ` +
+      `${t.inFlight} in flight, ${t.blocked} blocked, ${t.completed} completed, ${t.failed} failed`,
+  )
+
+  if (model.modules.length === 0) {
+    lines.push('')
+    lines.push('No modules configured.')
+    return lines.join('\n')
+  }
+
+  for (const m of model.modules) {
+    lines.push('')
+    lines.push(`${m.title} (${m.id}) — target: ${m.defaultBranch}`)
+    if (m.stories.length === 0) {
+      lines.push('  no stories')
+      continue
+    }
+    for (const s of m.stories) {
+      const mr = s.mrUrl ? ` [MR](${s.mrUrl})` : ''
+      lines.push(`  ${s.badge} ${s.id}: ${s.title} [${s.state}]${mr}`)
+    }
+    if (m.overflow > 0) {
+      lines.push(`  +${m.overflow} more (query with auto_rd_status)`)
+    }
+  }
+  return lines.join('\n')
+}
+
+/**
+ * The slots key a client contribution would register the panel under.
+ *
+ * Exported as data rather than used for a host-side registration: the
+ * `main` keyed slot dispatches on the same id, so a client half that
+ * registers `sidebar.panellist#auto-rd-modules` gets both the sidebar
+ * button and the main panel for free.
+ */
+export const CLIENT_PANEL_SLOT = 'sidebar.panellist'
+export const CLIENT_PANEL_ID = 'auto-rd-modules'
+export const CLIENT_PANEL_ORDER = 100
+export const CLIENT_PANEL_LABEL = 'Auto-RD'
+
+/**
+ * Report the sidebar situation once, precisely.
+ *
+ * Returns a snapshot provider the caller can use (the tools already
+ * expose the same data), and logs the exact reason the graphical panel
+ * is not registered from here.
+ */
+export function registerAutoRdPanel(ctx: Context, deps: AutoRdPanelDeps): boolean {
+  const clientSlotsAvailable = ctx.get('slots' as never) as unknown
+
+  if (clientSlotsAvailable) {
+    // Unexpected: a `slots` service appeared on the host. Do not guess at
+    // its contract — the verified client contract has no host-side
+    // renderer parameter, so registering here could corrupt the panel.
+    deps.logger.warn(
+      `[auto-rd] a host 'slots' service is present, but its contract is unverified; ` +
+        `the sidebar panel is intentionally NOT registered from the host. ` +
+        `Expected client key: ${CLIENT_PANEL_SLOT}#${CLIENT_PANEL_ID}.`,
+    )
+  } else {
+    deps.logger.info(
+      `[auto-rd] sidebar panel is a client-side contribution (${CLIENT_PANEL_SLOT}#${CLIENT_PANEL_ID}); ` +
+        `the host renders the same data through the auto_rd_status tool instead`,
+    )
+  }
+
+  // The host-side surface that always works.
+  const model = buildPanelModel(deps.storage)
+  const text = renderPanelText(model)
+  deps.logger.debug(`[auto-rd] panel snapshot:\n${text}`)
+
+  // Nothing was registered into a UI; report that honestly.
+  return false
 }

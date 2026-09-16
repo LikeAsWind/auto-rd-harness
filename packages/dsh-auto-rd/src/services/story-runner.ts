@@ -35,7 +35,7 @@ import {
   createOrReuseMR,
   buildMRDescription,
   projectIdFromRepoUrl,
-} from './gitlab-merger'
+} from './gitlab-merger.js'
 import { syncTapd } from './tapd-poller.js'
 import { HttpClient } from '../utils/http-client.js'
 import type { TrajectoryRecorder } from './trajectory.js'
@@ -904,7 +904,7 @@ async function runMrCreatingStage(
   }
 
   const httpClient =
-    (deps as unknown as { httpClient?: import('../utils/http-client').HttpClient }).httpClient ??
+    (deps as unknown as { httpClient?: import('../utils/http-client.js').HttpClient }).httpClient ??
     new HttpClient({ tag: 'gitlab-merger' })
   const mergerDeps = { httpClient, logger: deps.logger }
 
