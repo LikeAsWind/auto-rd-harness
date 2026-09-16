@@ -11,10 +11,9 @@
  * This is the SINGLE owner of the state machine; StoryQueue and TapdPoller
  * never advance story state directly.
  *
- * M2: states from `pending` through `spec` have stub handlers (see
- * agent-provider.ts). Later states (planning and beyond) still short-circuit
- * to `completed` so a single story can exercise the full M2 surface end to
- * end without a model attached.
+ * Every state dispatches to the matching handler in agent-provider.ts.
+ * See that module for the two dispatch paths (model-backed vs
+ * deterministic) and what each stage does without a model.
  *
  * Borrowed patterns:
  * - SD-1: Rulings, not stalls (advance state without waiting on human)
@@ -61,11 +60,10 @@ interface StageHandler {
 /**
  * Stage dispatch table.
  *
- * M2: states pending → spec are implemented (with stubs that produce real
- * artifact shape so the state machine can advance). States after spec
- * (`planning`, `implementing`, ...) short-circuit to `completed` because
- * they belong to later milestones. M3+ will replace those with real
- * handlers.
+ * Every state has a handler. The deterministic handlers produce real
+ * artifacts and real side effects — worktree probes, subprocess test
+ * runs, git commits, HTTP calls — so the machine advances with or
+ * without a model attached.
  */
 const STAGE_HANDLERS: Record<StoryState, StageHandler | null> = {
   pending: async () => 'context',

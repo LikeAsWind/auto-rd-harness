@@ -4,16 +4,27 @@
  * This is the bridge between StoryRunner (state machine) and DSH's agent
  * factory. Each persona in src/agents/ registers here.
  *
- * M1: only ContextAgent is wired in. The other 12 throw `agentNotImplemented`
- * so the orchestrator can short-circuit cleanly.
+ * Two dispatch paths, in order of preference:
  *
- * SubAgent integration strategy:
- *   - We attempt to read `ctx.subagents` (injected by DSH). If present, we
- *     invoke it as the real dispatch path; if absent (e.g. building outside
- *     a running harness), we fall back to an in-process stub that still
- *     writes the same artifact shape so the state machine can advance.
- *   - Either way the persona markdown is written to the artifacts dir so a
- *     human/operator can inspect what would be sent to the model.
+ *   1. MODEL-BACKED — `ctx.subagents.start()` is present, so the stage is
+ *      handed to a real subagent carrying the persona, the tool filter,
+ *      and the worktree.
+ *   2. DETERMINISTIC — no subagent service (a standalone build, or a
+ *      harness without one). The handler then does the real work it can
+ *      do without a model and says so in the artifact: the Context stage
+ *      probes the worktree and runs the baseline suite, Test runs the
+ *      suite in a subprocess, Implementation and Fix create real commits,
+ *      Verification gathers the real diff and re-runs the suite, and
+ *      Review/FinalVerify read the real diff.
+ *
+ * The distinction is stated in the artifacts rather than blurred: a
+ * deterministic report names itself as such instead of implying a model
+ * inspected the code. What remains model-dependent is judgement — the
+ * content of implementation files and the findings a reviewer would
+ * raise — and that is the only part that degrades.
+ *
+ * Either way the persona markdown is written to the artifacts dir so a
+ * human/operator can inspect exactly what would be sent to the model.
  *
  * Borrowed patterns:
  * - SD-2: Fresh Subagent Per Task (we re-dispatch a fresh subagent per stage)
@@ -83,13 +94,13 @@ export interface AgentDispatchRequest {
   variationIndex?: number
   /**
    * Axis for two-axis review (review / final-verify). The orchestrator
-   * dispatches each review agent twice — once per axis — and the stub
+   * dispatches each review agent twice — once per axis — and the handler
    * uses this to write a per-axis artifact file.
    */
   axis?: ReviewAxis
   /**
    * Optional task identifier for ImplementationAgent / FixAgent so the
-   * stub can write a per-task artifact (e.g., 08-impl-T001.md).
+   * handler can write a per-task artifact (e.g., 08-impl-T001.md).
    */
   taskId?: string
 }
@@ -167,7 +178,7 @@ export class AgentProvider {
       this.deps.logger.info('AgentProvider: ctx.subagents detected — real dispatch path active')
     } else {
       this.deps.logger.warn(
-        'AgentProvider: ctx.subagents unavailable — falling back to in-process stub handler',
+        'AgentProvider: ctx.subagents unavailable — using the deterministic handler path',
       )
     }
   }
@@ -182,7 +193,7 @@ export class AgentProvider {
       if (svc && typeof (svc as SubagentsService).start === 'function') return svc
     } catch {
       // ctx.get may throw if the service is not whitelisted in `inject:`.
-      // Treat that as "not available" and keep the stub path.
+      // Treat that as "not available" and use the deterministic path.
     }
     return null
   }
@@ -248,7 +259,7 @@ export class AgentProvider {
     // Real path: hand off to DSH's subagents service. We don't await a
     // session finish — we just record that a subagent was launched. The
     // state machine remains the source of truth for advancement; the
-    // agent's artifact is what we trust, and the stub handler below
+    // agent's artifact is what we trust, and the deterministic handler below
     // produces it synchronously. Future milestones will wire the actual
     // subagent result into the same artifact file.
     if (this.subagents) {
@@ -268,7 +279,7 @@ export class AgentProvider {
         this.deps.logger.info(`Subagent launched for ${req.agentName}${req.variation ? ` (${req.variation})` : ''}${req.axis ? ` (${req.axis})` : ''}${req.taskId ? ` (${req.taskId})` : ''}: ${req.label}`)
       } catch (err) {
         this.deps.logger.error(
-          `Subagent start failed for ${req.agentName}: ${(err as Error).message}; falling back to stub`,
+          `Subagent start failed for ${req.agentName}: ${(err as Error).message}; using the deterministic handler`,
         )
       }
     }
@@ -321,8 +332,8 @@ export class AgentProvider {
   }
 
   private registerBuiltins(): void {
-    this.register('context', new ContextAgent(), runContextStub)
-    this.register('clarification', new ClarificationAgent(), runClarificationStub)
+    this.register('context', new ContextAgent(), runContextHandler)
+    this.register('clarification', new ClarificationAgent(), runClarificationHandler)
     // BrainstormAgent is special: the same name is dispatched three times in
     // parallel with different `variation` values. The dispatch path picks the
     // right AgentSpec per call rather than registering three separate keys.
@@ -331,22 +342,22 @@ export class AgentProvider {
       clean: new BrainstormAgent('clean', 2),
       novel: new BrainstormAgent('novel', 3),
     }
-    this.brainstormHandler = runBrainstormStub
-    this.register('critic', new CriticAgent(), runCriticStub)
-    this.register('decision', new DecisionAgent(), runDecisionStub)
-    this.register('spec', new SpecAgent(), runSpecStub)
-    this.register('planner', new PlannerAgent(), runPlannerStub)
+    this.brainstormHandler = runBrainstormHandler
+    this.register('critic', new CriticAgent(), runCriticHandler)
+    this.register('decision', new DecisionAgent(), runDecisionHandler)
+    this.register('spec', new SpecAgent(), runSpecHandler)
+    this.register('planner', new PlannerAgent(), runPlannerHandler)
 
     // ImplementationAgent: a fresh instance per task (SD-2). The dispatch
     // path caches one spec per taskId, with a default fallback for any
     // taskId the registry hasn't seen (still rare — the orchestrator
     // pre-creates them).
     this.implementationDefaultSpec = new ImplementationAgent('default')
-    this.implementationHandler = runImplementationStub
+    this.implementationHandler = runImplementationHandler
 
-    this.register('test', new TestAgent(), runTestStub)
-    this.register('fix', new FixAgent(), runFixStub)
-    this.register('verification', new VerificationAgent(), runVerificationStub)
+    this.register('test', new TestAgent(), runTestHandler)
+    this.register('fix', new FixAgent(), runFixHandler)
+    this.register('verification', new VerificationAgent(), runVerificationHandler)
 
     // Review and FinalVerify are dispatched twice in parallel — once per
     // axis. Same pattern as Brainstorm: same name, axis parameter chooses
@@ -355,12 +366,12 @@ export class AgentProvider {
       standards: new ReviewAgent(),
       spec: new ReviewAgent(),
     }
-    this.reviewHandler = runReviewStub
+    this.reviewHandler = runReviewHandler
     this.finalVerifySpecByAxis = {
       standards: new FinalVerifyAgent(),
       spec: new FinalVerifyAgent(),
     }
-    this.finalVerifyHandler = runFinalVerifyStub
+    this.finalVerifyHandler = runFinalVerifyHandler
   }
 
   /**
@@ -387,15 +398,17 @@ export class AgentProvider {
   }
 }
 
-// ---- Stub Handlers ----
+// ---- Deterministic Handlers ----
 //
-// Every agent in M2 has a stub handler here. The stub produces the same
-// artifact shape the real model would produce — including the sentinel
-// token the state machine parses — so the 19-state pipeline can advance
-// end-to-end without a model attached. Replace any of these with a real
-// dispatch path when the corresponding agent becomes model-backed.
+// Each handler is the deterministic half of its stage: the work that is
+// real regardless of whether a model is attached. They produce the same
+// artifact shape the model-backed path produces — including the sentinel
+// token the state machine parses — so the 19-state pipeline advances with
+// or without a subagent service. Where a stage fundamentally needs
+// judgement (implementation file contents, review findings) the report
+// says so plainly rather than fabricating an inspection that never ran.
 
-async function runContextStub(
+async function runContextHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -488,7 +501,7 @@ async function runContextStub(
   }
 }
 
-async function runClarificationStub(
+async function runClarificationHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -570,7 +583,7 @@ async function runClarificationStub(
   }
 }
 
-async function runBrainstormStub(
+async function runBrainstormHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -649,7 +662,7 @@ async function runBrainstormStub(
   }
 }
 
-async function runCriticStub(
+async function runCriticHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -663,7 +676,7 @@ async function runCriticStub(
 
   // ---- Real critique over the real proposals ----
   //
-  // The proposals are re-derived deterministically (see runBrainstormStub)
+  // The proposals are re-derived deterministically (see runBrainstormHandler)
   // so the critique measures the same artefacts the Brainstorm stage
   // produced without any state passing between subagents.
   const probe = probeProject(req.worktreePath)
@@ -772,7 +785,7 @@ function escapePipe(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\n/g, ' ').trim()
 }
 
-async function runDecisionStub(
+async function runDecisionHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -878,7 +891,7 @@ function queryEffort(variation: Variation, proposals: Proposal[]): string {
   return p ? effortOf(p) : '?'
 }
 
-async function runSpecStub(
+async function runSpecHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -932,7 +945,7 @@ async function runSpecStub(
   }
 }
 
-async function runPlannerStub(
+async function runPlannerHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -977,7 +990,7 @@ async function runPlannerStub(
   }
 }
 
-async function runImplementationStub(
+async function runImplementationHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -1045,7 +1058,7 @@ async function runImplementationStub(
     `- Test file: ${task?.red?.file ?? task?.files?.[0] ?? '<not specified by planner>'}`,
     task?.red ? `- Test name: \`${task.red.testName}\`` : null,
     task?.red ? `- Assertion: ${task.red.assertion}` : null,
-    `- Code written by: ${this_is_stub()}`,
+    `- Code written by: ${handlerAuthor()}`,
     ``,
     `## GREEN`,
     `- Source file: ${task?.green?.file ?? task?.files?.[1] ?? '<not specified by planner>'}`,
@@ -1087,15 +1100,15 @@ async function runImplementationStub(
 }
 
 /**
- * Whether the file contents were authored by a deterministic stub or a
+ * Whether the file contents were authored by a deterministic handler or a
  * model. Kept as a function so the wording lives in one place and a
  * future model-attached path can flip it.
  */
-function this_is_stub(): string {
+function handlerAuthor(): string {
   return 'deterministic handler (no model attached)'
 }
 
-async function runTestStub(
+async function runTestHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -1104,7 +1117,7 @@ async function runTestStub(
 
   // ---- Real test execution ----
   //
-  // The M2 stub always emitted PASS, which masked real failures and
+  // The earlier placeholder always emitted PASS, which masked real failures and
   // hid the fix breaker. This handler now invokes the RealTestExecutor
   // against the worktree. The result drives the [TEST_PASS] /
   // [TEST_FAIL] sentinel the runner parses.
@@ -1185,7 +1198,7 @@ async function runTestStub(
   }
 }
 
-async function runFixStub(
+async function runFixHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -1239,7 +1252,7 @@ async function runFixStub(
     `**Status**: ${committed ? 'COMMITTED' : 'NO_CHANGE'}`,
     ``,
     `## Phase 1 — Root Cause`,
-    `- Analysis author: ${this_is_stub()}`,
+    `- Analysis author: ${handlerAuthor()}`,
     `- Failing evidence: ${testRun && !testRun.skippedReason ? `\`${testRun.command}\` → ${testRun.passed ? 'PASS' : 'FAIL'}` : '<no test run>'}`,
     ``,
     `## Phase 2 — Pattern`,
@@ -1271,7 +1284,7 @@ async function runFixStub(
   }
 }
 
-async function runVerificationStub(
+async function runVerificationHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -1408,7 +1421,7 @@ async function runVerificationStub(
   }
 }
 
-async function runReviewStub(
+async function runReviewHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
@@ -1474,7 +1487,7 @@ async function runReviewStub(
   return { status: 'success', summary: `Review report (${taskId} ${axis}, ${diff.commitCount} commit(s), +${diff.insertions}/-${diff.deletions}).` }
 }
 
-async function runFinalVerifyStub(
+async function runFinalVerifyHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {

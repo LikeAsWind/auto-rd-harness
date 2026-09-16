@@ -43,7 +43,7 @@ export function loadPersona(name: string): string {
     }
   }
   // Missing persona is non-fatal — the agent will still construct, the
-  // orchestrator can still log, and the stub handler still writes a report.
+  // orchestrator can still log, and the handler still writes a report.
   // We surface the miss in the return value so the caller can choose to log.
   return ''
 }
