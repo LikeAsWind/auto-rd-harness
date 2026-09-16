@@ -1940,9 +1940,24 @@ export async function recoverStories(
 
 ### 10.4 未做的事（未来扩展）
 
-- ❌ **Cold resume mainSessionId**：M1+ 暂不做。DSH session API 跨版本不一致；checkpoint + 文件系统 artifact 已经覆盖 95% 用例
-- ❌ **Stuck-session detection**：用 session list 查 `state='executing'` 时间 > N min 的孤儿 session —— M5 + 加
-- ❌ **Concurrent plugin instance 防多写**：trust DSH single-process 假设
+- ❌ **Cold resume mainSessionId**：暂不做。DSH session API 跨版本不一致；checkpoint + 文件系统 artifact 已经覆盖绝大多数用例。`StoryRecord.mainSessionId` 字段仍在 schema 里保留，等 API 稳定后再接。
+- ❌ **Stuck-session detection**：用 session list 查 `state='executing'` 时间 > N min 的孤儿 session。未实现——`recoverStories` 目前对所有 ACTIVE state 一律重置为 `pending`（见 §10.2），不做存活性判断。
+- ✅ **Concurrent plugin instance 防多写**：**已实现**，但不是通过显式锁——而是
+  storageDomain 自身的约束：`open()` 对同名 domain 第二次调用会以
+  `already-open` reject（真实契约："reject a name that is already open
+  (`already-open`)"）。因为 `AUTORD_DOMAIN_NAME` 是常量 `'auto-rd'`，
+  同进程内第二个实例会在 `apply()` 阶段直接 mount 失败，而不是两个实例
+  并发写同一批表。
+
+  实现位置：`AutoRdStorage.open()` → `apply()` 为 async，让这个 rejection
+  成为 mount 失败（快速且可见），而不是半初始化状态。
+
+  另外 `apply()` 把自己的 disposer 注册进 `ctx.effect`，卸载时
+  `storage.close()` 释放 domain——否则一次 reload 就会留下打开着的 domain，
+  让下一次 mount 撞上 `already-open`。
+
+  回归测试：`scripts/test-mount-smoke.mjs` 的 "double mount: the second
+  apply() rejects" 与 "teardown: closed the storage domain" 两条断言。
 
 ### 10.5 Logger Rate Limit（M5）
 
