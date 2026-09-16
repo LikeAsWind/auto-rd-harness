@@ -4,24 +4,35 @@
  *
  * Idempotent. No external deps. Cross-platform (Windows / *nix).
  *
- * What it does:
+ * What it does (a real, standard DSH install — see
+ * https://github.com/deepseek-ai/dsh for the loader / bundle contract):
  *   1. Resolves the target profile dir ($DSH_HOME/profiles or ~/.dsh/profiles,
  *      override with --profile).
- *   2. `pnpm add -C <profile> @yangzhitong/dsh-auto-rd@file:<repo>/packages/dsh-auto-rd`
+ *   2. Builds and packs the local plugin into a tarball so we don't have
+ *      to pass an `@file:` specifier through cmd.exe (@ is reserved in
+ *      cmd's /c mode); `pnpm add <path>` accepts a plain path.
+ *   3. `pnpm add -C <profile> @yangzhitong/dsh-auto-rd@file:<tarball>`
  *      (npm/yarn auto-detected if pnpm is not used by the profile).
- *   3. Upserts a managed block inside <profile>/web/cordis.patch.yml:
- *      - Auto-RD entries are wrapped in clearly marked begin/end markers so
- *        re-runs and uninstall stay surgical. The block is the only thing
- *        the script writes between the markers; everything outside is
- *        preserved verbatim.
- *      - Tokens are referenced via `!js "process.env.<name> || ''"`; the
- *        script never contains, echoes, or rewrites any token value.
- *   4. Prints next steps (set env, restart DSH).
+ *   4. Registers the bundle in `<profile>/package.json` under
+ *      `dsh.profile.bundles` so DSH's loader resolves the host plugin
+ *      `lib/index.js` AND the web shell loads `lib/client.js`.
+ *   5. Writes / updates a managed block in `<profile>/cordis.patch.yml`:
+ *         - id: auto-rd
+ *           name: '@yangzhitong/dsh-auto-rd'
+ *           config: <default config from packages/dsh-auto-rd/cordis.patch.yml>
+ *      This is the entry DSH's loader activates at startup; without it
+ *      the bundle is in `node_modules` but never mounted.
+ *   6. Prints next steps (set env, restart DSH).
+ *
+ * Tokens are never touched by this script — DSH reads them from the
+ * launching shell's env. Users who want non-default config write their
+ * overrides into `<profile>/cordis.patch.yml`, which DSH applies AFTER
+ * the bundle's own `cordis.patch.yml` so user values win.
  *
  * Flags:
  *   --profile <dir>   override target profile dir
  *   --dry-run         print what would change; do not modify or install
- *   --uninstall       remove the auto-rd row + pnpm remove
+ *   --uninstall       remove the bundle + pnpm remove
  *   --help            usage
  *
  * Set these env vars BEFORE launching DSH (not before running this script):
@@ -64,7 +75,10 @@ function locateOnPath(cmd) {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const PKG_DIR = join(REPO_ROOT, 'packages', 'dsh-auto-rd');
+const PKG_JSON = join(PKG_DIR, 'package.json');
+const PLUGIN_PATCH = join(PKG_DIR, 'cordis.patch.yml');
 
+const BUNDLE_NAME = '@yangzhitong/dsh-auto-rd';
 const BLOCK_BEGIN = '# >>> auto-rd (managed by scripts/install-to-dsh.mjs) >>>';
 const BLOCK_END   = '# <<< auto-rd <<<';
 
@@ -76,8 +90,9 @@ Usage:
 Defaults:
   profile   $DSH_HOME/profiles or ~/.dsh/profiles
   install   adds @yangzhitong/dsh-auto-rd via the profile's package manager
-            and inserts a managed block in web/cordis.patch.yml
-  uninstall removes the managed block and runs pnpm/npm/yarn remove
+            and registers it under package.json#dsh.profile.bundles
+  uninstall removes the bundle from dsh.profile.bundles and runs pnpm/npm/yarn remove
+            (also strips a legacy managed block from cordis.patch.yml if present)
 
 This script never sees or prints your tokens. Set these env vars in the
 shell that launches DSH:
@@ -99,7 +114,7 @@ function parseArgs(argv) {
 /**
  * DSH "profile" is a bundle directory like `~/.dsh/profiles/web/` — it owns
  * its own package.json (deps + scripts), its own node_modules, and the
- * cordis.patch.yml we need to edit. Resolve the bundle directly.
+ * cordis.patch.yml we may need to clean up on uninstall.
  */
 function defaultProfileDir() {
   if (process.env.DSH_HOME) return join(process.env.DSH_HOME, 'profiles', 'web');
@@ -171,93 +186,160 @@ function detectPackageManager(profileDir) {
   return 'pnpm'; // DSH profiles ship with pnpm.
 }
 
-/** Build the YAML body that goes between BLOCK_BEGIN / BLOCK_END. */
-function buildBlockBody() {
-  return [
-    `- id: auto-rd`,
-    `  name: '@yangzhitong/dsh-auto-rd'`,
-    `  config:`,
-    `    tapdBaseUrl: 'https://api.tapd.cn'`,
-    `    tapdApiToken: !js "process.env.DSH_TAPD_API_TOKEN || ''"`,
-    `    tapdPollIntervalMs: 60000`,
-    `    tapdWorkspaceIds: []`,
-    `    useTapdMock: false`,
-    ``,
-    `    gitlabBaseUrl: 'https://gitlab.com'`,
-    `    gitlabApiToken: !js "process.env.DSH_GITLAB_API_TOKEN || ''"`,
-    `    gitlabPushUserName: 'auto-rd'`,
-    `    gitlabPushUserEmail: 'auto-rd@example.com'`,
-    ``,
-    `    workspaceRoot: 'C:/work'`,
-    ``,
-    `    modules: []`,
-    ``,
-    `    maxConcurrentStoriesPerModule: 1`,
-    `    maxTotalConcurrentStories: 4`,
-    ``,
-    `    modelSelection:`,
-    `      brainstorm: 'sonnet'`,
-    `      critic: 'sonnet'`,
-    `      decision: 'sonnet'`,
-    `      spec: 'sonnet'`,
-    `      planner: 'sonnet'`,
-    `      implementation: 'haiku'`,
-    `      test: 'sonnet'`,
-    `      fix: 'sonnet'`,
-    `      verification: 'sonnet'`,
-    `      review: 'sonnet'`,
-    `      finalVerify: 'opus'`,
-    ``,
-    `    logLevel: 'info'`,
-  ].join('\n');
+/**
+ * Read the profile's package.json and return it parsed. We deliberately
+ * keep the in-memory shape rather than re-stringifying from scratch: the
+ * script should preserve every unrelated field, ordering, and formatting
+ * that npm/pnpm/DSH wrote into it.
+ */
+function readProfilePkg(profileDir) {
+  const path = join(profileDir, 'package.json');
+  const raw = readFileSync(path, 'utf8');
+  return { path, raw, parsed: JSON.parse(raw) };
 }
 
-function buildManagedBlock() {
-  return [BLOCK_BEGIN, buildBlockBody(), BLOCK_END].join('\n') + '\n';
+/**
+ * Add @yangzhitong/dsh-auto-rd to dsh.profile.bundles (creating the path
+ * if missing). Idempotent: a no-op when the bundle is already listed.
+ * Returns "added" | "already-present".
+ */
+function registerBundle(pkg, bundleName) {
+  const dsh = pkg.dsh || (pkg.dsh = {});
+  const profile = dsh.profile || (dsh.profile = {});
+  const bundles = Array.isArray(profile.bundles) ? profile.bundles.slice() : [];
+  if (bundles.includes(bundleName)) return { bundles, changed: false };
+  bundles.push(bundleName);
+  profile.bundles = bundles;
+  return { bundles, changed: true };
 }
 
+/**
+ * Remove @yangzhitong/dsh-auto-rd from dsh.profile.bundles. Returns
+ * "removed" | "not-present".
+ */
+function unregisterBundle(pkg, bundleName) {
+  const bundles = pkg.dsh?.profile?.bundles;
+  if (!Array.isArray(bundles)) return { bundles: undefined, changed: false };
+  const next = bundles.filter((b) => b !== bundleName);
+  const changed = next.length !== bundles.length;
+  pkg.dsh.profile.bundles = next;
+  return { bundles: next, changed };
+}
+
+function writeProfilePkg(pkgCtx) {
+  // Use 2-space indent + trailing newline to match what npm/pnpm write.
+  writeFileSync(pkgCtx.path, JSON.stringify(pkgCtx.parsed, null, 2) + '\n', 'utf8');
+}
+
+/**
+ * Legacy managed block support — the previous install version wrote a
+ * user-level overlay block into cordis.patch.yml. New installs go
+ * through package.json#dsh.profile.bundles instead, but we still strip
+ * a leftover block on uninstall so a re-install cycle stays clean.
+ */
 function readPatch(patchFile) {
   if (!existsSync(patchFile)) return '';
   return readFileSync(patchFile, 'utf8');
 }
 
-/** Replace (or insert) the managed block, preserving everything outside. */
-function upsertBlock(original) {
-  const block = buildManagedBlock();
+function removeLegacyBlock(original) {
   const beginIdx = original.indexOf(BLOCK_BEGIN);
-  const endIdx = original.indexOf(BLOCK_END);
-  if (beginIdx >= 0 && endIdx > beginIdx) {
-    // Replace existing block. Keep trailing newline after END if present.
-    const afterEnd = original.slice(endIdx + BLOCK_END.length);
-    return original.slice(0, beginIdx) + block + afterEnd.replace(/^\n/, '');
-  }
-  // Strip a stale top-level `[]` (an empty loader array left over from a
-  // default patch.yml) so the resulting file is still a single top-level
-  // YAML array — the managed block's first `- id:` line IS the array's
-  // first element. Without this, the file would parse as two documents
-  // and DSH's loader would reject it.
-  let base = original
-    .split('\n')
-    .filter((l) => l.trim() !== '[]')
-    .join('\n');
-  // Ensure base ends with a newline, then add a blank line + block.
-  if (!base.endsWith('\n')) base += '\n';
-  if (base !== '') base += '\n';
-  return base + block;
-}
-
-function removeBlock(original) {
-  const beginIdx = original.indexOf(BLOCK_BEGIN);
-  if (beginIdx < 0) return original;
+  if (beginIdx < 0) return { text: original, removed: false };
   const endIdx = original.indexOf(BLOCK_END, beginIdx);
   if (endIdx < 0) throw new Error(`patch file has ${BLOCK_BEGIN} without ${BLOCK_END}`);
-  // Slice out [begin, end] inclusive, plus the trailing newline.
   const endOfLine = original.indexOf('\n', endIdx);
   const cutEnd = endOfLine < 0 ? original.length : endOfLine + 1;
   const before = original.slice(0, beginIdx);
   const after = original.slice(cutEnd);
-  // Trim a single separator newline that the append left behind.
-  return before.replace(/\n+$/, '\n') + after.replace(/^\n+/, '');
+  const text = before.replace(/\n+$/, '\n') + after.replace(/^\n+/, '');
+  return { text, removed: true };
+}
+
+/**
+ * Build the plugin before installing. We need `lib/` (and the
+ * `lib/client.js` copy) so that `npm pack` produces a tarball that the
+ * profile loader can actually require.
+ *
+ * The build is just `tsc` + the two copy scripts defined in
+ * `packages/dsh-auto-rd/package.json#scripts`. We invoke them through
+ * `npm run --prefix` so we don't have to write a separate build driver.
+ */
+function buildPlugin() {
+  process.stdout.write(`[build] npm run build --prefix ${PKG_DIR}\n`);
+  run('npm', ['run', '--prefix', PKG_DIR, 'build']);
+}
+
+/**
+ * Read the plugin's `cordis.patch.yml` (the canonical bundle-owned
+ * patch — see package.json#dsh.bundle.patch) and render a USER-OVERLAY
+ * entry suitable for `<profile>/cordis.patch.yml`.
+ *
+ * The bundle's own file uses DSH's `insert` form (`- insert:` with no
+ * top-level id) so the loader creates a fresh entry on bundle load.
+ * The user's overlay MUST use the patch form (`- id: ...` + config:)
+ * instead, so it modifies the bundle-inserted entry's config rather
+ * than inserting a second `auto-rd` entry (which the loader would keep
+ * as a duplicate).
+ *
+ * We therefore:
+ *   1. Strip leading comment lines.
+ *   2. Find the `- insert:` line.
+ *   3. Drop the `- insert:` wrapper and dedent the inner list by the
+ *      indent that wrapped it (2 spaces in our shipped file), so the
+ *      entry becomes a top-level `- id: ...` row in the overlay.
+ *
+ * NOTE: this is the only transformation we do — keys and values are
+ * preserved byte-for-byte. `cordis.patch.yml` is the source of truth.
+ */
+function renderPluginEntry() {
+  const patchText = readFileSync(PLUGIN_PATCH, 'utf8');
+  const lines = patchText.split(/\r?\n/);
+  const insertIdx = lines.findIndex((l) => /^\s*-\s+insert:/.test(l));
+  if (insertIdx < 0) throw new Error(`could not find loader entry (- insert: ...) in ${PLUGIN_PATCH}`);
+  // Find the indent applied to the inner `- id:` row.
+  const innerMatch = lines[insertIdx + 1]?.match(/^(\s+)-\s/);
+  if (!innerMatch) throw new Error(`malformed - insert: block in ${PLUGIN_PATCH}: no inner entry on the next line`);
+  const innerIndent = innerMatch[1];
+  // Drop everything up to and including the `- insert:` line, then
+  // dedent the remainder by the inner indent so the entry becomes
+  // top-level. Strip trailing blank lines.
+  const entryLines = lines.slice(insertIdx + 1).map((l) =>
+    l.startsWith(innerIndent) ? l.slice(innerIndent.length) : l
+  );
+  while (entryLines.length > 0 && entryLines[entryLines.length - 1].trim() === '') {
+    entryLines.pop();
+  }
+  return entryLines.join('\n');
+}
+
+/**
+ * Upsert (insert or replace) the managed block in the profile's
+ * cordis.patch.yml. Idempotent: a second run replaces the previous block
+ * with the freshly rendered default config.
+ */
+function upsertManagedBlock(original, entryYaml) {
+  const blockBody = [
+    BLOCK_BEGIN,
+    entryYaml,
+    BLOCK_END,
+  ].join('\n');
+
+  const beginIdx = original.indexOf(BLOCK_BEGIN);
+  if (beginIdx < 0) {
+    // No block yet — append it. A leading newline makes it readable
+    // when the file already ends without one.
+    const sep = original.length > 0 && !original.endsWith('\n') ? '\n' : '';
+    const text = original.replace(/\s*$/, '') + sep + '\n' + blockBody + '\n';
+    return { text, changed: true, action: 'inserted' };
+  }
+  const endIdx = original.indexOf(BLOCK_END, beginIdx);
+  if (endIdx < 0) throw new Error(`patch file has ${BLOCK_BEGIN} without ${BLOCK_END}`);
+  const endOfLine = original.indexOf('\n', endIdx);
+  const cutEnd = endOfLine < 0 ? original.length : endOfLine + 1;
+  const before = original.slice(0, beginIdx);
+  const after = original.slice(cutEnd);
+  const text = before.replace(/\n+$/, '\n') + blockBody + '\n' + after.replace(/^\n+/, '');
+  return { text, changed: true, action: 'replaced' };
 }
 
 function main() {
@@ -268,84 +350,121 @@ function main() {
   }
   const profileDir = resolve(args.profile || defaultProfileDir());
   ensureProfile(profileDir);
-  const patchFile = join(profileDir, 'cordis.patch.yml');
-  mkdirSync(dirname(patchFile), { recursive: true });
 
   const pm = detectPackageManager(profileDir);
 
   if (args.uninstall) {
+    // 1. Drop a legacy managed block from cordis.patch.yml if present.
+    const patchFile = join(profileDir, 'cordis.patch.yml');
     const original = readPatch(patchFile);
-    const after = removeBlock(original);
-    if (after !== original) {
-      if (!args.dryRun) writeFileSync(patchFile, after, 'utf8');
-      process.stdout.write(`[uninstall] managed block removed from ${patchFile}\n`);
-    } else {
-      process.stdout.write(`[uninstall] no managed block present in ${patchFile}\n`);
+    if (original) {
+      const { text, removed } = removeLegacyBlock(original);
+      if (removed) {
+        if (!args.dryRun) writeFileSync(patchFile, text, 'utf8');
+        process.stdout.write(`[uninstall] legacy managed block removed from ${patchFile}\n`);
+      } else {
+        process.stdout.write(`[uninstall] no legacy managed block in ${patchFile}\n`);
+      }
     }
+
+    // 2. Remove the bundle from package.json#dsh.profile.bundles.
+    const pkgCtx = readProfilePkg(profileDir);
+    const { changed } = unregisterBundle(pkgCtx.parsed, BUNDLE_NAME);
+    if (changed) {
+      if (!args.dryRun) writeProfilePkg(pkgCtx);
+      process.stdout.write(`[uninstall] removed ${BUNDLE_NAME} from dsh.profile.bundles in ${pkgCtx.path}\n`);
+    } else {
+      process.stdout.write(`[uninstall] ${BUNDLE_NAME} was not in dsh.profile.bundles — left unchanged\n`);
+    }
+
+    // 3. pnpm/npm/yarn remove
     if (!args.dryRun) {
-      process.stdout.write(`[uninstall] ${pm} remove -C ${profileDir} @yangzhitong/dsh-auto-rd\n`);
-      run(pm, ['remove', '-C', profileDir, '@yangzhitong/dsh-auto-rd']);
+      process.stdout.write(`[uninstall] ${pm} remove -C ${profileDir} ${BUNDLE_NAME}\n`);
+      run(pm, ['remove', '-C', profileDir, BUNDLE_NAME]);
     } else {
-      process.stdout.write(`(dry-run) would run: ${pm} remove -C ${profileDir} @yangzhitong/dsh-auto-rd\n`);
+      process.stdout.write(`(dry-run) would run: ${pm} remove -C ${profileDir} ${BUNDLE_NAME}\n`);
     }
-    // Drop the local tarball cache (see install path) — it's safe to
-    // remove even if pnpm didn't actually unpack it.
+
+    // 4. Drop the local tarball cache (see install path) — it's safe to
+    //    remove even if pnpm didn't actually unpack it.
     const cacheDir = join(profileDir, 'node_modules', '.cache', 'autord-install');
     if (existsSync(cacheDir)) {
       rmSync(cacheDir, { recursive: true, force: true });
       process.stdout.write(`[uninstall] removed local tarball cache: ${cacheDir}\n`);
+
+      process.stdout.write('Done. Restart DSH to pick up the change.\n');
     }
+
     process.stdout.write('Done. Restart DSH to pick up the change.\n');
     return;
   }
 
-  // Pack the local plugin into a tarball so we don't have to pass an
-// `@file:` specifier through cmd.exe — `@` is a reserved character in
-// cmd's `/c` mode, and `pnpm add <path>` accepts a plain path. We use
-// `npm pack` because (a) npm is bundled with Node so no extra dep, and
-// (b) it accepts the same `<directory>` form via cwd that pnpm does.
-const cacheDir = join(profileDir, 'node_modules', '.cache', 'autord-install');
-mkdirSync(cacheDir, { recursive: true });
-const tarball = join(cacheDir, 'dsh-auto-rd.tgz');
-process.stdout.write(`[1/4] npm pack ${PKG_DIR} -> ${tarball}\n`);
-// `npm pack` writes `dsh-auto-rd-<version>.tgz` to the destination;
-// we use `--silent` so only errors surface.
-run('npm', ['pack', PKG_DIR, '--pack-destination', cacheDir, '--silent']);
-
-// `npm pack` writes the tarball to `<destination>` with the package's
-// scoped name as a prefix (`<scope>-<name>-<version>.tgz`).
-const produced = readdirSync(cacheDir).find((f) => /\.tgz$/.test(f) && /dsh-auto-rd-/.test(f)) || (existsSync(tarball) ? 'dsh-auto-rd.tgz' : null);
-if (!produced) throw new Error(`npm pack produced no tarball in ${cacheDir}`);
-if (produced !== 'dsh-auto-rd.tgz') {
-  renameSync(join(cacheDir, produced), tarball);
-}
-
-if (!args.dryRun) {
-  process.stdout.write(`[2/4] ${pm} add -C ${profileDir} ${tarball}\n`);
-  run(pm, ['add', '-C', profileDir, tarball]);
-} else {
-  process.stdout.write(`(dry-run) would run: ${pm} add -C ${profileDir} ${tarball}\n`);
-}
-
-  // Patch
-  const original = readPatch(patchFile);
-  const updated = upsertBlock(original);
-  if (updated === original) {
-    process.stdout.write(`[3/4] managed block already present in ${patchFile} — left unchanged\n`);
-  } else if (!args.dryRun) {
-    writeFileSync(patchFile, updated, 'utf8');
-    process.stdout.write(`[3/4] managed block upserted in ${patchFile}\n`);
+  // 0. Build the plugin so that `lib/` (and `lib/client.js`) are fresh.
+  // We do this in dry-run too — building is read-only w.r.t. the profile.
+  if (!args.dryRun) {
+    buildPlugin();
   } else {
-    process.stdout.write(`[3/4] (dry-run) would upsert managed block in ${patchFile}\n`);
-    process.stdout.write('--- block to be inserted ---\n');
-    process.stdout.write(buildManagedBlock());
-    process.stdout.write('--- end ---\n');
+    process.stdout.write(`(dry-run) would run: npm run build --prefix ${PKG_DIR}\n`);
+  }
+
+  // 1. Pack the local plugin into a tarball so we don't have to pass an
+  // `@file:` specifier through cmd.exe — `@` is a reserved character in
+  // cmd's `/c` mode, and `pnpm add <path>` accepts a plain path. We use
+  // `npm pack` because (a) npm is bundled with Node so no extra dep, and
+  // (b) it accepts the same `<directory>` form via cwd that pnpm does.
+  const cacheDir = join(profileDir, 'node_modules', '.cache', 'autord-install');
+  mkdirSync(cacheDir, { recursive: true });
+  const tarball = join(cacheDir, 'dsh-auto-rd.tgz');
+  process.stdout.write(`[1/5] npm pack ${PKG_DIR} -> ${tarball}\n`);
+  // `npm pack` writes `dsh-auto-rd-<version>.tgz` to the destination;
+  // we use `--silent` so only errors surface.
+  run('npm', ['pack', PKG_DIR, '--pack-destination', cacheDir, '--silent']);
+
+  // `npm pack` writes the tarball to `<destination>` with the package's
+  // scoped name as a prefix (`<scope>-<name>-<version>.tgz`).
+  const produced = readdirSync(cacheDir).find((f) => /\.tgz$/.test(f) && /dsh-auto-rd-/.test(f)) || (existsSync(tarball) ? 'dsh-auto-rd.tgz' : null);
+  if (!produced) throw new Error(`npm pack produced no tarball in ${cacheDir}`);
+  if (produced !== 'dsh-auto-rd.tgz') {
+    renameSync(join(cacheDir, produced), tarball);
+  }
+
+  if (!args.dryRun) {
+    process.stdout.write(`[2/5] ${pm} add -C ${profileDir} ${tarball}\n`);
+    run(pm, ['add', '-C', profileDir, tarball]);
+  } else {
+    process.stdout.write(`(dry-run) would run: ${pm} add -C ${profileDir} ${tarball}\n`);
+  }
+
+  // 3. Register the bundle so DSH's loader resolves the host plugin AND
+  // the web shell picks up the client bundle.
+  const pkgCtx = readProfilePkg(profileDir);
+  const { changed } = registerBundle(pkgCtx.parsed, BUNDLE_NAME);
+  if (changed) {
+    if (!args.dryRun) writeProfilePkg(pkgCtx);
+    process.stdout.write(`[3/5] registered ${BUNDLE_NAME} in dsh.profile.bundles\n`);
+  } else {
+    process.stdout.write(`[3/5] ${BUNDLE_NAME} already in dsh.profile.bundles — left unchanged\n`);
+  }
+
+  // 4. Write the managed entry into the profile's `cordis.patch.yml`.
+  // This is the actual loader entry; without it the bundle is in
+  // `node_modules` but never mounted by DSH's activation graph.
+  const patchFile = join(profileDir, 'cordis.patch.yml');
+  const original = readPatch(patchFile);
+  const entryYaml = renderPluginEntry();
+  const { text: newPatch, action } = upsertManagedBlock(original, entryYaml);
+  if (newPatch !== original) {
+    if (!args.dryRun) writeFileSync(patchFile, newPatch, 'utf8');
+    process.stdout.write(`[4/5] ${action} managed block in ${patchFile}\n`);
+  } else {
+    process.stdout.write(`[4/5] managed block already up to date in ${patchFile}\n`);
   }
 
   // Next steps
-  process.stdout.write(`[4/4] Next steps:\n`);
-  process.stdout.write(`       set DSH_TAPD_API_TOKEN   and  DSH_GITLAB_API_TOKEN in the shell that launches DSH\n`);
-  process.stdout.write(`       (this script never reads them; they are referenced by name in the patch)\n`);
+  process.stdout.write(`[5/5] Next steps:\n`);
+  process.stdout.write(`       edit ${patchFile} to set tapdApiToken, gitlabApiToken, modules:\n`);
+  process.stdout.write(`       (defaults are wired; tokens stay in the launching shell's env:\n`);
+  process.stdout.write(`        DSH_TAPD_API_TOKEN / DSH_GITLAB_API_TOKEN)\n`);
   process.stdout.write(`       restart DSH\n`);
 }
 
