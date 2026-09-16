@@ -29,6 +29,7 @@
     "test:host": "node scripts/test-host-contract.mjs",
     "test:mount": "node scripts/test-mount-smoke.mjs",
     "test:route": "node scripts/test-panel-route.mjs",
+    "test:client": "node scripts/test-client-half.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },

@@ -9,6 +9,9 @@
     ".": {
       "types": "./lib/index.d.ts",
       "import": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
     }
   },
   "files": [
@@ -18,12 +21,19 @@
     "LICENSE",
     "NOTICE"
   ],
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json && npm run copy:personas",
+    "build": "tsc -p tsconfig.json && npm run copy:personas && npm run copy:client",
     "copy:personas": "node -e \"const fs=require('fs');const path=require('path');const src=path.join('src','agents','personas');const dst=path.join('lib','agents','personas');fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src))if(f.endsWith('.md'))fs.copyFileSync(path.join(src,f),path.join(dst,f));\"",
+    "copy:client": "node -e \"const fs=require('fs');const path=require('path');const src=path.join('src','client','client.js');const dst=path.join('lib','client.js');if(!fs.existsSync(src))throw new Error('missing '+src);fs.mkdirSync(path.dirname(dst),{recursive:true});fs.copyFileSync(src,dst);console.log('copied client bundle -> lib/client.js');\"",
     "watch": "tsc -p tsconfig.json --watch",
     "lint": "tsc --noEmit -p tsconfig.json",
-    "test": "echo 'No tests yet'",
+    "test": "echo 'Tests live at the repository root: npm run test:all'",
     "clean": "rm -rf lib *.tsbuildinfo"
   },
   "keywords": [
