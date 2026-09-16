@@ -1113,48 +1113,71 @@ runTapdSyncingStage(story, deps):
   - 限制工具（如 Clarification Agent 不能改代码）
   - 统一管理 persona
 
-### 6.2 注册一个 SubAgent Provider
+### 6.2 Agent Provider（真实实现）
+
+代码：`packages/dsh-auto-rd/src/services/agent-provider.ts`，类名 `AgentProvider`。
+
+**重要**：与早期 draft 不同，**auto-rd 不注册自定义 DSH subagent provider**——它**直接调 DSH `subagents.start()`**，通过 label（agent name）做路由。DSH 的 `subagents` service 自己已经处理 persona / toolFilter / output format 的注入。
 
 ```typescript
-import type { SubagentProvider, ResolvedSubagentStartRequest, SubagentRun } from '@deepseek-ai/dsh-subagent'
+// 真实 SubagentsService 最小接口（窄类型，src/types/dsh-services.ts 同源）
+interface SubagentsService {
+  start(args: {
+    provider?: string
+    label: string
+    request: Record<string, unknown>
+  }): Promise<{ childId?: string }>
+}
 
-const PROVIDER_NAME = 'auto-rd'
+// AgentSpec —— 所有 13 agent 实现的接口（src/agents/base.ts）
+export interface AgentSpec {
+  readonly name: string
+  readonly persona: string
+  readonly toolFilter?: { allow?: string[]; deny?: string[] }
+  readonly outputFormat: 'free-form' | 'structured'
+}
 
-export function autoRdSubagentProvider(
-  ctx: Context,
-  config: { domain: Domain<any>, agentModel: string }
-) {
-  const provider: SubagentProvider = {
-    name: PROVIDER_NAME,
-    capabilities: {
-      agentOptions: true,
-      outputSchema: true,
-      depthLimit: true,
-      toolFilter: true,
-      persona: true,
-    },
-    inheritsParentContext: false,
-    agentRouteDefaults: {
-      provider: 'anthropic',
-      model: config.agentModel,
-    },
+// AgentDispatchResult —— dispatch 的 3 路结果（不是 throw）
+export type AgentDispatchResult =
+  | { status: 'success'; summary?: string }
+  | { status: 'blocked'; reason: string }
+  | { status: 'failed'; reason: string }
 
-    async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
-      // 根据 storyId + stage 选择 Agent 模板
-      const { storyId, stage } = extractContext(request)
-      const agent = await createAgentForStage(ctx, storyId, stage, request)
-      return runAgent(agent, request)
-    },
+// RegistryEntry —— AgentProvider 的内部记录
+interface RegistryEntry {
+  spec: AgentSpec
+  handler: AgentHandler
+}
 
-    async prepareContinuable(request): Promise<{ seed: any[] }> {
-      // 可选：返回 cold resume 时的种子消息
-      return { seed: [] }
-    },
+export class AgentProvider {
+  private readonly registry = new Map<string, RegistryEntry>()
+  // Brainstorm: 3 variations, each a separate AgentSpec
+  private brainstormSpecByVariation: Partial<Record<BrainstormVariation, AgentSpec>> | null = null
+  private brainstormHandler: AgentHandler | null = null
+  // Implementation: SD-2 fresh subagent per task
+  private implementationSpecByTaskId: Map<string, AgentSpec> = new Map()
+  private implementationDefaultSpec: AgentSpec | null = null
+  private implementationHandler: AgentHandler | null = null
+  // Review / FinalVerify: CR-1 two-axis parallel
+  private reviewSpecByAxis: Partial<Record<ReviewAxis, AgentSpec>> | null = null
+  private finalVerifySpecByAxis: Partial<Record<ReviewAxis, AgentSpec>> | null = null
+
+  constructor(private readonly ctx: Context, private readonly deps: AgentProviderDeps) {
+    this.subagents = (this.ctx as any).subagents as SubagentsService | null
+    this.registerAll()
   }
 
-  ctx.subagents.registerProvider(provider)
+  async dispatch(req: AgentDispatchRequest): Promise<AgentDispatchResult> {
+    const entry = this.lookup(req)
+    return entry.handler(req, this.deps)
+  }
 }
 ```
+
+**关键不变式**：
+- 所有 agent 走同一个 `dispatch()` 入口，差异在 registry lookup（按 name / taskId / variation / axis）
+- SubAgentsService **best-effort**——拿不到时 dispatch 走 stub handler（写 artifact + emit sentinel），不抛错（见 §7.5）
+- 每个 agent handler 返回 `AgentDispatchResult`，**不 throw**——runner 在 §5.3 中处理 transient 错误
 
 ### 6.3 Agent 基类
 
@@ -1188,25 +1211,39 @@ export abstract class BaseAgent {
 # Input Artifact
 ${agentCtx.inputArtifact ? formatArtifact(agentCtx.inputArtifact) : 'None'}
 
-# Your Task
+### 6.3 Agent 基类（真实 `AgentSpec`）
 
-[Agent-specific instructions]
-`
+实际所有 agent 都实现 `AgentSpec` interface（`src/agents/base.ts`）。**没有 class 继承**——每个 agent 是独立 const object：
 
-    const session = await ctx.agents.create({
-      model: config.agentModel,
-      persona: { id: this.name, content: fullPrompt },
-      toolFilter: this.toolFilter ? { allow: this.toolFilter } : undefined,
-    })
-
-    const result = await session.execute({
-      prompt: [{ type: 'text', text: 'Begin your task.' }],
-    })
-
-    return parseArtifact(result, this.name)
+```typescript
+// src/agents/base.ts
+export interface AgentSpec {
+  readonly name: string
+  readonly persona: string                  // persona markdown 文本
+  readonly toolFilter?: {
+    allow?: string[]
+    deny?: string[]
   }
+  readonly outputFormat: 'free-form' | 'structured'
+}
+
+// src/agents/context.ts (示例)
+export const ContextAgent: AgentSpec = {
+  name: 'context',
+  persona: readFileSync(join(personasDir, 'context.md'), 'utf8'),
+  toolFilter: {
+    allow: ['fs_read', 'fs_search', 'fs_glob', 'bash', 'git_status', 'git_log', 'web_fetch'],
+  },
+  outputFormat: 'free-form',
 }
 ```
+
+**为什么不用 class 继承**：
+- 13 个 agent 行为差异极大（不同的 sentinel / artifact / dispatch 模式），class 继承只能共享 boilerplate，对实际逻辑没帮助
+- const object 直接 dispatch 给 `AgentProvider.registry` Map，零间接层
+- persona 是**运行时文本资产**，不是代码——`.md` 文件独立维护
+
+**persona 加载**：`persona-loader.ts` 提供三路查找（`lib/agents/personas/` + `src/agents/personas/` + cwd/personas/），miss 时返回空串（非 fatal）。13 个 agent 启动时一次性 cache。
 
 ### 6.4 13 个 Agent 列表（真实 tool filter 同步）
 
