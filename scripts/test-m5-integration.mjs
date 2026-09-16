@@ -1032,12 +1032,18 @@ function makeConsoleSpy() {
       artifactsDir,
       inputs: { story: { id: 'V-REJECT', title: 't', description: 'd' } },
     })
-    check('verify REJECT (no diff) -> status blocked', r.status === 'blocked', JSON.stringify(r))
+    check(
+      'verify REJECT (no diff) -> status failed (design routes REJECT to fixing)',
+      r.status === 'failed',
+      JSON.stringify(r),
+    )
     check(
       'verify REJECT (no diff) reason mentions no changes',
       /no changes/i.test(r.reason ?? ''),
       String(r.reason),
     )
+    const rejectReport1 = readFileSync(join(artifactsDir, '11-verify-report.md'), 'utf-8')
+    check('verify REJECT (no diff) report contains [VERIFY_REJECT]', rejectReport1.includes('[VERIFY_REJECT]'))
   }
 
   // --- REJECT: suite not runnable (no test manifest) ---
@@ -1063,8 +1069,8 @@ function makeConsoleSpy() {
       inputs: { story: { id: 'V-NOMANIFEST', title: 't', description: 'd' } },
     })
     check(
-      'verify REJECT (no manifest) -> status blocked',
-      r.status === 'blocked',
+      'verify REJECT (no manifest) -> status failed (design routes REJECT to fixing)',
+      r.status === 'failed',
       JSON.stringify(r),
     )
     const report = readFileSync(join(artifactsDir, '11-verify-report.md'), 'utf-8')
@@ -1121,6 +1127,93 @@ function makeConsoleSpy() {
   check(
     'event[1] payload.result.status = success',
     events[1]?.payload?.result?.status === 'success',
+  )
+}
+
+// 29. ClarificationAgent — the HARD-GATE (B-4) really closes.
+//     A bounded story advances; an ambiguous one parks for a human.
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { AgentProvider } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'agent-provider.js')).href
+  )
+  const provider = new AgentProvider({}, { logger, config: defaultConfig() })
+  const artifactsDir = mkTmpDir()
+
+  // --- bounded ---
+  const good = await provider.dispatch({
+    agentName: 'clarification',
+    label: 'Clarification',
+    worktreePath: artifactsDir,
+    artifactsDir,
+    inputs: {
+      story: {
+        id: 'CLR-OK',
+        title: 'Add refund endpoint',
+        description:
+          'Expose a POST endpoint that records a refund against an existing payment.',
+        acceptanceCriteria:
+          '1. POST /refunds with a valid payment id returns 201 and persists the refund\n' +
+          '2. POST /refunds with an unknown payment id returns 404',
+      },
+    },
+  })
+  check('clarify bounded -> status success', good.status === 'success', JSON.stringify(good))
+  const okReport = readFileSync(join(artifactsDir, '02-clarification.md'), 'utf-8')
+  check('clarify bounded report says CLASSIFICATION: bounded', okReport.includes('CLASSIFICATION: bounded'))
+  check('clarify bounded report has [CLARIFICATION_COMPLETE]', okReport.includes('[CLARIFICATION_COMPLETE]'))
+  check('clarify bounded report has no stub marker', !/\bstub\b/i.test(okReport))
+
+  // --- unbounded (vague criterion) ---
+  const bad = await provider.dispatch({
+    agentName: 'clarification',
+    label: 'Clarification',
+    worktreePath: artifactsDir,
+    artifactsDir,
+    inputs: {
+      story: {
+        id: 'CLR-BAD',
+        title: 'Improve things',
+        description: 'Make the system better in various ways as needed.',
+        acceptanceCriteria: '1. Handle the usual cases etc',
+      },
+    },
+  })
+  check('clarify unbounded -> status blocked', bad.status === 'blocked', JSON.stringify(bad))
+  check(
+    'clarify unbounded reason counts the questions',
+    /blocking question/.test(bad.reason ?? ''),
+    String(bad.reason),
+  )
+  const badReport = readFileSync(join(artifactsDir, '02-clarification.md'), 'utf-8')
+  check('clarify unbounded report says CLASSIFICATION: unbounded', badReport.includes('CLASSIFICATION: unbounded'))
+  check('clarify unbounded report has [CLARIFICATION_BLOCKED]', badReport.includes('[CLARIFICATION_BLOCKED]'))
+  check(
+    'clarify unbounded report lists the vague terms',
+    badReport.includes('Vague Terms Detected'),
+    badReport.slice(0, 400),
+  )
+
+  // --- unbounded (no acceptance criteria at all) ---
+  const noAc = await provider.dispatch({
+    agentName: 'clarification',
+    label: 'Clarification',
+    worktreePath: artifactsDir,
+    artifactsDir,
+    inputs: {
+      story: {
+        id: 'CLR-NOAC',
+        title: 'Something',
+        description: 'A description that is long enough to clear the length gate.',
+      },
+    },
+  })
+  check('clarify missing AC -> status blocked', noAc.status === 'blocked', JSON.stringify(noAc))
+  check(
+    'clarify missing AC reason asks for acceptance criteria',
+    /acceptance criteria/i.test(noAc.reason ?? ''),
+    String(noAc.reason),
   )
 }
 

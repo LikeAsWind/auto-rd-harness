@@ -48,6 +48,7 @@ import {
 } from './worktree-git.js'
 import { probeProject } from './project-probe.js'
 import { buildPlan } from './plan-builder.js'
+import { clarifyStory } from './clarify.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -482,30 +483,82 @@ async function runClarificationStub(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string; description: string }
-  deps.logger.info(`ClarificationAgent stub running for story ${story.id}`)
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`ClarificationAgent running for story ${story.id}`)
+
+  // ---- Real ambiguity detection ----
+  //
+  // This is the HARD-GATE (B-4). A blocking finding must park the
+  // story for a human answer rather than letting the ambiguity flow
+  // into implementation.
+  const result = clarifyStory({
+    title: story.title,
+    description: story.description,
+    acceptanceCriteria: story.acceptanceCriteria,
+  })
+
+  const bounded = result.classification === 'bounded'
+  const sentinel = bounded ? '[CLARIFICATION_COMPLETE]' : '[CLARIFICATION_BLOCKED]'
+
+  const questionLines =
+    result.blocking.length > 0
+      ? result.blocking.map(
+          (f, i) =>
+            `${i + 1}. **${f.question}**\n   - Why: ${f.detail}` +
+            (f.criterion ? `\n   - Criterion: "${f.criterion}"` : ''),
+        )
+      : ['_None._']
 
   const report = [
     `# Clarification — ${story.title}`,
     ``,
-    `CLASSIFICATION: bounded`,
+    `CLASSIFICATION: ${result.classification}`,
     ``,
-    `## Resolved (no question needed)`,
-    `- Inputs: story description specifies them`,
-    `- Outputs: behavior is well-defined`,
+    `## Acceptance Criteria Parsed`,
+    result.criteria.length > 0
+      ? result.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')
+      : '_none provided_',
     ``,
     `## Open Questions`,
-    `_None — story is unambiguous in the stub._`,
+    questionLines.join('\n'),
+    ``,
+    `## Advisory`,
+    result.advisory.length > 0
+      ? result.advisory.map((f) => `- ${f.question} (${f.detail})`).join('\n')
+      : '_none._',
+    ``,
+    result.vagueTerms.length > 0
+      ? `## Vague Terms Detected\n${result.vagueTerms.map((t) => `- \`${t}\``).join('\n')}`
+      : null,
     ``,
     `## Handoff`,
-    `Stub. Zero open questions; orchestrator may proceed to \`brainstorm\`.`,
+    bounded
+      ? `Zero blocking questions; orchestrator may proceed to \`brainstorm\`.`
+      : `${result.blocking.length} blocking question(s) must be answered by a human before the pipeline can continue. The orchestrator will park this story in \`blocked\`.`,
     ``,
-    `[CLARIFICATION_COMPLETE]`,
-  ].join('\n')
+    sentinel,
+  ]
+    .filter((l) => l !== null)
+    .join('\n')
 
   writeFileSync(join(req.artifactsDir, '02-clarification.md'), report, 'utf-8')
 
-  return { status: 'success', summary: 'Stub Clarification report (zero open questions).' }
+  if (!bounded) {
+    const first = result.blocking[0]
+    return {
+      status: 'blocked',
+      reason: `${result.blocking.length} blocking question(s): ${first.question}`,
+    }
+  }
+  return {
+    status: 'success',
+    summary: `Clarification bounded (${result.criteria.length} criteria, 0 blocking questions).`,
+  }
 }
 
 async function runBrainstormStub(
@@ -1161,15 +1214,18 @@ async function runVerificationStub(
       summary: `Verification PASS (${diff.commitCount} commit(s), suite green in ${testRun.durationMs}ms).`,
     }
   }
+  // Per the sentinel contract (design §6.7): BOTH [VERIFY_PARTIAL] and
+  // [VERIFY_REJECT] route to `fixing`. The 5-round breaker (SD-4) is
+  // what prevents a REJECT from looping forever — verification does not
+  // park the story itself.
   if (verdict === 'PARTIAL') {
-    // Recoverable: the runner maps `failed` here to the `fixing` stage.
     return {
       status: 'failed',
       reason: `verification PARTIAL: ${failed.map((c) => c.name).join(', ')}`,
     }
   }
   return {
-    status: 'blocked',
+    status: 'failed',
     reason: `verification REJECT: ${noChanges ? 'no changes on the branch' : cannotRun ? 'suite not runnable' : 'diff unreadable'}`,
   }
 }

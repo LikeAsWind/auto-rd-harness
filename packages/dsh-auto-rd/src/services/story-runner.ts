@@ -715,13 +715,16 @@ async function runFixingStage(
 /**
  * verifying — dispatch VerificationAgent on the integration tree.
  *
- * Verdict mapping (design §5):
- *   - success (VERIFY_PASS)    -> `reviewing`
- *   - failed  (VERIFY_PARTIAL) -> `fixing`   (the suite is red; another
- *                                              fix round is the remedy)
- *   - blocked (VERIFY_REJECT)  -> `blocked`  (nothing to verify, or the
- *                                              tree cannot be tested —
- *                                              retrying will not help)
+ * Verdict mapping, per the sentinel contract in design §6.7:
+ *   - success (VERIFY_PASS)               -> `reviewing`
+ *   - failed  (VERIFY_PARTIAL / REJECT)   -> `fixing`
+ *   - blocked                             -> `blocked` (defensive; the
+ *                                            current handler never
+ *                                            returns it, but a future
+ *                                            one may)
+ *
+ * Both non-PASS verdicts return to `fixing` by design. The SD-4 5-round
+ * breaker is what stops a REJECT from cycling indefinitely.
  */
 async function runVerifyingStage(
   story: StoryRecord,
@@ -737,16 +740,14 @@ async function runVerifyingStage(
   })
 
   if (result.status === 'blocked') {
-    // REJECT — unrecoverable by retry (no diff, or no runnable suite).
-    story.blockedReason = `Verifying REJECT: ${result.reason}`
-    deps.logger.warn(`VerificationAgent rejected story ${story.id}: ${result.reason}`)
+    story.blockedReason = `Verifying: ${result.reason}`
+    deps.logger.warn(`VerificationAgent blocked story ${story.id}: ${result.reason}`)
     return 'blocked'
   }
   if (result.status === 'failed') {
-    // PARTIAL — the branch is verifiable but currently red. Send it
-    // back for another fix round rather than parking the story.
+    // PARTIAL or REJECT — the branch is verifiable but not passing.
     recordArtifact(story, 'verification', '11-verify-report.md', result.reason)
-    deps.logger.warn(`VerificationAgent PARTIAL for story ${story.id}: ${result.reason} → fixing`)
+    deps.logger.warn(`VerificationAgent ${result.reason} for story ${story.id} → fixing`)
     return 'fixing'
   }
 
