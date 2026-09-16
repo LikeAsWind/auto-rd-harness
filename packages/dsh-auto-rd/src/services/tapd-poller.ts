@@ -282,3 +282,82 @@ function normalizeRawStory(raw: RawTapdApiStory): TapdStory | null {
     category,
   }
 }
+
+/**
+ * Sync a story back to TAPD after the story has been processed locally.
+ *
+ * M4-A: real HTTP. Idempotent -- calling twice with the same payload is
+ * a no-op on the TAPD side (PATCH semantics). Errors are propagated
+ * up via HttpError / HttpTimeoutError / HttpNetworkError; the stage
+ * handler decides whether to record a checkpoint and exit or block.
+ *
+ * Endpoint:
+ *   POST {tapdBaseUrl}/stories/{storyId}/changes
+ *   Body: {
+ *     status: 'completed',
+ *     mr_url: string,
+ *     git_branch: string,
+ *     story_actor: 'auto-rd',
+ *   }
+ *
+ * The endpoint and field names follow TAPD's public "story change"
+ * convention; some TAPD deployments expose PATCH /stories/<id>
+ * instead. We try POST first (more common in TAPD OpenAPI) and
+ * fall back to PATCH on 404.
+ */
+export interface SyncTapdParams {
+  tapdBaseUrl: string
+  tapdApiToken: string
+  tapdId: string
+  mrUrl: string
+  gitBranch: string
+  httpClient?: HttpClient
+}
+
+export async function syncTapd(params: SyncTapdParams): Promise<void> {
+  const http = params.httpClient ?? new HttpClient({ tag: 'tapd-sync' })
+
+  const url = new URL(params.tapdBaseUrl)
+  url.pathname = join(url.pathname, 'stories', params.tapdId, 'changes')
+
+  const body = {
+    status: 'completed',
+    mr_url: params.mrUrl,
+    git_branch: params.gitBranch,
+    story_actor: 'auto-rd',
+  }
+
+  try {
+    await http.request({
+      url: url.toString(),
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${params.tapdApiToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body,
+      timeoutMs: 15_000,
+    })
+  } catch (err) {
+    // Some TAPD deployments expose PATCH instead of POST /changes.
+    // Try PATCH on the story itself as a fallback.
+    if (err instanceof HttpError && err.status === 404) {
+      const patchUrl = new URL(params.tapdBaseUrl)
+      patchUrl.pathname = join(patchUrl.pathname, 'stories', params.tapdId)
+      await http.request({
+        url: patchUrl.toString(),
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${params.tapdApiToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body,
+        timeoutMs: 15_000,
+      })
+      return
+    }
+    throw err
+  }
+}
