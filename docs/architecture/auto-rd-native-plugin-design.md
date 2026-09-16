@@ -2447,38 +2447,89 @@ Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
 - `58a5945` U8: `index.ts` 接线全部 UI
 
 要点（M4-UI 核心设计）：
-- **Best-effort 容错**：所有 DSH service 通过 `ctx.get('slots') as SlotsService | undefined` 获取——拿不到就 `warn + skip`，plugin 在 DSH 进程外也能跑
-- **本地类型声明**（`src/types/dsh-services.ts`）：cordis 包不暴露 slots / tools / systemPrompt——这些是 DSH 注入的；用本地 narrow 接口声明依赖，runtime 不引用私有 DSH 包
-- **Sidebar renderer 返回 JSON tree**：`{type:'div'|'span'|..., children:[...]}`——host 进程不依赖 React runtime，由 DSH client side 转译
+- **Best-effort 容错**：所有 DSH service 通过 `ctx.get('xxx') as Service | undefined` 获取——拿不到就 `warn + skip`，plugin 在 DSH 进程外也能跑
+- **本地类型声明**（`src/types/dsh-services.ts`）：cordis 包不暴露这些 service——它们由 DSH 注入；用本地窄接口声明依赖，runtime 不引用私有 DSH 包
 - **Notifier 用轮询而非 Cordis event**：Cordis 没 `storage-changed` event；notifier 每 5s 扫 storage，已通知过的进 Set 避免重复
 - **3 tool zod 校验**：discriminatedUnion / strict object——错参数返回 `{ok:false, error:'invalid_parameters'}` 而非 throw（DSH 处理 throw 差）
-- **inject 列表扩展**：`slots` / `systemPrompt` / `sessions` 加入 inject，Cordis 在 DSH 提供全部 service 后才激活
+
+> ⚠️ **本节两条原始结论已被证伪，见 §15.7**：
+> 1. U7 声称 host 通过 `ctx.get('slots')` 向 `sidebar.worktable.project` 注册
+>    返回「JSON tree」的 renderer —— **host 侧没有 `slots` service**，且该注册
+>    签名不存在。面板必须由 client 侧贡献。
+> 2. 「inject 列表扩展」曾把 `slots` 加进 `inject` —— 这会**让插件永远无法
+>    mount**（`inject` 是硬依赖，Cordis 会等一个 host 永不提供的 service）。
 
 ### 15.6 后续里程碑状态
 
 | 里程碑 | 文档定义 | 落地状态 |
 |---|---|---|
-| M5 限流 | §11 | 全部落地：`StoryQueue.tick()` 全局 + per-module 限流 + 3 个 StoryQueue 集成测试（`npm run test:m5`） |
-| M5 错误恢复 | §10.2 + §10.5 | 全部落地：`recoverStories` mount 前调用 + 7 个 checkpoint 字段 + §10 双层保护文档 + Logger rate limit 防 log 洪水 |
-| M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section（**`test:m5` 覆盖 19 个 tool / recover 用例**） |
-| M5 集成测试 | §13.3 + 附录 A.3 | 部分落地：**`test:m5` 51 pass**（recover / 3 tool / queue 限流 / status / Logger rate limit / state transitions），**e2e 仍待真凭据 + 真 DSH 进程** |
+| M5 限流 | §11 | 全部落地：`StoryQueue.tick()` 全局 + per-module 限流（`test:m5` 覆盖） |
+| M5 错误恢复 | §10.2 + §10.5 | 全部落地：`recoverStories` mount 前调用 + 7 个 checkpoint 字段 + Logger rate limit 防 log 洪水 |
+| M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section |
+| M5 集成测试 | §13.3 + 附录 A.3 | 落地：`test:m5` 103 pass；**e2e 仍待真凭据 + 真 DSH 进程** |
 
-**测试矩阵总览**：
+### 15.7 当前状态核对（2026-09）
 
-| 测试集 | 覆盖范围 | 用例数 |
+本节取代 §15.6 的测试矩阵与状态表——那次核对之后，19 个 stage handler
+全部从占位模板换成了真实实现，并且**用真实运行时核验了 host 契约**。
+
+**测试矩阵（19 个套件 / 893 断言，全部 0 fail）**
+
+| 测试集 | 覆盖范围 | 断言数 |
 |---|---|---|
-| `npm run test:m4` | HttpClient / syncTapd / gitlab-merger（fake-server in-process） | 22 pass + 10 parser pass |
-| `npm run test:m5` | recover / 3 tool / StoryQueue / status / Logger rate limit | 51 pass |
+| `test:m4` | HttpClient / syncTapd / gitlab-merger（fake-server in-process） | 22 |
+| （同上） | Planner markdown parser | 10 |
+| `test:m5` | recover / 3 tool / StoryQueue / status / Logger 限流 / trajectory / clarification gate / impl+fix 真提交 / verification 三路判定 | 103 |
+| `test:patterns` | AGENT-SKILL-MAPPING ↔ 13 persona 双向审计 | 124 |
+| `test:executor` | 真 subprocess 测测试（npm/cargo/go/pytest + 超时 + Windows .cmd） | 23 |
+| `test:diff` | git diff base 解析 + shortstat + 超时 | 20 |
+| `test:wtgit` | 真 git 提交 / 暂存 / 无变更 / 坏路径容错 | 37 |
+| `test:probe` | worktree 探测（包管理器 / 命令 / 语言分布 / 忽略目录） | 49 |
+| `test:plan` | AC 拆分 + 路径锚定 + **build→parse 往返** | 64 |
+| `test:clarify` | 歧义检测 + 模糊词词边界 + advisory | 49 |
+| `test:spec` | 义务分类 + 空类目如实陈述 | 35 |
+| `test:design` | 三方案生成 + 覆盖矩阵 + 打分与 tiebreak | 50 |
+| `test:storage` | **按真实 KvTable 契约（无 `values()`）+ async open** | 30 |
+| `test:ui` | 面板投影 / 徽标 / 文本渲染 | 34 |
+| `test:tools` | 3 tool 的必填 `output` 契约 + render + execute | 53 |
+| `test:host` | prompt section 字段名 + `inject` 列表 | 37 |
+| `test:mount` | 真实 `apply()` 全流程挂载（忠实 fake host） | 38 |
+| `test:route` | `GET /auto-rd/panel`（含无凭据泄漏断言） | 52 |
+| `test:client` | client bundle：envelope / apply / slot 注册 / 数据通路 | 60 |
+| `test:reasons` | `blockedReason` 的 `<stage>: ` 约定 | 13 |
 
-**M5 e2e 是唯一外部缺口**——需要：
-1. TAPD 公司内网 / 公网凭据
-2. GitLab 自部署 / SaaS 凭据 + 测试 project
-3. 真 DSH runtime（`~/.dsh/profiles/web/cordis.patch.yml` 配置）+ 真 plugin mount
-4. 跑通 story 端到端 → 验证 sidebar 渲染 / tool 调用 / notifier 推送
+**本轮修掉的、原本会让插件无法挂载的缺陷**
 
-**凭据安全约束**：M5 e2e 真凭据**绝不**再贴文本。走：
-- `process.env` + 子进程注入
-- DSH secret reference（`@secret:tapd_api_token` 形式）
+用 Cordis Inspect 对真实运行时核验 host 契约后发现，`types/dsh-services.ts`
+里**假设**的形状有四处是错的，其中三处会让插件根本挂不上：
+
+| 契约 | 假设 | 真实 |
+|---|---|---|
+| `storageDomain.open()` | 同步返回 `Domain` | **async**，且同名重复 open 会 reject |
+| `KvTable` | 有 `values()` | **没有**（只有 `entries/keys/size`） |
+| host `slots` service | 存在 | **不存在**（client-only），放进 `inject` 会永久阻塞 mount |
+| `PromptSection` | `{ id, order, content }` | `{ name, order, text }` |
+| `ToolDefinition` | `{name,description,parameters,execute}` | **多一个必填 `output`** |
+| `subagents.sendMessage` | 第 1 参是 provider 名 | 第 1 参是 **Agent** |
+| `sessions.list()` | 接受 `{role}` 过滤 | **不接受参数** |
+
+另外三个相对 import 缺 `.js` 后缀，其中 `story-runner.ts` → `./gitlab-merger`
+让 StoryRunner 模块**加载即失败**。根因已修：tsconfig 从
+`moduleResolution: "bundler"` 改为 `NodeNext`，把这类问题变成编译错误而不是
+运行时崩溃。
+
+**唯一仍待真实环境验收的部分**
+
+1. 真实 Cordis scope 内 mount（已用忠实 fake host 跑到 `apply()` 全流程）
+2. subagent 真实派发到模型
+3. TAPD / GitLab 真实网络（生产级代码 + fake server 已验证）
+4. client bundle 在浏览器里真的渲染出来
+
+**e2e 前置条件**：TAPD 凭据、GitLab 凭据 + 测试 project、真 DSH runtime
+挂载本插件、跑通一条 story。
+
+**凭据安全约束**：真凭据**绝不**再贴文本。走 `process.env` + 子进程注入，
+或 DSH secret reference。
 - `.gitignore` 排除 `~/.dsh/secrets/` 目录
 - 已泄露的 chat 内 token（`81b6d71f...` / `LCxXUtsJ...`）需用户**主动 revoke**
 
