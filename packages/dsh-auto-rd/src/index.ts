@@ -36,6 +36,7 @@ import { recoverStories } from './services/recover.js'
 import { StoryNotifierService } from './services/story-notifier.js'
 import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
+import { registerPanelRoute } from './services/panel-route.js'
 import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
 import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
@@ -220,9 +221,10 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     logger.info(`[auto-rd] registered tools: ${registered.join(' / ') || '(none)'}`)
 
     // Report the UI situation (see ui-panel.ts: the sidebar panel is a
-    // client-side contribution, so the host exposes the same data
-    // through auto_rd_status instead).
+    // client-side contribution) and, when a web server exists, serve the
+    // panel data so that client half has something to read.
     registerAutoRdPanel(ctx, { storage, logger })
+    registerPanelRoute(ctx, { storage, logger })
 
     return () => {
       // Cordis tears down tool / prompt registrations when the parent

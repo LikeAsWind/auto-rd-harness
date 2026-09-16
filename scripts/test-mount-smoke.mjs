@@ -193,6 +193,18 @@ function fakeCtx(services) {
   return ctx
 }
 
+/** A webServer double that records route registrations. */
+function fakeWebServer() {
+  const routes = []
+  return {
+    routes,
+    register(route) {
+      routes.push(route)
+      return () => {}
+    },
+  }
+}
+
 function config(over = {}) {
   return {
     tapdBaseUrl: 'https://api.tapd.cn',
@@ -241,17 +253,24 @@ function teardown(ctx) {
   }
 }
 
-// 1. Full mount with every service present.
+  // 1. Full mount with every service present.
 {
   const sd = storageDomainFacility()
   const tools = strictToolsRegistry()
   const prompt = strictSystemPrompt()
+  const web = fakeWebServer()
   // Assign so the async body can be inspected after mount.
   let ctx
   let threw = null
   try {
     ctx = await mount(
-      { storageDomain: sd, tools, systemPrompt: prompt, sessions: { list: () => [] } },
+      {
+        storageDomain: sd,
+        tools,
+        systemPrompt: prompt,
+        sessions: { list: () => [] },
+        webServer: web,
+      },
       config(),
     )
   } catch (err) {
@@ -286,6 +305,12 @@ function teardown(ctx) {
   // Prompt section.
   check('mount: registered exactly 1 prompt section', prompt.sections.length === 1, String(prompt.sections.length))
   check('mount: prompt section name is auto-rd-overview', prompt.sections[0]?.name === 'auto-rd-overview', String(prompt.sections[0]?.name))
+
+  // The panel HTTP route (the transport for the client UI half).
+  check('mount: registered the panel route', web.routes.length === 1, String(web.routes.length))
+  check('mount: panel route path', web.routes[0]?.path === '/auto-rd/panel', String(web.routes[0]?.path))
+  check('mount: panel route is exact', web.routes[0]?.kind === 'exact')
+  check('mount: panel route has a handler', typeof web.routes[0]?.handler === 'function')
 
   // Effects.
   check('mount: registered the storage effect', ctx.disposers.some((d) => d.label === 'auto-rd:storage'))
