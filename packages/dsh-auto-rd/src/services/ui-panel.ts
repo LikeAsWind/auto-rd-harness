@@ -36,6 +36,7 @@
  *     something that would never appear.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import type { ModuleRecord, StoryRecord } from '../domain/schema.js'
@@ -43,6 +44,12 @@ import type { ModuleRecord, StoryRecord } from '../domain/schema.js'
 export interface AutoRdPanelDeps {
   storage: AutoRdStorage
   logger: Logger
+  /**
+   * Current parsed + normalized config. Optional — when provided, the
+   * panel surfaces a "setup checklist" derived from it. When omitted
+   * (legacy callers, unit tests) the panel skips the checklist.
+   */
+  config?: Config
 }
 
 /** How many stories to show per module before summarising the rest. */
@@ -68,6 +75,41 @@ export interface PanelModule {
   inFlight: number
 }
 
+/**
+ * One setup-checklist row. Each row tells the user (or a CI runner
+ * inspecting the panel JSON) what is missing or wrong in the plugin
+ * config. The client renders these as a friendly checklist; the host
+ * uses them to flag unhealthy deployments.
+ */
+export interface PanelSetupIssue {
+  /** Stable identifier so the client can de-duplicate or key off it. */
+  key:
+    | 'tapd_token'
+    | 'gitlab_token'
+    | 'workspace_root'
+    | 'modules'
+    | 'tapd_workspaces'
+  /** Human-readable short message ("Set DSH_TAPD_API_TOKEN to fetch real stories"). */
+  message: string
+  /** Suggested fix — usually a `cordis.patch.yml` edit or an env var. */
+  remedy: string
+}
+
+export interface PanelHealth {
+  /**
+   * True when the panel JSON returned at least one setup issue. The
+   * client uses this to decide whether to render the checklist section.
+   */
+  setupRequired: boolean
+  issues: PanelSetupIssue[]
+  /** Plugin uptime in seconds since mount. */
+  mountedForSec: number
+  /** ISO timestamp at which the plugin last polled TAPD, or null. */
+  lastTapdPollAt: string | null
+  /** Last TapdPoller error message, if any. */
+  lastTapdError: string | null
+}
+
 export interface PanelModel {
   modules: PanelModule[]
   totals: {
@@ -78,9 +120,88 @@ export interface PanelModel {
     completed: number
     failed: number
   }
+  health: PanelHealth
 }
 
 const TERMINAL_STATES = new Set(['completed', 'failed'])
+
+/**
+ * Compute the "what is missing" checklist from the current config.
+ *
+ * Every entry corresponds to a single concrete user action:
+ *   - set DSH_TAPD_API_TOKEN (or paste a token into cordis.yml)
+ *   - set DSH_GITLAB_API_TOKEN
+ *   - set `workspaceRoot`
+ *   - add at least one module under `modules:`
+ *   - add at least one workspace id when not in mock mode
+ *
+ * Empty array = plugin is fully configured and polling for real.
+ */
+export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] {
+  if (!config) return []
+  const issues: PanelSetupIssue[] = []
+
+  if (!config.tapdApiToken || config.tapdApiToken.trim() === '') {
+    issues.push({
+      key: 'tapd_token',
+      message: 'TAPD token is empty — the poller is running against a local mock fixture.',
+      remedy:
+        'Set the DSH_TAPD_API_TOKEN env var in the shell that launches DSH, ' +
+        'or paste a real token into cordis.patch.yml under config.tapdApiToken.',
+    })
+  }
+
+  if (!config.gitlabApiToken || config.gitlabApiToken.trim() === '') {
+    issues.push({
+      key: 'gitlab_token',
+      message: 'GitLab token is empty — MR creation will fail per story.',
+      remedy:
+        'Set the DSH_GITLAB_API_TOKEN env var, or paste a real token with `api` scope into ' +
+        'cordis.patch.yml under config.gitlabApiToken.',
+    })
+  }
+
+  if (!config.workspaceRoot || config.workspaceRoot.trim() === '') {
+    issues.push({
+      key: 'workspace_root',
+      message: 'workspaceRoot is empty — module repos cannot be cloned.',
+      remedy:
+        'Set an absolute path under config.workspaceRoot in cordis.patch.yml, ' +
+        'e.g. `workspaceRoot: "C:/work"`.',
+    })
+  }
+
+  if (config.modules.length === 0) {
+    issues.push({
+      key: 'modules',
+      message: 'modules is empty — TAPD stories cannot be routed to a repo.',
+      remedy:
+        'Add at least one module under config.modules in cordis.patch.yml. ' +
+        'Example:\n' +
+        '  modules:\n' +
+        '    - id: payment\n' +
+        '      title: Payment Service\n' +
+        '      repoUrl: https://gitlab.example.com/payment/payment-service.git\n' +
+        '      defaultBranch: main',
+    })
+  }
+
+  if (
+    !config.useTapdMock &&
+    config.tapdApiToken.length > 0 &&
+    config.tapdWorkspaceIds.length === 0
+  ) {
+    issues.push({
+      key: 'tapd_workspaces',
+      message: 'TAPD token is set but tapdWorkspaceIds is empty — the poller has nothing to route to.',
+      remedy:
+        'Add at least one TAPD workspace id under config.tapdWorkspaceIds in cordis.patch.yml, ' +
+        'or temporarily set `useTapdMock: true` to develop offline.',
+    })
+  }
+
+  return issues
+}
 
 /**
  * Build the sidebar model from a storage snapshot.
@@ -88,7 +209,11 @@ const TERMINAL_STATES = new Set(['completed', 'failed'])
  * Pure over its inputs so it can be unit-tested without a runtime, and
  * so the same projection can serve a client-side renderer.
  */
-export function buildPanelModel(storage: AutoRdStorage): PanelModel {
+export function buildPanelModel(
+  storage: AutoRdStorage,
+  config?: Config,
+  runtime?: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null },
+): PanelModel {
   const modules: ModuleRecord[] = [...storage.modules().values()]
   const stories: StoryRecord[] = [...storage.stories().values()]
 
@@ -132,6 +257,10 @@ export function buildPanelModel(storage: AutoRdStorage): PanelModel {
     }
   })
 
+  const issues = buildSetupIssues(config)
+  const mountedAt = runtime?.mountedAt ?? new Date()
+  const mountedForSec = Math.max(0, Math.floor((Date.now() - mountedAt.getTime()) / 1000))
+
   return {
     modules: panelModules,
     totals: {
@@ -141,6 +270,13 @@ export function buildPanelModel(storage: AutoRdStorage): PanelModel {
       blocked: blockedTotal,
       completed: completedTotal,
       failed: failedTotal,
+    },
+    health: {
+      setupRequired: issues.length > 0,
+      issues,
+      mountedForSec,
+      lastTapdPollAt: runtime?.lastTapdPollAt?.toISOString() ?? null,
+      lastTapdError: runtime?.lastTapdError ?? null,
     },
   }
 }
@@ -174,18 +310,42 @@ export function stateBadge(state: string): string {
  * Plain-text rendering of the panel model. This is the host-side
  * substitute for the graphical sidebar: the same information, reachable
  * from the conversation.
+ *
+ * When the model carries a setup-required health block, the rendering
+ * surfaces it first so the user (or the model) immediately sees what
+ * is missing without having to read the JSON health field.
  */
 export function renderPanelText(model: PanelModel): string {
   const lines: string[] = []
   const t = model.totals
+
+  // Uptime + last poll (cheap and useful for debugging).
+  const h = model.health
+  const uptimeMin = Math.floor(h.mountedForSec / 60)
+  const uptimeSec = h.mountedForSec % 60
+  const uptime = uptimeMin > 0 ? `${uptimeMin}m ${uptimeSec}s` : `${uptimeSec}s`
+  const lastPoll = h.lastTapdPollAt ? h.lastTapdPollAt : '(never)'
+  const lastErr = h.lastTapdError ? `, last error: ${h.lastTapdError}` : ''
+  lines.push(`Auto-RD: mounted for ${uptime}, last TAPD poll: ${lastPoll}${lastErr}`)
+
+  if (h.setupRequired && h.issues.length > 0) {
+    lines.push('')
+    lines.push(`Setup required (${h.issues.length} issue${h.issues.length === 1 ? '' : 's'}):`)
+    for (const issue of h.issues) {
+      lines.push(`  - [${issue.key}] ${issue.message}`)
+    }
+  }
+
   lines.push(
-    `Auto-RD: ${t.modules} module(s), ${t.stories} story(ies) — ` +
+    `Modules: ${t.modules}, stories: ${t.stories} — ` +
       `${t.inFlight} in flight, ${t.blocked} blocked, ${t.completed} completed, ${t.failed} failed`,
   )
 
   if (model.modules.length === 0) {
-    lines.push('')
-    lines.push('No modules configured.')
+    if (!h.setupRequired) {
+      lines.push('')
+      lines.push('No modules configured.')
+    }
     return lines.join('\n')
   }
 
