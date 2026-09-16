@@ -1213,10 +1213,56 @@ ${agentCtx.inputArtifact ? formatArtifact(agentCtx.inputArtifact) : 'None'}
 | `testing` | TestAgent | `09-test-report.md` | `[TEST_PASS]` → `verifying`；`[TEST_FAIL]` → `fixing` |
 | `fixing` | FixAgent | `10-fix-report.md` | `[FIX_COMPLETE]` → `testing`（重测）；`[FIX_BLOCKED]` → `blocked` |
 | `verifying` | VerificationAgent | `11-verify-report.md` | `[VERIFY_PASS]` → `reviewing`；`[VERIFY_PARTIAL]`/`REJECT` → `fixing` |
-| `reviewing` | ReviewAgent | `12-review-report.md` | `[REVIEW_APPROVE]` → `final_verifying`；`[REVIEW_CHANGES]` → `fixing` |
-| `final_verifying` | FinalVerifyAgent | `13-final-verify-report.md` | `[FINAL_READY]` → `mr_creating`；`[FINAL_BLOCKED]` → `blocked` |
+| `reviewing` | ReviewAgent × 2 axes | `12-review-<taskId>-<axis>.md` | `[REVIEW_<AXIS>_APPROVE]` → `final_verifying`；任一 `[REVIEW_<AXIS>_CHANGES]` → `fixing` |
+| `final_verifying` | FinalVerifyAgent × 2 axes | `13-final-verify-<axis>.md` | 两轴都 `[FINAL_READY]` → `mr_creating`；任一 `[FINAL_BLOCKED]` → `blocked` |
 | `mr_creating` | (orchestrator 直接调 gitlabMerger) | n/a | 成功 → `tapd_syncing` |
 | `tapd_syncing` | (orchestrator 直接调 tapdPoller.syncTapd) | n/a | 成功 → `completed` |
+
+### 6.7 Sentinel Token 权威表
+
+> 真实实现：`packages/dsh-auto-rd/src/services/agent-provider.ts` 第 364-898 行。Runner / handler 通过正则匹配最后一行的 sentinel token 决定下一状态。
+>
+> **格式约定**：全部大写，`_` 分隔，前后 `[...]` 包裹。Sentinel 必须在 artifact 文件**最后一行**——runner 解析最后非空行。
+
+| Sentinel | 发出者 | Stage | 含义 | 路由 |
+|---|---|---|---|---|
+| `[CONTEXT_COMPLETE]` | ContextAgent | `context` | 环境验证完成 | → `clarification` |
+| `[CLARIFICATION_COMPLETE]` | ClarificationAgent | `clarification` | 零开放问题，需求明确 | → `brainstorm` |
+| `[CLARIFICATION_BLOCKED]` | ClarificationAgent | `clarification` | 必须问用户 | → `blocked` |
+| `[BRAINSTORM_MINIMAL_COMPLETE]` | BrainstormAgent (minimal) | `brainstorm` | minimal variation 完成 | 等另两路 |
+| `[BRAINSTORM_CLEAN_COMPLETE]` | BrainstormAgent (clean) | `brainstorm` | clean variation 完成 | 等另两路 |
+| `[BRAINSTORM_NOVEL_COMPLETE]` | BrainstormAgent (novel) | `brainstorm` | novel variation 完成 | 三路齐 → `critic` |
+| `[CRITIQUE_COMPLETE]` | CriticAgent | `critic` | 评审完成 | → `decision` |
+| `[CRITIQUE_BLOCKED]` | CriticAgent | `critic` | 系统性 gap（**罕见**——回 clarification） | → `clarification`（roll back） |
+| `[DECISION_COMPLETE]` | DecisionAgent | `decision` | 决策完成 | → `spec` |
+| `[SPEC_COMPLETE]` | SpecAgent | `spec` | spec 自检通过 | → `planning` |
+| `[PLAN_COMPLETE]` | PlannerAgent | `planning` | tasks 列表完整（**0 个 task 时 runner 短路**） | → `implementing` |
+| `[IMPL_TASK_COMPLETE]` | ImplementationAgent (per-task) | `implementing` | RED/GREEN/VERIFY/COMMIT 5 步全过 | 下一个 task；都过完 → `testing` |
+| `[IMPL_TASK_BLOCKED]` | ImplementationAgent (per-task) | `implementing` | task 需要新文件 / 不可改代码 | → `blocked` |
+| `[TEST_PASS]` | TestAgent | `testing` | 所有 AC ✅ 且无其它 break | → `verifying` |
+| `[TEST_FAIL]` | TestAgent | `testing` | 任一 AC ❌ | → `fixing` |
+| `[FIX_COMPLETE]` | FixAgent (per-task) | `fixing` | 测试变绿且无副作用 | → `testing`（**重测**） |
+| `[FIX_BLOCKED]` | FixAgent (per-task) | `fixing` | 5-round breaker trip（**5 round 触发后由 runner 直接改 blocked**——fix agent 自己不 emit） | (runner 处理) |
+| `[VERIFY_PASS]` | VerificationAgent | `verifying` | spec 满足 | → `reviewing` |
+| `[VERIFY_PARTIAL: <note>]` | VerificationAgent | `verifying` | 部分 spec 满足 | → `fixing` |
+| `[VERIFY_REJECT: <note>]` | VerificationAgent | `verifying` | spec 严重不满足 | → `fixing` |
+| `[REVIEW_<AXIS>_APPROVE]` | ReviewAgent (per axis) | `reviewing` | `<axis>` 通过（`standards` / `spec`） | 两轴 APPROVE → `final_verifying` |
+| `[REVIEW_<AXIS>_CHANGES: ...]` | ReviewAgent (per axis) | `reviewing` | `<axis>` 不通过（带 finding 数） | 任一 CHANGES → `fixing` |
+| `[FINAL_READY]` | FinalVerifyAgent (per axis) | `final_verifying` | 全 branch 验证通过（zero Critical/Important） | 两轴 READY → `mr_creating` |
+| `[FINAL_BLOCKED]` | FinalVerifyAgent (per axis) | `final_verifying` | 发现 Critical / 长期 Important | 任一 BLOCKED → `blocked` |
+
+**Token 总数**：23 个 sentinel + 2 个轴（`<AXIS>`, `<VARIATION>`）参数化模板 = 实际 token 形态 **~30 个**。
+
+**错误处理**：runner 解析时若**找不到任何 sentinel**：
+- logging agent name + artifact path + 最后 200 字符
+- throw `SentinelNotFoundError` → runner 抛（**这是真错——配置 / persona 损坏**），retryCount++
+- 不 retry 超 3 次 → `failed`
+
+**反向 contract**：persona 文档**不能**改 sentinel 字面量。改 sentinel 必须同步改：
+1. `agents/personas/*.md` 文档
+2. `services/agent-provider.ts` stub handler 输出的字符串
+3. `services/story-runner.ts` 解析逻辑
+4. `docs/architecture/auto-rd-native-plugin-design.md` §6.7（本节）
 
 ---
 
