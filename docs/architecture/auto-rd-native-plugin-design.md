@@ -1896,26 +1896,85 @@ export async function recoverStories(
 
 ## 11. 并发控制
 
-### 11.1 限流策略
+### 11.1 真实实现
 
-每个 Module 最多同时 1 个 Story executing，全局最多 4 个 Story executing。
+代码：`services/story-queue.ts`，类名 `StoryQueue`。
 
 ```typescript
-function canStartStory(story: Story, executing: Story[], config: any): boolean {
-  // 全局限流
-  if (executing.length >= config.maxTotalConcurrentStories) return false
-  
-  // Module 限流
-  const moduleExecuting = executing.filter(s => s.moduleId === story.moduleId)
-  if (moduleExecuting.length >= config.maxConcurrentStoriesPerModule) return false
-  
-  return true
+const POLL_INTERVAL_MS = 10_000
+
+const ACTIVE_STATES: StoryState[] = [
+  'context', 'clarification', 'brainstorm', 'critic', 'decision',
+  'spec', 'planning', 'implementing', 'testing', 'fixing',
+  'verifying', 'reviewing', 'final_verifying', 'mr_creating',
+  'tapd_syncing',
+]
+
+export class StoryQueue {
+  private timer: ReturnType<typeof setInterval> | null = null
+  private inFlight = new Set<string>()  // 已 dispatch 但未完成的 story
+
+  start(): void {
+    if (this.timer) return
+    void this.tick()  // 立即跑一次
+    this.timer = setInterval(() => void this.tick(), POLL_INTERVAL_MS)
+  }
+
+  async tick(): Promise<void> {
+    const stories = [...this.deps.storage.stories().values()]
+    const executing = stories.filter((s) => ACTIVE_STATES.includes(s.state))
+
+    // 1. 全局 cap（早返回）
+    if (executing.length >= this.deps.config.maxTotalConcurrentStories) return
+
+    // 2. per-module 计数
+    const perModuleExecuting = new Map<string, number>()
+    for (const s of executing) perModuleExecuting.set(s.moduleId, (perModuleExecuting.get(s.moduleId) ?? 0) + 1)
+
+    // 3. 候选：pending + failed(retryCount < 3)
+    const candidates = stories
+      .filter((s) => s.state === 'pending' || (s.state === 'failed' && s.retryCount < 3))
+      .sort((a, b) => a.id.localeCompare(b.id))  // FIFO by id
+
+    // 4. dispatch 循环
+    for (const story of candidates) {
+      if (this.inFlight.has(story.id)) continue  // skip in-flight
+      const moduleCount = perModuleExecuting.get(story.moduleId) ?? 0
+      if (moduleCount >= this.deps.config.maxConcurrentStoriesPerModule) continue
+      if (executing.length + this.inFlight.size >= this.deps.config.maxTotalConcurrentStories) break
+      this.dispatch(story)
+      perModuleExecuting.set(story.moduleId, moduleCount + 1)
+    }
+  }
 }
 ```
 
-### 11.2 Story 排队顺序
+### 11.2 关键设计点
 
-按 `tapdId` 升序（FIFO），priority 字段未来可扩展。
+- **`inFlight` Set 跟踪"已 dispatch 但未完成"**：dispatch 走 async，加 Set 防止同一 story 在同一 tick 内被 dispatch 两次
+- **`executing` = ACTIVE_STATES 过滤**（15 个非 pending 状态）：统计正在执行的
+- **候选 = pending OR failed + retryCount < 3**：把 `failed` 视为 retryable candidate——breaker 没 trip 前自动 retry
+- **FIFO by `id.localeCompare`**：`id` 是 TAPD story id（也是 storage primary key），ascending 排序 = FIFO
+- **10s tick**：timer 每 10s 触发一次（POLL_INTERVAL_MS = 10000），首次启动时立即跑一次
+
+### 11.3 默认配置
+
+cordis.yml 默认（§2.2）：
+
+| Config key | Default | 说明 |
+|---|---|---|
+| `maxConcurrentStoriesPerModule` | 1 | 每个 module 同时最多 1 个 story |
+| `maxTotalConcurrentStories` | 4 | 全局同时最多 4 个 story |
+
+**4 个全局 + 1 个 per-module 是经验值**——DSH subagent 在 Sonnet 上的并行吞吐大概支持这个数；过大会让 LLM API 限流。
+
+### 11.4 StoryQueue 集成测试
+
+`scripts/test-m5-integration.mjs` 测试 15-17：
+
+- test 15: 全局 limit 严格生效（5 candidate + maxTotal=2 → dispatch 2）
+- test 16: per-module limit 严格生效（3 candidate in m1 + maxPerModule=1 → dispatch 1）
+- test 17: failed(retryCount < 3) 被视为 candidate
 
 ---
 
