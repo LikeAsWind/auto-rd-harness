@@ -1380,12 +1380,12 @@ export const ContextAgent: AgentSpec = {
 
 ### 7.1 UI 分层：host 提供数据，client 负责渲染
 
-真实机制分两层：
+真实机制分两层，**两层都已实现**：
 
 | 层 | 能力 | 本插件的落地 |
 |---|---|---|
-| host（Node） | 读写 storageDomain、注册 tool、注册 prompt section | ✅ 已实现（`ui-panel.ts` 的纯数据投影 + 3 个 tool） |
-| client（浏览器） | 注册 slot、渲染 React cell | ⏳ **未实现——见下方阻塞原因** |
+| host（Node） | 读写 storageDomain、注册 tool、注册 prompt section、注册 HTTP route | ✅ `ui-panel.ts` 纯数据投影 + `panel-route.ts` 的 `GET /auto-rd/panel` + 3 个 tool |
+| client（浏览器） | 注册 slot、渲染 React cell | ✅ `src/client/client.js`：填充 `sidebar.panellist`（图标）+ `main`（面板体），轮询 host route |
 
 **host 侧已实现且已验证的部分**（`services/ui-panel.ts`）：
 
@@ -1424,45 +1424,92 @@ export const CLIENT_PANEL_LABEL = 'Auto-RD'
 `sidebar.panellist` 的语义是「每个 list id 对应一个 main panel」，所以用同一个
 `id` 注册即同时得到 sidebar 按钮与 main 面板。
 
-**⏳ 为什么 client 半尚未实现（这是唯一剩余的功能缺口）**
+**✅ client 半已实现（2026-09）**
 
-真实平台确实支持 client 贡献：host 有 `clientModules` service
-（"incremental `dsh.client` scan + wire composition + bundle route + index
-injection rows"），其 `WebBootGraph` 条目形状为：
+文件：`packages/dsh-auto-rd/src/client/client.js`（构建时原样复制到 `lib/client.js`，
+由 `copy:client` 步骤完成）。
 
-```typescript
-interface WebBootEntry {
-  id: string            // = package name
-  url: string           // client bundle URL
-  rev: string
-  inject?: string[]
-  immediately?: boolean
-  external?: string[]
-}
-```
+**契约来源**：不是猜的，是读已安装的 shipped client 插件
+`@deepseek-ai/dsh-client-ui-sidebar` 得到的。此前这个字段的形状无法确定，
+因此当时刻意没有提交无法验证的 bundle；本轮在
+`$DSH_HOME/profiles/node_modules/@deepseek-ai/` 下找到了约 40 个真实 client
+包，阻塞即解除。
 
-**但 `dsh.client` 这个 package.json 字段的确切形状，在当前环境中无法确定**：
-DSH 发行包只带 `lib/` 里的 bundled launcher，没有 client 扫描的源码；README
-未记录；已装依赖里没有可参考的 client 包（`dsh-client-ui-*` 都在 dsh 的
-dependency 列表里但未以独立目录安装）。
+**验证后的真实机制**：
 
-本次会话已经证明「猜 API 形状」的代价：host 侧四个 service 的假设形状里，
-`open()` 是否 async、`KvTable` 是否有 `values()`、slot 注册参数、prompt
-section 字段名**全都是错的**，其中三个会导致插件根本无法 mount。
+1. `package.json` 里声明 `dsh.client`：
+   ```json
+   "dsh": { "client": { "inject": [], "platform": "web" } }
+   ```
+   `inject` 列的是**需要先加载的 client 插件包名**。本插件只依赖 core 的
+   `slots`，并用 `slots.inject()` 等 slot 声明出现，所以留空即可。
 
-而且 `clientModules` 的失败模式很重：
-> "a malformed declaration or missing bundle among the already-loaded entries
-> aggregates into one loud throw (**FAILED fiber**; the boot activation audit
+2. bundle 位于 `exports['./client']`，且**不是 ES module**，而是 shell 自己的
+   模块封装：
+   ```js
+   window.__ModuleLoader__.load({
+     id: "<package name>",
+     factory: (require) => {
+       var module = { exports: {} }; var exports = module.exports
+       // ... require("react") 等外部依赖 ...
+       exports.apply = apply      // shell 调用这个
+       exports.inject = inject    // 短服务名数组
+       return module.exports
+     }
+   })
+   ```
+
+3. **client 侧的 `inject` 用短服务名**（`["slots"]`），而且 client realm 里
+   `slots` **确实是** service（`ctx.slots`）——正是 host 侧不存在、导致面板
+   必须跨两个 realm 的那个 service。
+
+4. 填充 slot 的 API：
+   ```js
+   ctx.slots.register({ name, id?, key?, order?, label? }, Component)
+   ```
+   list slot 用 `id`（`sidebar.panellist`），keyed slot 用 `key`（`main`）。
+   `Component` 是 React 组件，接收 ownerProps 与注入的 hooks。
+
+5. `ctx.slots.inject(key, cb)` 等待某个 slot 被声明后再执行 `cb`——第三方面板
+   填充自己并不声明的 slot 时这是安全路径（直接 `register` 若早于声明会 throw）。
+
+**本插件 client 半做的事**：
+
+| 注册 | Slot | 形式 | 组件 |
+|---|---|---|---|
+| sidebar 入口 | `sidebar.panellist`（list） | `{ id: 'auto-rd-modules', order: 100, label: 'Auto-RD' }` | `AutoRdIcon`，读 ownerProps `{ size, active }` |
+| main 面板 | `main`（keyed） | `{ key: 'auto-rd-modules' }` | `AutoRdPanel` |
+
+两者都走 `ctx.slots.inject`，随插件 fiber 一起卸载。
+
+**数据从哪来**：浏览器读不到 host 的 storageDomain，所以 host 侧用
+`webServer` 注册了 `GET /auto-rd/panel`（见 `services/panel-route.ts`），
+返回 `buildPanelModel()` 的 JSON；client 面板每 5s 轮询它，渲染 module 分组、
+状态徽标与 MR 链接。拉取失败只写进组件 state 显示一行错误，组件不抛异常。
+
+**为什么只 require `react`**：刻意不用 JSX，因此不需要 `react/jsx-runtime`，
+也不需要构建步骤——文件原样复制即可，少一个可以搞错的外部依赖（测试会
+在出现任何其它外部依赖时直接失败）。
+
+**已验证**（`scripts/test-client-half.mjs`，60 条断言）：在最小 shell 沙箱里
+求值 bundle——假 `window.__ModuleLoader__` 捕获声明，假 `require` 只提供
+`react`。覆盖 envelope id 等于包名、`apply`/`inject` 与短名 `slots`、两个
+`slots.inject` 都被排队且声明到来前不注册、sidebar 填充带 id/order/label、
+main 填充带匹配的 key、图标响应 `{ size, active }`、面板真去 fetch 文档化的
+URL 并把 model 落进 state、HTTP 503 变成 state 里的错误、**effect cleanup
+真的停掉轮询**（首次跑这个测试把进程挂住了，就是这样发现的），以及 client 的
+id/slot/order/URL 常量与 host 导出的完全一致（防止两侧漂移）。
+
+**⏳ 仍待真实环境验收**：shell 真的加载这个 bundle、面板真的在浏览器里渲染
+出来。这需要把包装进 DSH profile 并刷新页面，在当前环境做不到。除 DOM 之外
+的结构与行为都已覆盖。
+
+**注意失败模式**：`clientModules` 对畸形声明或缺失 bundle 的处理是
+> "aggregates into one loud throw (**FAILED fiber**; the boot activation audit
 > reports it)"
 
-即：**一个形状猜错的 `dsh.client` 声明可能让整个 GUI 启动失败。**
-
-因此这里刻意**不**提交一个无法验证的 client bundle。正确做法是先用真实环境
-确认 `dsh.client` 形状，再实现——而不是再猜一次并把风险转嫁给用户的 GUI。
-
-**解除阻塞所需**：一台能 `pnpm run dev:web` 的 DSH 源码环境，或任一已装
-client 插件（`@deepseek-ai/dsh-client-ui-cordis` 等）的 `package.json`，
-用来读出 `dsh.client` 的字段形状。
+即一个错的 `dsh.client` 可能让整个 GUI 启动失败。所以这里的每条形状都对齐了
+真实 bundle，而不是「看起来对」。
 
 ### 7.2 StoryNotifier（轮询模式）
 
