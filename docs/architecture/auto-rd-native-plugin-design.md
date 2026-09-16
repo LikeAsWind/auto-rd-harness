@@ -1648,6 +1648,52 @@ export async function recoverStories(
 - ❌ **Stuck-session detection**：用 session list 查 `state='executing'` 时间 > N min 的孤儿 session —— M5 + 加
 - ❌ **Concurrent plugin instance 防多写**：trust DSH single-process 假设
 
+### 10.5 Logger Rate Limit（M5）
+
+#### 问题
+
+`packages/dsh-auto-rd/src/utils/logger.ts` 是 plugin 内所有日志的唯一出口。当外部系统出问题时（TAPD 5xx spike / GitLab 网络中断），同一 warn / error 消息会在每个循环 tick（10s / 5s / 60s）刷屏，淹没控制台正常输出。
+
+#### 解决方案
+
+**Sliding-window rate limit per (level, msgPrefix) bucket**：
+
+| 配置 | 值 | 说明 |
+|---|---|---|
+| Window | 60_000 ms | 1 分钟滑动窗口 |
+| Max emits per bucket | 5 | 每桶最多 5 次 |
+| Bucket key | `${level}:${msg.slice(0, 60)}` | 同 level + 前 60 字符合并 |
+| Bucket cap | 256 | LRU 淘汰最老 bucket，防泄漏 |
+
+**触发逻辑**：
+
+1. 第 1-5 次 emit：正常通过
+2. 第 6 次 emit：bucket tripped → 输出 **一条 summary line**（`"Logger: N further <level> messages suppressed in last 60s"`），后续 emit silently drop
+3. 60s 后窗口重置
+
+**Summary line 降一级**：
+- suppressed 是 `warn` → summary 输出在 `warn`
+- suppressed 是 `error` → summary 输出在 `warn`（避免隐藏 error 信息，但确保 summary 本身可见）
+
+#### 关键设计点
+
+- **Module-level 共享**：所有 `Logger` 实例共享 bucket registry——多个 service log 同一消息也只算一个 bucket
+- **Prefix 合并**：`"TAPD 503 transient failure"` 和 `"TAPD 503 transient failure retry"` 共用同 bucket（前 60 字符相同）
+- **Test hooks**：`__resetLoggerRateLimit()` + `__loggerRateLimitSnapshot()` 暴露内部状态（测试用，生产环境不调）
+- **Bounded memory**：MAX_BUCKETS=256 防 unbounded bucket 增长
+
+#### 测试
+
+`scripts/test-m5-integration.mjs` 测试 18-24：
+
+- test 18: 前 5 个 emit 全部通过
+- test 19: 第 6 个 emit 触发 summary line
+- test 20: 不同 message 独立计数
+- test 21: 同 prefix（不论 suffix）合并 bucket
+- test 22: error-level 也限流
+- test 23: 低于 threshold 的 debug / info 不计
+- test 24: snapshot 反映 bucket 内部状态
+
 ---
 
 ## 11. 并发控制
@@ -2055,16 +2101,16 @@ Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
 | 里程碑 | 文档定义 | 落地状态 |
 |---|---|---|
 | M5 限流 | §11 | 全部落地：`StoryQueue.tick()` 全局 + per-module 限流 + 3 个 StoryQueue 集成测试（`npm run test:m5`） |
-| M5 错误恢复 | §10.2 | 全部落地：`recoverStories` mount 前调用 + 7 个 checkpoint 字段 + §10 双层保护文档补齐 |
+| M5 错误恢复 | §10.2 + §10.5 | 全部落地：`recoverStories` mount 前调用 + 7 个 checkpoint 字段 + §10 双层保护文档 + Logger rate limit 防 log 洪水 |
 | M5 人介入 | §12 | 全部落地：3 tool + StoryNotifier + system prompt section（**`test:m5` 覆盖 19 个 tool / recover 用例**） |
-| M5 集成测试 | §13.3 + 附录 A.3 | 部分落地：**`test:m5` 42 pass**（recover / 3 tool / queue 限流 / status 查询 / state transitions），**e2e 仍待真凭据 + 真 DSH 进程** |
+| M5 集成测试 | §13.3 + 附录 A.3 | 部分落地：**`test:m5` 51 pass**（recover / 3 tool / queue 限流 / status / Logger rate limit / state transitions），**e2e 仍待真凭据 + 真 DSH 进程** |
 
 **测试矩阵总览**：
 
 | 测试集 | 覆盖范围 | 用例数 |
 |---|---|---|
 | `npm run test:m4` | HttpClient / syncTapd / gitlab-merger（fake-server in-process） | 22 pass + 10 parser pass |
-| `npm run test:m5` | recover / 3 tool / StoryQueue / status | 42 pass |
+| `npm run test:m5` | recover / 3 tool / StoryQueue / status / Logger rate limit | 51 pass |
 
 **M5 e2e 是唯一外部缺口**——需要：
 1. TAPD 公司内网 / 公网凭据
@@ -2080,8 +2126,8 @@ Commits（8 个，`feature/m4-ui` 分支，HEAD `58a5945`）：
 
 ---
 
-文档版本：v1.3  
-最后更新：Round 13 后（commit `4072113` + M5 integration tests）  
+文档版本：v1.5  
+最后更新：Round 14 后（commit + M5 Logger rate limit + §10.5 文档 + clarification persona stale TODO 清除）  
 下一步：M5 e2e（需用户主动提供凭据走安全通道）+ 探索报告归档
 
 ---
@@ -2205,7 +2251,7 @@ if (!slots) {
 - ✅ Plugin 在所有 DSH 形态都跑得起来（CI / dev / production / 不同 DSH 版本）
 - ✅ UI surface 可逐步启用，新 DSH service 出现时不需要 plugin 改
 - ❌ DSH service 实际 API 改变时**不会立即发现**——本地 narrow 类型不强制 contract（依赖 DSH runtime assertion / 测试发现）
-- ❌ warn log 可能淹没正常 log（待优化——M5 加 warning rate limit）
+- ✅ 突发 warn / error log 不再淹没正常 log——`Logger` (M5 §9) 5/60s 滑动窗口限流
 
 #### 关键不变式
 

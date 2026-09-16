@@ -65,7 +65,7 @@ The HARD-GATE rule: **never proceed past Clarification if any question is unreso
 - If you produced questions and the orchestrator cannot resolve them automatically: emit `[CLARIFICATION_BLOCKED: <count> unresolved questions — see 02-clarification.md]`. Do NOT guess answers. Do NOT advance the state machine.
 
 The orchestrator (StoryRunner) will:
-- Show `[CLARIFICATION_BLOCKED]` to the user via StoryNotifier (TODO: M4)
+- Show `[CLARIFICATION_BLOCKED]` to the user via StoryNotifier (M4-U5)
 - Park the story in `blocked` state
 - Wait for a user reply and a `retry` action from `auto_rd_retry`
 

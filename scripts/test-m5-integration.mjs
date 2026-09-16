@@ -6,6 +6,7 @@
 //   - auto_rd_trigger tool: poll_now / advance_story / mark_reviewed
 //   - auto_rd_status tool: summary / stories / tasks scopes
 //   - story-queue concurrency limits (per-module + global)
+//   - logger warning rate limit (M5 §22 — caps hot messages)
 //
 // Does NOT cover:
 //   - TapdPoller / GitLabMerger (covered by test-m4-fakes.mjs)
@@ -89,12 +90,20 @@ const statusToolMod = await import(
 const storyQueueMod = await import(
   pathToFileURL(resolve(libBase, 'services', 'story-queue.js')).href
 )
+const loggerMod = await import(
+  pathToFileURL(resolve(libBase, 'utils', 'logger.js')).href
+)
 
 const { recoverStories } = recoverMod
 const { autoRdRetryTool } = retryToolMod
 const { autoRdTriggerTool } = triggerToolMod
 const { autoRdStatusTool } = statusToolMod
 const { StoryQueue } = storyQueueMod
+const {
+  Logger,
+  __resetLoggerRateLimit,
+  __loggerRateLimitSnapshot,
+} = loggerMod
 
 // ---- Assertion helpers -------------------------------------------------
 
@@ -102,10 +111,10 @@ let pass = 0
 let fail = 0
 const check = (name, cond, extra) => {
   if (cond) {
-    console.log(`\u2713 ${name}`)
+    process.stdout.write(`\u2713 ${name}\n`)
     pass++
   } else {
-    console.log(`\u2717 ${name}`, extra ?? '')
+    process.stdout.write(`\u2717 ${name} ${extra ?? ''}\n`)
     fail++
   }
 }
@@ -499,8 +508,150 @@ const baseStory = (overrides = {}) => ({
   queue.stop()
 }
 
+// ---- Logger rate-limit tests (M5 §22) ---------------------------------
+
+/**
+ * Spy on console.log / console.warn / console.error so we can count
+ * the lines the Logger class actually emits. The rate-limit registry
+ * is module-level, so we reset it between tests via __resetLoggerRateLimit.
+ */
+function makeConsoleSpy() {
+  const orig = { log: console.log, warn: console.warn, error: console.error }
+  const lines = []
+  console.log = (...args) => lines.push({ channel: 'log', msg: args.join(' ') })
+  console.warn = (...args) => lines.push({ channel: 'warn', msg: args.join(' ') })
+  console.error = (...args) => lines.push({ channel: 'error', msg: args.join(' ') })
+  return {
+    lines,
+    restore() {
+      console.log = orig.log
+      console.warn = orig.warn
+      console.error = orig.error
+    },
+  }
+}
+
+// 18. Logger — first N emits go through, then bucket trips.
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  for (let i = 0; i < 5; i++) logger.warn('TAPD 503 transient failure')
+  // 5 emits should be visible.
+  const warnLines = spy.lines.filter((l) => l.channel === 'warn' && l.msg.includes('TAPD 503 transient failure'))
+  check('logger first 5 warns emitted', warnLines.length === 5, `got=${warnLines.length}`)
+  spy.restore()
+}
+
+// 19. Logger — 6th emit trips the bucket + summary line.
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  for (let i = 0; i < 8; i++) logger.warn('TAPD 503 transient failure')
+  // 5 originals + 1 summary line = 6 emits. The 6th, 7th, 8th were suppressed.
+  const warnLines = spy.lines.filter((l) => l.channel === 'warn')
+  const summaryLines = warnLines.filter((l) => l.msg.includes('further warn messages suppressed'))
+  check(
+    'logger 6th emit produces summary line',
+    summaryLines.length === 1,
+    `warnLines=${warnLines.length} summaryLines=${summaryLines.length}`,
+  )
+  check(
+    'logger summary records 1 further suppressed at emit 6 (subsequent emits silently drop)',
+    summaryLines.length === 1 && summaryLines[0].msg.includes('1 further'),
+    summaryLines[0]?.msg,
+  )
+  spy.restore()
+}
+
+// 20. Logger — distinct messages are independent buckets.
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  for (let i = 0; i < 4; i++) logger.warn('TAPD 503 transient failure')
+  for (let i = 0; i < 4; i++) logger.warn('GitLab MR create 401 unauthorized')
+  // 4 + 4 = 8 distinct emits, no rate limit hit.
+  const warnLines = spy.lines.filter((l) => l.channel === 'warn')
+  check(
+    'logger distinct messages get independent buckets',
+    warnLines.length === 8,
+    `got=${warnLines.length}`,
+  )
+  spy.restore()
+}
+
+// 21. Logger — same prefix within 60 chars shares a bucket.
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  for (let i = 0; i < 3; i++) logger.warn('TAPD 503 transient failure')
+  for (let i = 0; i < 3; i++) logger.warn('TAPD 503 transient failure retry')
+  // Both prefixes share the first 60 chars "TAPD 503 transient failure", so this is
+  // a single bucket -- 5 allowed, 6th would trip. Here we emit 6 of the same key.
+  const warnLines = spy.lines.filter((l) => l.channel === 'warn')
+  // 5 emits + 1 summary = 6.
+  check(
+    'logger prefix-window bucketing merges similar messages',
+    warnLines.length === 6,
+    `got=${warnLines.length}`,
+  )
+  spy.restore()
+}
+
+// 22. Logger — error-level emits also rate-limited (summary line at warn level).
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'error', 'auto-rd-test')
+  for (let i = 0; i < 6; i++) logger.error('TAPD 503 transient failure')
+  // 5 emits on error + 1 summary on warn = 6 total (5 error + 1 warn summary).
+  const errorLines = spy.lines.filter((l) => l.channel === 'error')
+  const warnSummary = spy.lines.filter((l) => l.channel === 'warn' && l.msg.includes('further error messages suppressed'))
+  check(
+    'logger error emits also rate-limited',
+    errorLines.length === 5 && warnSummary.length === 1,
+    `errors=${errorLines.length} summaries=${warnSummary.length}`,
+  )
+  spy.restore()
+}
+
+// 23. Logger — debug/info below threshold don't count against warn buckets.
+{
+  __resetLoggerRateLimit()
+  const spy = makeConsoleSpy()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  // level=warn means debug/info filtered out entirely (no rate limit impact).
+  logger.debug('TAPD 503 transient failure')
+  logger.info('TAPD 503 transient failure')
+  logger.warn('TAPD 503 transient failure')
+  const warnLines = spy.lines.filter((l) => l.channel === 'warn')
+  check(
+    'logger debug/info below threshold do not emit',
+    warnLines.length === 1 && warnLines[0].msg.includes('TAPD 503 transient failure'),
+    `warnLines=${warnLines.length}`,
+  )
+  spy.restore()
+}
+
+// 24. Logger — __loggerRateLimitSnapshot reflects current state.
+{
+  __resetLoggerRateLimit()
+  const logger = new Logger({}, 'warn', 'auto-rd-test')
+  for (let i = 0; i < 7; i++) logger.warn('Hot error message that repeats')
+  const snap = __loggerRateLimitSnapshot()
+  const entry = snap.find((s) => s.key.includes('Hot error message'))
+  check('snapshot has the bucket', entry !== undefined)
+  check(
+    'snapshot shows 5 emitted + 2 suppressed',
+    entry && entry.count === 5 && entry.suppressed === 2,
+    JSON.stringify(entry),
+  )
+}
+
 // ---- Summary -----------------------------------------------------------
 
-console.log('')
-console.log(`M5 integration tests: ${pass} pass, ${fail} fail`)
+process.stdout.write(`\nM5 integration tests: ${pass} pass, ${fail} fail\n`)
 if (fail > 0) process.exitCode = 1
