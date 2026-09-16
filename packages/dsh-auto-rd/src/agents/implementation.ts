@@ -8,38 +8,20 @@
  * - SD-3: No-Subagents Contract (obra/subagent-driven-development)
  * - SD-8: Hand Artifacts As Files (obra/subagent-driven-development)
  *
- * The persona is in personas/implementation.md.tmpl; per-task variables
- * {TASK_ID}, {TASK_TITLE}, {TASK_DESCRIPTION}, {DEPENDS_ON} are interpolated.
+ * The orchestrator dispatches a FRESH instance of this agent per task
+ * (SD-2). The persona markdown describes the role generically; per-task
+ * context (task_id, files, red/green steps) is passed in the dispatch
+ * request's `inputs.task` bag, not interpolated into the persona.
  */
 import type { AgentSpec } from './base'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
-const TEMPLATE_PATH = resolve(__dirname, 'personas', 'implementation.md.tmpl')
-const TEMPLATE = readFileSync(TEMPLATE_PATH, 'utf-8')
+import { loadPersona } from './persona-loader'
 
 export class ImplementationAgent implements AgentSpec {
   readonly name = 'implementation'
   readonly outputFormat = 'free-form' as const
+  readonly persona: string = loadPersona('implementation')
 
-  constructor(
-    public readonly taskId: string,
-    public readonly taskTitle: string,
-    public readonly taskDescription: string,
-    public readonly dependsOn: string[],
-  ) {}
-
-  get persona(): string {
-    const dependsLine = this.dependsOn.length > 0 ? this.dependsOn.join(', ') : 'none'
-    return TEMPLATE
-      .replaceAll('{TASK_ID}', this.taskId)
-      .replaceAll('{TASK_TITLE}', this.taskTitle)
-      .replaceAll('{TASK_DESCRIPTION}', this.taskDescription)
-      .replaceAll('{DEPENDS_ON}', dependsLine)
-  }
+  constructor(public readonly taskId: string) {}
 
   readonly toolFilter = {
     allow: [
