@@ -36,6 +36,7 @@
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "install:dsh": "node scripts/install-to-dsh.mjs",
     "uninstall:dsh": "node scripts/install-to-dsh.mjs --uninstall",
+    "verify:install": "node scripts/verify-install-dsh.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },
   "engines": {
