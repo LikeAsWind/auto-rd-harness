@@ -11,15 +11,30 @@
 name: '@yangzhitong/dsh-auto-rd'
 
 # Default config. Users override in their cordis.patch.yml.
+#
+# IMPORTANT: this block is the canonical reference for every config key
+# the plugin accepts. The runtime schema (src/config.ts) validates each
+# key by name and rejects unknown keys, so any field you remove here MUST
+# also be removed from src/config.ts.
 config:
   # TAPD integration
   tapdBaseUrl: 'https://api.tapd.cn'
   tapdApiToken: ''
   tapdPollIntervalMs: 60000
+  # TAPD workspace ids. Multiple can be polled (poller iterates).
+  # Required when useTapdMock=false.
+  tapdWorkspaceIds: []
+  # When true, poller returns the local MOCK_TAPD_FIXTURE instead of
+  # calling TAPD. Default false: production deployments must hit real TAPD.
+  useTapdMock: false
 
   # GitLab integration
   gitlabBaseUrl: 'https://gitlab.com'
   gitlabApiToken: ''
+  # Identity used by git push commits. Override if your project requires
+  # a specific author.
+  gitlabPushUserName: 'auto-rd'
+  gitlabPushUserEmail: 'auto-rd@example.com'
 
   # Workspace
   workspaceRoot: 'C:/work'

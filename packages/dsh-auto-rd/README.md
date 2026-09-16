@@ -4,19 +4,25 @@
 
 ## Status
 
-🚧 **M1 (skeleton in progress)**
+✅ **M1-M4 + M4-UI complete.** M5 integration tests at 51 pass; M5 e2e (real TAPD + GitLab + DSH runtime) remains as a user-side prerequisite.
 
 Currently:
-- ✅ Agent personas (Pattern-borrowed from obra/superpowers + mattpocock/skills)
-- ✅ storageDomain table schemas (modules, stories, tasks)
-- ✅ Config schema (zod)
-- 🚧 Plugin lifecycle (apply, mount)
-- ⏳ TapdPoller (M1 next)
-- ⏳ WorkspaceManager (M1 next)
-- ⏳ SubAgentProvider (M1 next)
-- ⏳ StoryQueue scheduler (M1 next)
-- ⏳ Sidebar UI (M2)
-- ⏳ GitLab MR creation (M4)
+- ✅ 13 Agent personas (Pattern-borrowed from obra/superpowers + mattpocock/skills)
+- ✅ storageDomain v3 schema (modules, stories, tasks + 7 M4 checkpoint fields)
+- ✅ Config schema (zod, 16 keys)
+- ✅ Plugin lifecycle (apply, 8-step mount, inject list)
+- ✅ TapdPoller (real TAPD API + mock fallback + multi-envelope parsing)
+- ✅ WorkspaceManager (module workspace + worktree)
+- ✅ SubAgentProvider (per-task dispatch, no-subagents contract, sentinel tokens)
+- ✅ StoryQueue scheduler (global + per-module concurrency limits, 10s tick)
+- ✅ StoryRunner (19-state machine, 5-round fix breaker, two-axis parallel review)
+- ✅ recoverStories (cross-restart state reset)
+- ✅ Sidebar UI (JSON tree renderer, polling notifier, 3 model-callable tools)
+- ✅ System prompt section registration
+- ✅ GitLab MR creation (push + createOrReuseMR with checkpoint recovery)
+- ✅ TAPD syncTapd (POST/PATCH with 404 fallback + 20-attempt cap)
+- ✅ Logger rate limit (5/60s sliding window per bucket)
+- ✅ M5 integration test suite (51 pass)
 
 ## Architecture
 
