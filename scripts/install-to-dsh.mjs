@@ -40,7 +40,7 @@
  *   DSH_GITLAB_API_TOKEN  GitLab personal access token (api scope)
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, renameSync, copyFileSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -433,6 +433,69 @@ function main() {
     run(pm, ['add', '-C', profileDir, tarball]);
   } else {
     process.stdout.write(`(dry-run) would run: ${pm} add -C ${profileDir} ${tarball}\n`);
+  }
+
+  // 2b. Force-copy the freshly built artefacts into the installed package.
+  //
+  // Why this is needed: `pnpm add <tarball>` reuses the existing on-disk
+  // install via the content-addressable store when the dependency's
+  // declared version is unchanged, and does not refresh the file
+  // contents inside node_modules/<scope>/<name>/lib/. So a build that
+  // changed src/client/client.js (the panel body) but did not bump the
+  // version leaves DSH running the stale bundle — and the user sees
+  // React errors that have already been fixed in src.
+  //
+  // Copy every artefact `package.json#files` ships (lib/, plus the
+  // three top-level config files) byte-for-byte from PKG_DIR into
+  // node_modules/<bundle>. PKG_DIR is the source of truth: it was the
+  // input to `npm pack` one step earlier, so its contents match what
+  // the user just built.
+  if (!args.dryRun) {
+    const installedDir = join(profileDir, 'node_modules', BUNDLE_NAME);
+    if (existsSync(installedDir)) {
+      // Force-copy one file from PKG_DIR/<rel> into installedDir/<rel>.
+      const forceCopyFile = (rel) => {
+        const src = join(PKG_DIR, rel);
+        const dst = join(installedDir, rel);
+        if (!existsSync(src)) return;
+        copyFileSync(src, dst);
+      };
+      // Force-copy a directory tree from PKG_DIR/<rel> into
+      // installedDir/<rel>, replacing whatever was there. Implemented
+      // in Node (not via cp/xcopy/robocopy) because Windows shell
+      // quoting around paths with spaces makes spawning the system
+      // tools unreliable from Git Bash / cmd.exe.
+      const forceCopyTree = (rel) => {
+        const src = join(PKG_DIR, rel);
+        const dst = join(installedDir, rel);
+        if (!existsSync(src)) return;
+        mkdirSync(dst, { recursive: true });
+        const copyRecursive = (s, d) => {
+          for (const entry of readdirSync(s, { withFileTypes: true })) {
+            const sp = join(s, entry.name);
+            const dp = join(d, entry.name);
+            if (entry.isDirectory()) {
+              mkdirSync(dp, { recursive: true });
+              copyRecursive(sp, dp);
+            } else if (entry.isFile()) {
+              copyFileSync(sp, dp);
+            }
+          }
+        };
+        copyRecursive(src, dst);
+      };
+      // Force-copy everything `package.json#files` ships. The list
+      // mirrors what `npm pack` puts into the tarball; if `files`
+      // changes, update this list too (and test-install-to-dsh.mjs).
+      forceCopyFile('cordis.patch.yml');
+      forceCopyFile('dsh.plugin.json');
+      forceCopyFile('package.json');
+      forceCopyFile('lib/index.js');
+      forceCopyFile('lib/index.d.ts');
+      forceCopyFile('lib/client.js');
+      forceCopyTree('lib/agents/personas');
+      process.stdout.write(`[2b/5] force-refreshed ${BUNDLE_NAME} from the freshly built sources\n`);
+    }
   }
 
   // 3. Register the bundle so DSH's loader resolves the host plugin AND
