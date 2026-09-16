@@ -13,8 +13,8 @@
  *
  * Tool surface: read-only. Implementation is the implementing agent's job.
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export type BrainstormVariation = 'minimal' | 'clean' | 'novel'
 

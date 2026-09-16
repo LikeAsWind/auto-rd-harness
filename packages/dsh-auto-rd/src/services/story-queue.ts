@@ -7,11 +7,11 @@
  * - The orchestrator owns the queue, not the agents.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Config } from '../config'
-import type { AutoRdStorage } from '../domain/storage'
-import type { StoryRecord, StoryState } from '../domain/schema'
-import type { Logger } from '../utils/logger'
-import { StoryRunner } from './story-runner'
+import type { Config } from '../config.js'
+import type { AutoRdStorage } from '../domain/storage.js'
+import type { StoryRecord, StoryState } from '../domain/schema.js'
+import type { Logger } from '../utils/logger.js'
+import { StoryRunner } from './story-runner.js'
 
 export interface StoryQueueDeps {
   storage: AutoRdStorage

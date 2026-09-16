@@ -22,10 +22,10 @@
  */
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Config } from '../config'
-import type { AutoRdStorage } from '../domain/storage'
-import type { Logger } from '../utils/logger'
-import { HttpClient, HttpError } from '../utils/http-client'
+import type { Config } from '../config.js'
+import type { AutoRdStorage } from '../domain/storage.js'
+import type { Logger } from '../utils/logger.js'
+import { HttpClient, HttpError } from '../utils/http-client.js'
 
 export interface TapdPollerDeps {
   storage: AutoRdStorage

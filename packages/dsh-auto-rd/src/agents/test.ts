@@ -7,8 +7,8 @@
  * - V-1: Iron Law Fresh Evidence (obra/verification-before-completion)
  * - V-2: Gate Function (obra/verification-before-completion)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class TestAgent implements AgentSpec {
   readonly name = 'test'

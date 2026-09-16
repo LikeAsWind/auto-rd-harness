@@ -10,8 +10,8 @@
  * The persona markdown lives in `personas/context.md` (loaded at runtime)
  * so we never have to escape backticks inside a TS template literal.
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class ContextAgent implements AgentSpec {
   readonly name = 'context'

@@ -7,8 +7,8 @@
  * - V-3: Common Failures Table (obra/verification-before-completion)
  * - F-1: Re-Run on Integration Tree (obra/finishing-a-development-branch)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class VerificationAgent implements AgentSpec {
   readonly name = 'verification'

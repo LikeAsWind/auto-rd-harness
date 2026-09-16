@@ -12,8 +12,8 @@
  * Tool surface: read + edit + bash. No fs_write (we mutate, not create
  * new files in fix mode). git_commit allowed because TDD commits each fix.
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class FixAgent implements AgentSpec {
   readonly name = 'fix'

@@ -8,8 +8,8 @@
  * - B-4: HARD-GATE (obra/brainstorming)
  * - G-1: Grill Relentlessly Until Every Branch Resolved (mattpocock/grilling)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class ClarificationAgent implements AgentSpec {
   readonly name = 'clarification'

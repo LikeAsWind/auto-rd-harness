@@ -8,8 +8,8 @@
  * - V-1: Iron Law Fresh Evidence (obra/verification-before-completion)
  * - SD-6..SD-7: Final Review + Ledger (obra/subagent-driven-development)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class FinalVerifyAgent implements AgentSpec {
   readonly name = 'final-verify'

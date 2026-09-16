@@ -6,8 +6,8 @@
  * - SD-7: Ledger Cross-Compaction (obra/subagent-driven-development)
  * - PL-7: Execution Handoff (obra/writing-plans)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class DecisionAgent implements AgentSpec {
   readonly name = 'decision'

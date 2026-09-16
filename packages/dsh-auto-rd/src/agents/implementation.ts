@@ -13,8 +13,8 @@
  * context (task_id, files, red/green steps) is passed in the dispatch
  * request's `inputs.task` bag, not interpolated into the persona.
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class ImplementationAgent implements AgentSpec {
   readonly name = 'implementation'

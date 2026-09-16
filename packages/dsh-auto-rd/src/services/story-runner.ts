@@ -21,13 +21,13 @@
  * - SD-7: Ledger Cross-Compaction (every transition is appended to a log)
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Config } from '../config'
-import type { AutoRdStorage } from '../domain/storage'
-import type { StoryRecord, StoryState, TaskRecord } from '../domain/schema'
-import type { Logger } from '../utils/logger'
-import { WorkspaceManager } from './workspace-manager'
-import { AgentProvider } from './agent-provider'
-import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser'
+import type { Config } from '../config.js'
+import type { AutoRdStorage } from '../domain/storage.js'
+import type { StoryRecord, StoryState, TaskRecord } from '../domain/schema.js'
+import type { Logger } from '../utils/logger.js'
+import { WorkspaceManager } from './workspace-manager.js'
+import { AgentProvider } from './agent-provider.js'
+import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -36,8 +36,8 @@ import {
   buildMRDescription,
   projectIdFromRepoUrl,
 } from './gitlab-merger'
-import { syncTapd } from './tapd-poller'
-import { HttpClient } from '../utils/http-client'
+import { syncTapd } from './tapd-poller.js'
+import { HttpClient } from '../utils/http-client.js'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage

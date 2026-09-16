@@ -26,9 +26,9 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { HttpClient } from '../utils/http-client'
-import type { Logger } from '../utils/logger'
-import type { StoryRecord } from '../domain/schema'
+import type { HttpClient } from '../utils/http-client.js'
+import type { Logger } from '../utils/logger.js'
+import type { StoryRecord } from '../domain/schema.js'
 
 const exec = promisify(execFile)
 

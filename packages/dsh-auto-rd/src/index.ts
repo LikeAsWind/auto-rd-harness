@@ -25,15 +25,15 @@
  */
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { ConfigSchema, type Config } from './config'
-import { AutoRdStorage } from './domain/storage'
-import { WorkspaceManager } from './services/workspace-manager'
-import { TapdPoller } from './services/tapd-poller'
-import { AgentProvider } from './services/agent-provider'
-import { StoryRunner } from './services/story-runner'
-import { StoryQueue } from './services/story-queue'
-import { recoverStories } from './services/recover'
-import { Logger } from './utils/logger'
+import { ConfigSchema, type Config } from './config.js'
+import { AutoRdStorage } from './domain/storage.js'
+import { WorkspaceManager } from './services/workspace-manager.js'
+import { TapdPoller } from './services/tapd-poller.js'
+import { AgentProvider } from './services/agent-provider.js'
+import { StoryRunner } from './services/story-runner.js'
+import { StoryQueue } from './services/story-queue.js'
+import { recoverStories } from './services/recover.js'
+import { Logger } from './utils/logger.js'
 
 /**
  * Cordis inject contract.

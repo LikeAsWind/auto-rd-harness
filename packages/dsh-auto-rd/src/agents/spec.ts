@@ -5,8 +5,8 @@
  * - B-8: Spec Self-Review (obra/brainstorming)
  * - PL-5: No Placeholders (obra/writing-plans)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class SpecAgent implements AgentSpec {
   readonly name = 'spec'

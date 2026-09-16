@@ -6,8 +6,8 @@
  * - RC-1..RC-3: Diff Range, Severity Scale, ⚠️ Cannot Verify (obra/requesting-code-review)
  * - SD-5: Two-Stage Review per Task (obra/subagent-driven-development)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class ReviewAgent implements AgentSpec {
   readonly name = 'review'

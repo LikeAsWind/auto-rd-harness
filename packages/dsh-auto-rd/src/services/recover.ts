@@ -21,9 +21,9 @@
  *     is observable through Sessions but not yet wired through this plugin.
  *     Replaying from the current stage is the safe, version-portable move.
  */
-import type { AutoRdStorage } from '../domain/storage'
-import type { Logger } from '../utils/logger'
-import type { StoryState } from '../domain/schema'
+import type { AutoRdStorage } from '../domain/storage.js'
+import type { Logger } from '../utils/logger.js'
+import type { StoryState } from '../domain/schema.js'
 
 const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
   'completed',

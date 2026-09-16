@@ -12,9 +12,9 @@ import { promisify } from 'node:util'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Config } from '../config'
-import type { AutoRdStorage } from '../domain/storage'
-import type { Logger } from '../utils/logger'
+import type { Config } from '../config.js'
+import type { AutoRdStorage } from '../domain/storage.js'
+import type { Logger } from '../utils/logger.js'
 
 const exec = promisify(execFile)
 

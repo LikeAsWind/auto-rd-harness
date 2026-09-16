@@ -6,8 +6,8 @@
  * - RC-2: Severity Scale Critical/Important/Minor (mattpocock/code-review)
  * - RC-4: Reviewer Can Be Wrong (mattpocock/code-review)
  */
-import type { AgentSpec } from './base'
-import { loadPersona } from './persona-loader'
+import type { AgentSpec } from './base.js'
+import { loadPersona } from './persona-loader.js'
 
 export class CriticAgent implements AgentSpec {
   readonly name = 'critic'
