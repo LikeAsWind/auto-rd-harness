@@ -1,0 +1,32 @@
+# Example ~/.dsh/profiles/web/cordis.patch.yml additions for auto-rd
+#
+# Copy this section into your cordis.patch.yml and fill in real values.
+
+- id: auto-rd
+  name: '@yangzhitong/dsh-auto-rd'
+  config:
+    # TAPD API token. Get from TAPD account settings.
+    tapdBaseUrl: 'https://api.tapd.cn'
+    tapdApiToken: '<your-tapd-api-token-here>'
+
+    # GitLab API token. Needs api scope + read_repository + write_repository.
+    gitlabBaseUrl: 'https://gitlab.example.com'
+    gitlabApiToken: '<your-gitlab-api-token-here>'
+
+    # Where to put module clones and story worktrees.
+    workspaceRoot: 'C:/work'
+
+    # Static module-to-repo mapping.
+    modules:
+      - id: payment
+        title: 'Payment Service'
+        repoUrl: 'https://gitlab.example.com/payment/payment-service.git'
+        defaultBranch: 'main'
+      - id: order
+        title: 'Order Service'
+        repoUrl: 'https://gitlab.example.com/order/order-service.git'
+        defaultBranch: 'main'
+
+    # Concurrency limits.
+    maxConcurrentStoriesPerModule: 1
+    maxTotalConcurrentStories: 4

@@ -1,0 +1,49 @@
+# Plugin compose configuration for DSH.
+#
+# Add this row to ~/.dsh/profiles/web/cordis.patch.yml:
+#
+# - id: auto-rd
+#   name: '@yangzhitong/dsh-auto-rd'
+#   config:
+#     <config below>
+#
+# After patching, restart DSH. The plugin will mount on startup.
+name: '@yangzhitong/dsh-auto-rd'
+
+# Default config. Users override in their cordis.patch.yml.
+config:
+  # TAPD integration
+  tapdBaseUrl: 'https://api.tapd.cn'
+  tapdApiToken: ''
+  tapdPollIntervalMs: 60000
+
+  # GitLab integration
+  gitlabBaseUrl: 'https://gitlab.com'
+  gitlabApiToken: ''
+
+  # Workspace
+  workspaceRoot: 'C:/work'
+
+  # Module to repo mapping
+  modules: []
+
+  # Concurrency limits
+  maxConcurrentStoriesPerModule: 1
+  maxTotalConcurrentStories: 4
+
+  # Model selection per role
+  modelSelection:
+    brainstorm: 'sonnet'
+    critic: 'sonnet'
+    decision: 'sonnet'
+    spec: 'sonnet'
+    planner: 'sonnet'
+    implementation: 'haiku'
+    test: 'sonnet'
+    fix: 'sonnet'
+    verification: 'sonnet'
+    review: 'sonnet'
+    finalVerify: 'opus'
+
+  # Logging
+  logLevel: 'info'

@@ -1,0 +1,20 @@
+{
+  "name": "auto-rd-harness",
+  "version": "0.1.0",
+  "description": "Monorepo for TAPD-driven automated R&D pipeline on DeepSeek Harness",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

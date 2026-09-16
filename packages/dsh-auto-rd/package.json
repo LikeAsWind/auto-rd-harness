@@ -1,0 +1,51 @@
+{
+  "name": "@yangzhitong/dsh-auto-rd",
+  "version": "0.1.0",
+  "description": "TAPD-driven automated research & development pipeline for DeepSeek Harness",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "echo 'No tests yet'",
+    "clean": "rm -rf lib *.tsbuildinfo"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "cordis",
+    "auto-rd",
+    "tapd",
+    "gitlab",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^3.22.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-storage-domain": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.10.0"
+  }
+}

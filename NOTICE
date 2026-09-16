@@ -1,0 +1,55 @@
+# Notices and Attributions
+
+This product includes software and design patterns derived from third-party sources.
+
+## obra/superpowers
+
+Source: <https://github.com/obra/superpowers>
+License: MIT
+Copyright: (c) Jesse Vincent and the folks at Prime Radiant
+
+The following Agent personas in this codebase are adapted from specific patterns in obra/superpowers:
+
+| Agent | obra/superpowers Pattern |
+|-------|--------------------------|
+| ContextAgent | using-git-worktrees (Step 0 detect isolation / Step 2 setup / Step 3 verify baseline) |
+| ClarificationAgent | brainstorming (Three Paths / One question at a time / HARD-GATE) |
+| BrainstormAgent | brainstorming (Propose 2-3 approaches / Lead with recommended / YAGNI) |
+| DecisionAgent | subagent-driven-development (Rulings, not stalls) + writing-plans (Execution Handoff) |
+| SpecAgent | brainstorming (Spec self-review) + writing-plans (No Placeholders) |
+| PlannerAgent | writing-plans (File Structure / Task right-sizing / Bite-sized steps / TDD template / No Placeholders / Plan self-review) |
+| ImplementationAgent | test-driven-development (Iron Law) + subagent-driven-development (Fresh subagent / No-subagents contract / Hand artifacts as files) |
+| TestAgent | test-driven-development (Verify RED / Verify GREEN) + verification-before-completion (Fresh evidence / Gate function) |
+| FixAgent | systematic-debugging (Iron Law / Four phases / 3-fix architectural question / Multi-component boundary) + test-driven-development (Never fix bug without test) + subagent-driven-development (5-round fix loop + breaker) |
+| VerificationAgent | verification-before-completion (Fresh evidence / Gate function / Common failures) + finishing-a-development-branch (Re-run on integration tree) |
+| ReviewAgent | requesting-code-review (Diff range / Severity scale / ⚠️ Cannot verify) + subagent-driven-development (Two-stage review) |
+| FinalVerifyAgent | finishing-a-development-branch (Step 1: Verify tests) + verification-before-completion (Fresh evidence gate) + subagent-driven-development (Final Review = broad whole-branch review) |
+
+## mattpocock/skills
+
+Source: <https://github.com/mattpocock/skills>
+License: MIT
+Copyright: (c) Matt Pocock
+
+The following Agent personas are adapted from mattpocock/skills patterns:
+
+| Agent | mattpocock/skills Pattern |
+|-------|---------------------------|
+| ClarificationAgent | grilling (Grill relentlessly until every branch of the design tree is resolved) |
+| CriticAgent | engineering/code-review (Spec axis: line-by-line check) |
+| ReviewAgent | engineering/code-review (Two-axis pattern + Standards axis = repo + Fowler baseline + Spec axis + Fowler 12 smell baseline) |
+| FinalVerifyAgent | engineering/code-review (Two-axis whole-branch + parallel sub-agents) |
+
+## Fowler Code Smells (Reference)
+
+The "Fowler 12 code smell baseline" used in the Standards axis of code review is derived from:
+
+- Martin Fowler, *Refactoring: Improving the Design of Existing Code*, 2nd Edition, Chapter 3.
+
+This is a reference vocabulary, not source code. The 12 smells are: Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Repeated Switches, Shotgun Surgery, Divergent Change, Speculative Generality, Message Chains, Middle Man, Refused Bequest.
+
+## Detailed Mapping
+
+For the complete pattern-by-pattern mapping with citations, see:
+
+[`packages/dsh-auto-rd/src/agents/AGENT-SKILL-MAPPING.md`](./packages/dsh-auto-rd/src/agents/AGENT-SKILL-MAPPING.md)
