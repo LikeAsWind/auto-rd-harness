@@ -132,30 +132,36 @@ auto-rd 是一个**部署级真 Plugin**，作为 DeepSeek Harness 的扩展组�
 ### 2.1 文件组织
 
 ```
-~/.dsh/profiles/web/node_modules/@your-org/dsh-auto-rd/
+~/.dsh/profiles/web/node_modules/@yangzhitong/dsh-auto-rd/
 ├── package.json                    # Node.js 包定义
 ├── tsconfig.json                   # TypeScript 配置
-├── cordis.yml                      # Plugin compose 配置
-├── README.md
-├── lib/                            # 编译产物 (gitignored)
-├── src/                            # TypeScript 源码
+├── cordis.yml                      # Plugin compose 配置（默认 config 块）
+├── README.md                       # 包级说明
+├── agents/
+│   └── AGENT-SKILL-MAPPING.md      # Pattern ↔ Agent 映射
+├── lib/                            # 编译产物 (gitignored，发布时构建)
+├── src/                            # TypeScript 源码（ESM .js 后缀）
 │   ├── index.ts                    # 主入口 apply(ctx, config)
-│   ├── config.ts                   # Config schema (zod)
+│   ├── config.ts                   # Config schema (zod, 16 keys)
 │   │
-│   ├── services/                   # 核心服务
-│   │   ├── tapd-poller.ts          # TAPD 拉取
-│   │   ├── story-queue.ts          # Story 队列 + 调度
-│   │   ├── agent-runner.ts         # Agent 执行器
+│   ├── services/                   # 核心服务（13 个）
+│   │   ├── tapd-poller.ts          # TAPD 拉取 + syncTapd 导出函数
+│   │   ├── story-queue.ts          # Story 队列 + 调度（10s tick）
+│   │   ├── story-runner.ts         # 19-state 状态机 + 5-round breaker
+│   │   ├── agent-provider.ts       # 13 agent dispatch + stub handler
 │   │   ├── workspace-manager.ts    # Workspace + Worktree
-│   │   ├── gitlab-merger.ts        # GitLab MR
-│   │   ├── notifier.ts             # 用户通知
-│   │   └── ui-panel.ts             # Sidebar UI
+│   │   ├── gitlab-merger.ts        # GitLab MR（M4-A 真接）
+│   │   ├── recover.ts              # 跨重启 ACTIVE state → pending
+│   │   ├── story-notifier.ts       # 5s 轮询 blocked → user session
+│   │   ├── ui-panel.ts             # Sidebar UI（JSON tree renderer）
+│   │   ├── system-prompt-section.ts # system prompt section 注册
+│   │   └── planner-parser.ts       # Planner markdown → ParsedPlannerTask[]
 │   │
-│   ├── agents/                     # Agent 模板
+│   ├── agents/                     # Agent 模板（13 + base + persona-loader）
 │   │   ├── base.ts                 # Agent 基类
 │   │   ├── context.ts              # Context Agent
 │   │   ├── clarification.ts        # Clarification Agent
-│   │   ├── brainstorm.ts           # Brainstorm Agent
+│   │   ├── brainstorm.ts           # Brainstorm Agent（3 variations）
 │   │   ├── critic.ts               # Critic Agent
 │   │   ├── decision.ts             # Decision Agent
 │   │   ├── spec.ts                 # Spec Agent
@@ -164,48 +170,73 @@ auto-rd 是一个**部署级真 Plugin**，作为 DeepSeek Harness 的扩展组�
 │   │   ├── test.ts                 # Test Agent
 │   │   ├── fix.ts                  # Fix Agent
 │   │   ├── verification.ts         # Verification Agent
-│   │   ├── review.ts               # Code Review Agent
-│   │   └── final-verify.ts         # Final Verification Agent
+│   │   ├── review.ts               # Review Agent（2 axes parallel）
+│   │   ├── final-verify.ts         # Final Verify Agent（2 axes parallel）
+│   │   ├── persona-loader.ts       # tri 路径 persona 加载
+│   │   └── personas/*.md           # 13 persona markdown
 │   │
-│   ├── domain/                     # 领域模型
-│   │   ├── module.ts               # Module
-│   │   ├── story.ts                # Story + StoryState
-│   │   ├── task.ts                 # Task
-│   │   └── artifact.ts             # Artifact
+│   ├── domain/                     # 领域模型（zod schema v3）
+│   │   ├── schema.ts               # ModuleRecord / StoryRecord / TaskRecord
+│   │   └── storage.ts              # AutoRdStorage wrapper
 │   │
-│   ├── tools/                      # Model-facing tools
+│   ├── tools/                      # Model-facing tools（3）
 │   │   ├── auto-rd-status.ts       # 查看 Story 状态
-│   │   ├── auto-rd-trigger.ts      # 手动触发 Story
-│   │   └── auto-rd-retry.ts        # 手动重试 blocked Story
+│   │   ├── auto-rd-trigger.ts      # 手动触发 Story / mark_reviewed
+│   │   └── auto-rd-retry.ts        # 手动重试 blocked / failed Story
+│   │
+│   ├── types/
+│   │   └── dsh-services.ts         # DSH service 本地 narrow 类型
 │   │
 │   └── utils/
-│       ├── git.ts                  # git 命令封装
-│       ├── http.ts                 # HTTP 客户端
-│       └── logger.ts               # auto-rd 自己的 logger
+│       ├── http-client.ts          # HTTP 客户端（timeout / retry / 错误分类）
+│       └── logger.ts               # auto-rd 自己的 logger（5/60s rate limit）
 │
-└── schemas/                        # 数据 schema (zod)
-    ├── story.ts
-    ├── task.ts
-    └── artifact.ts
+├── scripts/                        # 项目级脚本（test / codemod）
+│   ├── test-planner-parser.mjs     # Planner markdown parser 单元测试
+│   ├── test-m4-fakes.mjs           # M4-A HttpClient / syncTapd / MR 集成测试
+│   ├── test-m5-integration.mjs     # M5 recover / tools / queue / logger 测试
+│   └── audit-patterns.mjs          # AGENT-SKILL-MAPPING ↔ personas 双向审计
+│
+├── docs/architecture/              # 设计文档
+├── examples/cordis.patch.yml.example  # 部署示例
+└── README.md                       # 包级入口
 ```
+
+> 注：实际**没有** `services/agent-runner.ts`（重命名为 `story-runner.ts`），也没有 `services/notifier.ts`（重命名为 `story-notifier.ts`）。`utils/git.ts` 不存在——git 通过 ctx.fs / ctx.shell / ctx.subprocess 直接调，不封装。`schemas/` 子目录是 draft 设想，**实际所有 schema 都集中在 `domain/schema.ts`**。
 
 ### 2.2 package.json
 
 ```json
 {
-  "name": "@your-org/dsh-auto-rd",
+  "name": "@yangzhitong/dsh-auto-rd",
   "version": "0.1.0",
-  "description": "TAPD-driven auto research & development pipeline for DeepSeek Harness",
+  "description": "TAPD-driven automated research & development pipeline for DeepSeek Harness",
   "type": "module",
-  "main": "lib/index.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    ".": "./lib/index.ts"
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
   },
+  "files": [
+    "lib",
+    "cordis.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "scripts": {
-    "build": "tsc -p .",
-    "watch": "tsc -p . --watch",
-    "lint": "tsc --noEmit"
+    "build": "tsc -p tsconfig.json && npm run copy:personas",
+    "copy:personas": "node -e \"...copy src/agents/personas/*.md to lib/agents/personas/...\"",
+    "watch": "tsc -p tsconfig.json --watch",
+    "lint": "tsc --noEmit -p tsconfig.json"
   },
+  "keywords": [
+    "deepseek-harness", "cordis", "auto-rd", "tapd", "gitlab", "ai-agent"
+  ],
+  "license": "MIT",
   "dependencies": {
     "zod": "^3.22.0"
   },
@@ -216,10 +247,25 @@ auto-rd 是一个**部署级真 Plugin**，作为 DeepSeek Harness 的扩展组�
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-storage-domain": "*"
   },
-  "keywords": ["deepseek-harness", "auto-rd", "tapd", "gitlab"],
-  "license": "UNLICENSED"
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis":         { "optional": true },
+    "@deepseek-ai/dsh-agent":      { "optional": true },
+    "@deepseek-ai/dsh-session":    { "optional": true },
+    "@deepseek-ai/dsh-tools":      { "optional": true },
+    "@deepseek-ai/dsh-storage-domain": { "optional": true }
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.10.0",
+    "@deepseek-ai/cordis": "*"
+  }
 }
 ```
+
+> 关键设计点：
+> - 所有 DSH `peerDependencies` 都标 `optional: true`——这是 §7.5 / §13.1 描述的 **best-effort** 模式：DSH 没在装时 plugin 也能编译 / 跑 / 测试
+> - `files` 数组列 `LICENSE` + `NOTICE`——确保发布时 attribution 跟着走（NOTICE 列出 obra/superpowers + mattpocock/skills 来源）
+> - `copy:personas` 脚本把 13 persona markdown 从 `src/` 复制到 `lib/`——personas 是运行时文本资产，不走 TS 编译
 
 ### 2.3 tsconfig.json
 
@@ -236,14 +282,20 @@ auto-rd 是一个**部署级真 Plugin**，作为 DeepSeek Harness 的扩展组�
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "declaration": true,
+    "declarationMap": true,
     "sourceMap": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "emitDecoratorMetadata": true,
+    "lib": ["ES2022"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "lib"]
+  "exclude": ["node_modules", "lib", "**/*.test.ts"]
 }
 ```
 
