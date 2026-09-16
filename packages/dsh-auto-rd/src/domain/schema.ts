@@ -80,6 +80,46 @@ export const ArtifactRefSchema = z.object({
 
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>
 
+/**
+ * Trajectory event — single row in a Story's execution log.
+ *
+ * The trajectory is the canonical conversation/trajectory for a Story.
+ * Every state transition, agent dispatch (input + output), retry,
+ * checkpoint write, and external side effect is appended here so a
+ * later inspection (UI, debugging, post-mortem) can reconstruct the
+ * full execution path without trawling logs.
+ *
+ * Persisted in its own `trajectories` table — separate from stories so
+ * the hot read path (story state) stays cheap and the trajectory can
+ * grow without inflating StoryRecord.
+ */
+export const TrajectoryEventSchema = z.object({
+  id: z.string().describe('ULID/UUID; unique within a story trajectory'),
+  storyId: z.string(),
+  /** Wall-clock ISO timestamp at which the event happened. */
+  at: z.string(),
+  /** High-level category. The runner uses one canonical value per category. */
+  kind: z.enum([
+    'state_transition',
+    'agent_dispatch',
+    'agent_result',
+    'checkpoint_write',
+    'external_side_effect',
+    'recovery',
+    'note',
+  ]),
+  /** Free-form short label; e.g. the from/to state pair, or the agent name. */
+  label: z.string(),
+  /**
+   * Structured payload. The schema is intentionally `unknown` so any
+   * component can append the right shape — the runner never has to
+   * update this schema when a new event kind is added.
+   */
+  payload: z.unknown().optional(),
+})
+
+export type TrajectoryEvent = z.infer<typeof TrajectoryEventSchema>
+
 export const StoryRecordSchema = z.object({
   id: z.string().describe('TAPD story id (primary key)'),
   moduleId: z.string(),
@@ -198,12 +238,20 @@ export type TaskRecord = z.infer<typeof TaskRecordSchema>
  * can `import { z } from 'zod'` directly and pass schemas as-is.
  */
 export const AUTORD_DOMAIN_NAME = 'auto-rd'
-export const AUTORD_DOMAIN_VERSION = 3
+/**
+ * Domain schema version. Bump whenever a table is added, a field's
+ * shape changes, or a field is renamed. storageDomain.open() handles
+ * version mismatches by rebuilding the storage; the recover service
+ * (§10) re-runs after the rebuild so any in-flight stories get a
+ * clean slate to start over.
+ */
+export const AUTORD_DOMAIN_VERSION = 4
 
 export function buildAutoRdDomainTables() {
   return {
     modules: { valueSchema: ModuleRecordSchema },
     stories: { valueSchema: StoryRecordSchema },
     tasks: { valueSchema: TaskRecordSchema },
+    trajectories: { valueSchema: TrajectoryEventSchema },
   } as const
 }

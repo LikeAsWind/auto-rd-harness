@@ -18,6 +18,13 @@
 import { pathToFileURL } from 'node:url'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+function mkTmpDir() {
+  return mkdtempSync(join(tmpdir(), 'auto-rd-m5-'))
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const libBase = resolve(__dirname, '..', 'packages', 'dsh-auto-rd', 'lib')
@@ -55,10 +62,12 @@ function makeFakeStorage(initial = {}) {
   const stories = makeFakeTable(initial.stories ?? [])
   const modules = makeFakeTable(initial.modules ?? [])
   const tasks = makeFakeTable(initial.tasks ?? [])
+  const trajectories = makeFakeTable(initial.trajectories ?? [])
   return {
     stories: () => stories,
     modules: () => modules,
     tasks: () => tasks,
+    trajectories: () => trajectories,
   }
 }
 
@@ -171,6 +180,125 @@ const baseStory = (overrides = {}) => ({
   check(
     'recoverStories logs warn per recovered story',
     logger.lines.filter((l) => l.level === 'warn').length === 2,
+  )
+}
+
+// 1b. TrajectoryRecorder — recovers emit `recovery` events; recovery
+//     leaves terminal states untouched and emits zero events for them.
+{
+  const storage = makeFakeStorage({
+    stories: [
+      baseStory({ id: 'T1', state: 'brainstorm' }),
+      baseStory({ id: 'T2', state: 'spec' }),
+      baseStory({ id: 'T3', state: 'completed' }),
+    ],
+  })
+  const logger = makeFakeLogger()
+  const { TrajectoryRecorder } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'trajectory.js')).href
+  )
+  // TrajectoryRecorder doesn't read from ctx; pass null-equivalent.
+  const trajectory = new TrajectoryRecorder(null, { storage, logger })
+
+  const result = await recoverStories(storage, logger, trajectory)
+  check(
+    'recoverStories with trajectory returns 2 recovered',
+    result.recovered.length === 2,
+    JSON.stringify(result),
+  )
+
+  // Allow the void append() calls to settle.
+  await new Promise((r) => setTimeout(r, 20))
+
+  const events = trajectory.listForStory('T1')
+  check('T1 has exactly 1 trajectory event', events.length === 1, JSON.stringify(events))
+  check(
+    'T1 event kind = recovery',
+    events.length === 1 && events[0].kind === 'recovery',
+  )
+  check(
+    'T1 event label = "brainstorm → pending"',
+    events.length === 1 && events[0].label === 'brainstorm → pending',
+  )
+
+  const eventsT3 = trajectory.listForStory('T3')
+  check(
+    'completed story T3 emits zero trajectory events',
+    eventsT3.length === 0,
+    JSON.stringify(eventsT3),
+  )
+}
+
+// 1c. TrajectoryRecorder.append — every kind accepts payload
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { TrajectoryRecorder } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'trajectory.js')).href
+  )
+  const trajectory = new TrajectoryRecorder(null, { storage, logger })
+
+  await trajectory.append({
+    storyId: 'X',
+    kind: 'state_transition',
+    label: 'context → clarification',
+    payload: { from: 'context', to: 'clarification' },
+  })
+  await trajectory.append({
+    storyId: 'X',
+    kind: 'agent_dispatch',
+    label: 'context: run',
+    payload: { agent: 'context', inputs: { story: { id: 'X' } } },
+  })
+  await trajectory.append({
+    storyId: 'X',
+    kind: 'checkpoint_write',
+    label: 'push branch',
+    payload: { sha: 'abc123' },
+  })
+
+  const events = trajectory.listForStory('X')
+  check('append 3 events all stored', events.length === 3, JSON.stringify(events))
+  check(
+    'events sorted by `at` (chronological)',
+    events.length === 3 &&
+      events[0].at <= events[1].at &&
+      events[1].at <= events[2].at,
+  )
+  check(
+    'payload preserved verbatim',
+    events.length === 3 && events[2].payload?.sha === 'abc123',
+  )
+}
+
+// 1d. TrajectoryRecorder — best-effort: put failure logs warn, returns null
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { TrajectoryRecorder } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'trajectory.js')).href
+  )
+  const trajectory = new TrajectoryRecorder(null, { storage, logger })
+
+  // Override put to throw, mimicking a broken storageDomain.
+  const origPut = storage.trajectories().put
+  storage.trajectories().put = async () => {
+    throw new Error('disk full')
+  }
+
+  const result = await trajectory.append({
+    storyId: 'Y',
+    kind: 'note',
+    label: 'test',
+  })
+  check('append returns null on storage failure', result === null)
+
+  storage.trajectories().put = origPut
+  check(
+    'logger captured the failure',
+    logger.lines.some(
+      (l) => l.level === 'warn' && l.msg.includes('disk full'),
+    ),
   )
 }
 
@@ -648,6 +776,69 @@ function makeConsoleSpy() {
     'snapshot shows 5 emitted + 2 suppressed',
     entry && entry.count === 5 && entry.suppressed === 2,
     JSON.stringify(entry),
+  )
+}
+
+// 25. AgentProvider.dispatch — appends agent_dispatch + agent_result to
+//     trajectory. This is the end-to-end proof that the StoryRunner's
+//     "every agent call is logged" property holds for one specific call.
+{
+  const storage = makeFakeStorage()
+  const logger = makeFakeLogger()
+  const { TrajectoryRecorder } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'trajectory.js')).href
+  )
+  const { AgentProvider } = await import(
+    pathToFileURL(resolve(libBase, 'services', 'agent-provider.js')).href
+  )
+  const { ContextAgent } = await import(
+    pathToFileURL(resolve(libBase, 'agents', 'context.js')).href
+  )
+  const trajectory = new TrajectoryRecorder(null, { storage, logger })
+
+  // DefaultConfig — AgentProvider only requires `logger` and `config`.
+  const config = {
+    tapdApiToken: '', tapdBaseUrl: 'http://x', tapdPollIntervalMs: 60000,
+    tapdWorkspaceIds: [], useTapdMock: true,
+    gitlabApiToken: '', gitlabBaseUrl: 'http://x',
+    gitlabPushUserName: 'a', gitlabPushUserEmail: 'a@b',
+    workspaceRoot: '/tmp', modules: [],
+    maxConcurrentStoriesPerModule: 1, maxTotalConcurrentStories: 1,
+    modelSelection: { brainstorm: 'x', critic: 'x', decision: 'x', spec: 'x',
+      planner: 'x', implementation: 'x', test: 'x', fix: 'x', verification: 'x',
+      review: 'x', finalVerify: 'x' },
+    logLevel: 'info',
+  }
+
+  // Build AgentProvider with a no-op ctx (subagents=null so stub path runs).
+  const provider = new AgentProvider({}, { logger, config, trajectory })
+  // Override the single ContextAgent registration to a deterministic handler.
+  provider.register('context', new ContextAgent(), async () => ({
+    status: 'success', summary: 'mock context',
+  }))
+
+  const artifactsDir = mkTmpDir()
+  const result = await provider.dispatch({
+    agentName: 'context',
+    label: 'context: test',
+    worktreePath: artifactsDir,
+    artifactsDir,
+    inputs: { story: { id: 'DISPATCH-1', title: 't', description: 'd' } },
+  })
+  check('dispatch returns success', result.status === 'success', JSON.stringify(result))
+  await new Promise((r) => setTimeout(r, 30))
+
+  const events = trajectory.listForStory('DISPATCH-1')
+  check('exactly 2 trajectory events for one dispatch', events.length === 2, JSON.stringify(events))
+  check('event[0] kind = agent_dispatch', events[0]?.kind === 'agent_dispatch')
+  check(
+    'event[0] payload.agent = context',
+    events[0]?.payload?.agent === 'context',
+  )
+  check('event[1] kind = agent_result', events[1]?.kind === 'agent_result')
+  check(
+    'event[1] payload.result.status = success',
+    events[1]?.payload?.result?.status === 'success',
   )
 }
 

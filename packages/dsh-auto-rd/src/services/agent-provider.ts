@@ -38,6 +38,7 @@ import { VerificationAgent } from '../agents/verification.js'
 import { ReviewAgent } from '../agents/review.js'
 import { FinalVerifyAgent } from '../agents/final-verify.js'
 import type { AgentSpec } from '../agents/base.js'
+import type { TrajectoryRecorder } from './trajectory.js'
 
 /**
  * Axis parameter for the parallel two-axis review agents. The orchestrator
@@ -92,6 +93,12 @@ interface RegistryEntry {
 export interface AgentProviderDeps {
   logger: Logger
   config: Config
+  /**
+   * Optional TrajectoryRecorder. When present, every dispatch appends
+   * an `agent_dispatch` event with the resolved inputs and (on the
+   * next tick) the handler result. Optional so unit tests can omit it.
+   */
+  trajectory?: TrajectoryRecorder
 }
 
 /**
@@ -247,7 +254,43 @@ export class AgentProvider {
       }
     }
 
-    return handler(req, this.deps)
+    // ---- Trajectory logging ----
+    // Record the dispatch event before running the handler so the
+    // trajectory captures the exact inputs that were sent. The
+    // storyId is read from `req.inputs.story.id` (every agent input
+    // bag carries a story snippet by contract).
+    const storyId = (req.inputs as { story?: { id?: string } } | undefined)?.story?.id
+    if (this.deps.trajectory && storyId) {
+      void this.deps.trajectory.append({
+        storyId,
+        kind: 'agent_dispatch',
+        label: `${spec.name}${req.variation ? `/${req.variation}` : ''}${req.axis ? `/${req.axis}` : ''}${req.taskId ? `/${req.taskId}` : ''}: ${req.label}`,
+        payload: {
+          agent: spec.name,
+          variation: req.variation,
+          axis: req.axis,
+          taskId: req.taskId,
+          toolFilter: spec.toolFilter,
+          inputs: req.inputs,
+          artifactsDir: req.artifactsDir,
+          worktreePath: req.worktreePath,
+        },
+      })
+    }
+
+    const result = await handler(req, this.deps)
+
+    // Record the handler result for the same story.
+    if (this.deps.trajectory && storyId) {
+      void this.deps.trajectory.append({
+        storyId,
+        kind: 'agent_result',
+        label: `${spec.name}${req.variation ? `/${req.variation}` : ''}${req.axis ? `/${req.axis}` : ''}${req.taskId ? `/${req.taskId}` : ''}: ${result.status}`,
+        payload: { agent: spec.name, result },
+      })
+    }
+
+    return result
   }
 
   /**

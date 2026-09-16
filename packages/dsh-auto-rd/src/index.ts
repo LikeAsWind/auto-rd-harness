@@ -34,6 +34,7 @@ import { StoryRunner } from './services/story-runner.js'
 import { StoryQueue } from './services/story-queue.js'
 import { recoverStories } from './services/recover.js'
 import { StoryNotifierService } from './services/story-notifier.js'
+import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
 import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
@@ -115,9 +116,10 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   }
 
   // 3. Services
+  const trajectory = new TrajectoryRecorder(ctx, { storage, logger })
   const workspaceManager = new WorkspaceManager(ctx, { storage, logger, config })
-  const agentProvider = new AgentProvider(ctx, { logger, config })
-  const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider })
+  const agentProvider = new AgentProvider(ctx, { logger, config, trajectory })
+  const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider, trajectory })
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })
   const poller = new TapdPoller(ctx, { storage, logger, config })
   const notifier = new StoryNotifierService(ctx, { storage, logger })
@@ -125,7 +127,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
   // 4. Recover any in-flight stories from a previous run. We do this BEFORE
   // starting timers so StoryQueue picks them up cleanly on its first tick.
   // Fire-and-log; failure here must not block plugin mount.
-  void recoverStories(storage, logger).catch((err) => {
+  void recoverStories(storage, logger, trajectory).catch((err) => {
     logger.error(`[auto-rd] recoverStories failed: ${(err as Error).message}`)
   })
 

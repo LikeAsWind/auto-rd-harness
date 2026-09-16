@@ -38,6 +38,7 @@ import {
 } from './gitlab-merger'
 import { syncTapd } from './tapd-poller.js'
 import { HttpClient } from '../utils/http-client.js'
+import type { TrajectoryRecorder } from './trajectory.js'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage
@@ -45,6 +46,12 @@ export interface StoryRunnerDeps {
   config: Config
   workspaceManager: WorkspaceManager
   agentProvider: AgentProvider
+  /**
+   * Optional TrajectoryRecorder. When present, every state transition
+   * and external side effect (push / MR create / TAPD sync) is
+   * appended so the trajectory is the canonical execution log.
+   */
+  trajectory?: TrajectoryRecorder
 }
 
 interface StageHandler {
@@ -138,6 +145,17 @@ export class StoryRunner {
         // No advancement (e.g., a stage that yielded itself). Stop the loop.
         this.deps.logger.debug(`Story ${storyId} halted at state=${story!.state}`)
         break
+      }
+
+      // ---- Trajectory: record the state transition BEFORE persisting
+      // so the trajectory carries the exact from/to pair the runner saw.
+      if (this.deps.trajectory) {
+        void this.deps.trajectory.append({
+          storyId: story!.id,
+          kind: 'state_transition',
+          label: `${previousState} → ${next}`,
+          payload: { from: previousState, to: next, retryCount: story!.retryCount },
+        })
       }
 
       story!.state = next
@@ -888,6 +906,14 @@ async function runMrCreatingStage(
         `mr_creating: pushed ${story.branch} (sha=${story.pushedSha ?? '<none>'}, up-to-date=${pushResult.alreadyUpToDate})`,
       )
       await stories.put(story.id, story)
+      if (deps.trajectory) {
+        void deps.trajectory.append({
+          storyId: story.id,
+          kind: 'external_side_effect',
+          label: `git push ${story.branch}`,
+          payload: { sha: story.pushedSha, pushedAt: story.pushedAt, alreadyUpToDate: pushResult.alreadyUpToDate },
+        })
+      }
     } catch (err) {
       // Transient — stay in mr_creating, let the next tick retry.
       const msg = (err as Error).message
@@ -938,6 +964,14 @@ async function runMrCreatingStage(
         `mr_creating: ${mr.reused ? 'reused' : 'created'} MR !${mr.mrIid} for ${story.branch}`,
       )
       await stories.put(story.id, story)
+      if (deps.trajectory) {
+        void deps.trajectory.append({
+          storyId: story.id,
+          kind: 'external_side_effect',
+          label: `${mr.reused ? 'reuse' : 'create'} MR !${mr.mrIid}`,
+          payload: { mrIid: mr.mrIid, mrUrl: mr.webUrl, reused: mr.reused, sourceBranch: story.branch, targetBranch: module.defaultBranch },
+        })
+      }
     } catch (err) {
       const msg = (err as Error).message
       // 401 / 403 / 404 on project are config errors — block the story.
@@ -1028,6 +1062,14 @@ async function runTapdSyncingStage(
       story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
       deps.logger.info(`tapd_syncing: synced TAPD story ${story.tapdId}`)
       await deps.storage.stories().put(story.id, story)
+      if (deps.trajectory) {
+        void deps.trajectory.append({
+          storyId: story.id,
+          kind: 'external_side_effect',
+          label: `tapd sync ${story.tapdId}`,
+          payload: { tapdId: story.tapdId, mrUrl: story.mrUrl, syncedAt: story.tapdSyncedAt, attempts: story.tapdSyncAttempts },
+        })
+      }
     } catch (err) {
       story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
       const msg = (err as Error).message

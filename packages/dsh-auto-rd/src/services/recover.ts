@@ -24,6 +24,7 @@
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import type { StoryState } from '../domain/schema.js'
+import type { TrajectoryRecorder } from './trajectory.js'
 
 const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
   'completed',
@@ -35,6 +36,7 @@ const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
 export async function recoverStories(
   storage: AutoRdStorage,
   logger: Logger,
+  trajectory?: TrajectoryRecorder,
 ): Promise<{ recovered: string[] }> {
   const recovered: string[] = []
   const stories = [...storage.stories().values()]
@@ -51,6 +53,16 @@ export async function recoverStories(
     logger.warn(
       `[recover] story ${story.id} was ${previous} — reset to pending for re-dispatch`,
     )
+    // Trajectory: capture the recovery so the post-mortem has a single
+    // place to look for why a story was reset.
+    if (trajectory) {
+      void trajectory.append({
+        storyId: story.id,
+        kind: 'recovery',
+        label: `${previous} → pending`,
+        payload: { previousState: previous, reason: 'plugin restart' },
+      })
+    }
   }
 
   if (recovered.length === 0) {

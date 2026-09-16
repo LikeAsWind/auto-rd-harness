@@ -14,6 +14,7 @@ import {
   type ModuleRecord,
   type StoryRecord,
   type TaskRecord,
+  type TrajectoryEvent,
 } from './schema'
 
 /**
@@ -64,5 +65,13 @@ export class AutoRdStorage {
 
   tasks(): TableApi<TaskRecord> {
     return this.domain.table<TaskRecord>('tasks')
+  }
+
+  /**
+   * Trajectory events for a given story. The full table is keyed by
+   * a ULID/UUID, so consumers filter by `storyId` after listing.
+   */
+  trajectories(): TableApi<TrajectoryEvent> {
+    return this.domain.table<TrajectoryEvent>('trajectories')
   }
 }
