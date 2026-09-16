@@ -1156,23 +1156,37 @@ ${agentCtx.inputArtifact ? formatArtifact(agentCtx.inputArtifact) : 'None'}
 }
 ```
 
-### 6.4 12 个 Agent 列表
+### 6.4 13 个 Agent 列表（真实 tool filter 同步）
 
-| Agent | 工具 Filter | 输入 Artifact | 输出 Artifact | Persona 文件 |
+> 代码源：`packages/dsh-auto-rd/src/agents/*.ts` —— M3 commit (`2c90f2a`) 加了 `git_log` / `git_commit` 到 ImplementationAgent / FixAgent。
+
+| Agent | 工具 Filter（allow list） | 输入 Artifact | 输出 Artifact | Persona 文件 |
 |---|---|---|---|---|
-| ContextAgent | `fs_read, fs_search, fs_glob, web_fetch` | (Story 描述) | context.md | `src/agents/context.ts` |
-| ClarificationAgent | `fs_read, fs_search, fs_glob, web_fetch` | context.md | clarification.md | `src/agents/clarification.ts` |
-| BrainstormAgent | `fs_read, fs_search, fs_glob, web_fetch` | context + clarification | proposal-{1,2,3}.md | `src/agents/brainstorm.ts` |
-| CriticAgent | `fs_read, fs_search, fs_glob` | proposals + clarification | critique.md | `src/agents/critic.ts` |
-| DecisionAgent | `fs_read, fs_search` | proposals + critique | decision.md | `src/agents/decision.ts` |
-| SpecAgent | `fs_read, fs_search, fs_write` | decision + clarification | spec.md | `src/agents/spec.ts` |
-| PlannerAgent | `fs_read, fs_search, fs_write` | spec.md | tasks.md | `src/agents/planner.ts` |
-| ImplementationAgent | `fs_read, fs_search, fs_glob, fs_write, fs_edit, bash, git_status, git_diff` | spec + tasks + 上游 task artifact | impl-{task_id}.md | `src/agents/implementation.ts` |
-| TestAgent | `fs_read, fs_search, fs_glob, fs_write, bash, git_diff, git_log` | spec + impl reports | test-report.md | `src/agents/test.ts` |
-| FixAgent | `fs_read, fs_search, fs_edit, fs_write, bash, git_diff` | test-report (failures) | fix-report.md | `src/agents/fix.ts` |
-| VerificationAgent | `fs_read, fs_search, fs_glob, bash, git_diff, web_fetch` | spec + test report + impl reports | verify-report.md | `src/agents/verification.ts` |
-| ReviewAgent | `fs_read, fs_search, git_diff, git_log, git_show` | spec + diff + all reports | review-report.md | `src/agents/review.ts` |
-| FinalVerifyAgent | `fs_read, fs_search, git_diff, git_log, git_show, git_status` | 所有 artifact + branch state | final-verify-report.md | `src/agents/final-verify.ts` |
+| ContextAgent | `fs_read, fs_search, fs_glob, bash, git_status, git_log, web_fetch` | (Story 描述) | `01-context.md` | `agents/context.ts` |
+| ClarificationAgent | `fs_read, fs_search, fs_glob, web_fetch` | context | `02-clarification.md` | `agents/clarification.ts` |
+| BrainstormAgent × 3 | `fs_read, fs_search, fs_glob, web_fetch` | context + clarification | `03-proposal-{1,2,3}.md` | `agents/brainstorm.ts`（3 variation） |
+| CriticAgent | `fs_read, fs_search, fs_glob` | proposals + clarification | `04-critique.md` | `agents/critic.ts` |
+| DecisionAgent | `fs_read, fs_search` | proposals + critique | `05-decision.md` | `agents/decision.ts` |
+| SpecAgent | `fs_read, fs_search, fs_write` | decision + clarification | `06-spec.md` | `agents/spec.ts` |
+| PlannerAgent | `fs_read, fs_search, fs_write` | spec | `07-tasks.md` | `agents/planner.ts` |
+| ImplementationAgent (per-task) | `fs_read, fs_search, fs_glob, fs_write, fs_edit, bash, git_status, git_diff, git_log, git_commit` | spec + tasks + 上游 task artifact | `08-impl-<taskId>.md` | `agents/implementation.ts` |
+| TestAgent | `fs_read, fs_search, fs_glob, fs_write, bash, git_diff, git_log` | spec + impl reports | `09-test-report.md` | `agents/test.ts` |
+| FixAgent (per-task) | `fs_read, fs_search, fs_edit, fs_write, bash, git_diff, git_log, git_commit` | test-report (failures) | `10-fix-report.md` | `agents/fix.ts` |
+| VerificationAgent | `fs_read, fs_search, fs_glob, bash, git_diff, git_log, web_fetch` | spec + test report + impl reports | `11-verify-report.md` | `agents/verification.ts` |
+| ReviewAgent × 2 axes | `fs_read, fs_search, git_diff, git_log, git_show` | spec + diff + all reports | `12-review-<taskId>-<axis>.md` | `agents/review.ts`（`standards` + `spec`） |
+| FinalVerifyAgent × 2 axes | `fs_read, fs_search, git_diff, git_log, git_show, git_status, bash` | 所有 artifact + branch state | `13-final-verify-<axis>.md` | `agents/final-verify.ts` |
+
+**M3 调整说明**：
+- ImplementationAgent 加 `git_log` + `git_commit`：让 impl agent 可以查历史 commit（避免重复实现）+ 自己提交
+- FixAgent 同样加 `git_log` + `git_commit`：fix 后必须 commit
+- ContextAgent 加 `bash` + `git_status + git_log`：context 调查需读 git 历史
+- VerificationAgent 加 `git_log`：对照 commit 历史确认 verify 跑过
+- FinalVerifyAgent 加 `bash`：需要 fresh re-run 命令（V-1~V-3）
+
+**关键不变式**：
+- **没有 agent 有 `subagent_*` 工具**——SD-3 契约：spec 层禁止 spawn 其它子 agent
+- **没有 agent 有 `web_registerFetchProvider` / `ctx.manage.subagent`**——非 M5 阶段用不到
+- **写权限**只在 spec / planner / impl / test / fix 这 5 个 agent
 
 ### 6.5 Agent 设计原则（基于 DSH 真实机制）
 
