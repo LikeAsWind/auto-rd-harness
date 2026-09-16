@@ -32,10 +32,28 @@ export const ConfigSchema = z.object({
   tapdBaseUrl: z.string().url().default('https://api.tapd.cn'),
   tapdApiToken: z.string().describe('TAPD API token. Required to fetch stories.'),
   tapdPollIntervalMs: z.number().int().positive().default(60_000),
+  /**
+   * TAPD workspace_id. Required when useMock=false. Multiple workspaces can
+   * be polled by providing a comma-separated list (the poller iterates).
+   */
+  tapdWorkspaceIds: z.array(z.string()).default([]),
+  /**
+   * When true, the poller returns the local MOCK_TAPD_FIXTURE instead of
+   * calling TAPD. Useful for offline development and the test suite.
+   * Default false: production deployments must hit real TAPD.
+   */
+  useTapdMock: z.boolean().default(false),
 
   // GitLab integration
   gitlabBaseUrl: z.string().url().default('https://gitlab.com'),
   gitlabApiToken: z.string().describe('GitLab API token with api scope.'),
+  /**
+   * Optional override for git's HTTP user-agent when pushing. Some GitLab
+   * setups want a specific identity in the commit author line; default
+   * 'auto-rd' is fine for most.
+   */
+  gitlabPushUserName: z.string().default('auto-rd'),
+  gitlabPushUserEmail: z.string().default('auto-rd@example.com'),
 
   // Workspace
   workspaceRoot: z.string().describe('Absolute path where module repos are cloned.'),
