@@ -1355,52 +1355,114 @@ export const ContextAgent: AgentSpec = {
 
 ---
 
-## 7. UI 表面（M4-UI 落地）
+## 7. UI 表面
 
-> 本章与 first commit draft **显著不同**：
-> - Sidebar 用 **JSON tree renderer**（不依赖 React runtime）
-> - Notifier 用 **5s 轮询 storage**（不是 Cordis event）
-> - 加 **System Prompt section**（让模型知道 auto-rd 工具）
-> - 加 **3 个 model-callable tool**：`auto_rd_status` / `auto_rd_trigger` / `auto_rd_retry`
-> - 所有 DSH UI 服务**best-effort** —— `ctx.get('slots')` 拿不到就 warn + skip
+> **2026-09 修订：§7.1 的原设计与真实平台冲突，已按验证结果重写。**
+>
+> 原 §7.1 声称 host 进程可以 `ctx.get('slots')` 并向 `sidebar.worktable.project`
+> 注册一个返回「JSON tree」的 renderer。用 Cordis Inspect 对真实运行时核验后，
+> 这两点**都不成立**：
+>
+> - **host service catalog 里没有 `slots`**。`slots` 只存在于 client realm。
+> - list slot 的注册元数据只有 `{ id, order?, label? }`，**没有 renderer 参数**；
+>   slot 的 cell 是一个 **React 组件**，接收 ownerProps 与注入的 hooks。
+>   对 `sidebar.panellist`（"Global panel icons. Each list id addresses the
+>   matching main panel"），ownerProps 是
+>   `SidebarPanelIconOwnerProps { size: number; active: boolean }`。
+>   也不存在任何「JSON element tree」协议。
+>
+> 因此 §7.1 的 host 侧 sidebar 面板**在架构上不可能实现**，原实现里那个
+> 第三个 `register()` 参数是无效的。本节保留原设计**意图**（模块/Story 可见、
+> 状态徽标、MR 链接、best-effort 降级），改用平台真实机制描述。
+>
+> 其余小节（§7.2 notifier、§7.3 tools、§7.4 system prompt）经核验**成立**，
+> 但字段名有误，已在 §7.4 更正。
 
-### 7.1 Sidebar 面板（真实实现）
+### 7.1 UI 分层：host 提供数据，client 负责渲染
 
-代码：`packages/dsh-auto-rd/src/services/ui-panel.ts`，在 `services/ui-panel.ts: registerAutoRdPanel()` 注册到 `sidebar.worktable.project` slot。
+真实机制分两层：
 
-**关键设计点**：
+| 层 | 能力 | 本插件的落地 |
+|---|---|---|
+| host（Node） | 读写 storageDomain、注册 tool、注册 prompt section | ✅ 已实现（`ui-panel.ts` 的纯数据投影 + 3 个 tool） |
+| client（浏览器） | 注册 slot、渲染 React cell | ⏳ **未实现——见下方阻塞原因** |
 
-1. **Renderer 返回 JSON tree，不依赖 React**：
-   ```typescript
-   type PanelNode =
-     | { type: 'div' | 'span' | 'h4' | 'ul' | 'li' | 'small'; props?: ...; children: PanelNode[] }
-     | { type: 'a'; props: { href: string; target?: string }; children: PanelNode[] }
-     | string
-   ```
-   DSH client side 拿到这个树后转译成 React.createElement 调用，**plugin host 进程不需要 React**——避免在 Node 进程跑 React 的开销
+**host 侧已实现且已验证的部分**（`services/ui-panel.ts`）：
 
-2. **Pure function over storage read**：每次 DSH 重渲染时都重新读 storage，**不缓存**（DSH storage 已经提供变化通知）
+1. **`buildPanelModel(storage)`** —— 纯函数数据投影：
+   按 module 分组、`updatedAt` 倒序、每模块上限 `PANEL_STORY_LIMIT = 10`、
+   计算 `overflow`、统计 `inFlight / blocked / completed / failed` 总数。
+   不依赖 React，可单测（34 条断言，见 `scripts/test-ui-panel.mjs`）。
 
-3. **State badge 字符**：
+2. **`renderPanelText(model)`** —— 同一份数据的纯文本渲染。这是 host **能**
+   产出的形态，也是 `auto_rd_status` tool 返回的内容，所以即使没有 client
+   插件，这些信息仍可从对话里取得。
+
+3. **State badge 字符**（`stateBadge()`）：
    - `\u2713` ✓ completed
    - `\u2717` ✗ failed
    - `\u26A0` ⚠ blocked
    - `\u21BB` ↻ active (implementing/testing/fixing/...)
    - `\u00B7` · pending
 
-4. **最多 10 stories per module**：溢出显示 `+N more (use auto_rd_status to query)`，sidebar 不无限滚
+4. **MR 链接**：`renderPanelText()` 在 `mrUrl` 非空时输出
+   `[MR](<mrUrl>)`，client 侧应渲染为 `<a href={mrUrl} target="_blank">`。
 
-5. **每行可点击 MR link**：mrUrl 非空时渲染 `<a href={mrUrl} target="_blank">[MR]</a>`
+5. **best-effort 降级**：`registerAutoRdPanel()` 探测 host 是否意外出现
+   `slots` service；无论结果如何都**不会**从 host 注册面板，而是记录一条
+   精确的日志，说明该面板属于 client 侧贡献。插件其余功能完全不受影响。
 
-6. **Best-effort 容错**：
-   ```typescript
-   const slots = ctx.get('slots') as SlotsService | undefined
-   if (!slots) {
-     ctx.logger('auto-rd').warn('slots service not available; sidebar will not register')
-     return false
-   }
-   ```
-   standalone build（无 DSH）下，sidebar 不渲染但 plugin 其余功能全活
+**client 侧坐标**（供 client 贡献使用，已从 `ui-panel.ts` 导出）：
+
+```typescript
+export const CLIENT_PANEL_SLOT  = 'sidebar.panellist'   // list slot
+export const CLIENT_PANEL_ID    = 'auto-rd-modules'     // 同时是 main keyed slot 的 key
+export const CLIENT_PANEL_ORDER = 100
+export const CLIENT_PANEL_LABEL = 'Auto-RD'
+```
+
+`sidebar.panellist` 的语义是「每个 list id 对应一个 main panel」，所以用同一个
+`id` 注册即同时得到 sidebar 按钮与 main 面板。
+
+**⏳ 为什么 client 半尚未实现（这是唯一剩余的功能缺口）**
+
+真实平台确实支持 client 贡献：host 有 `clientModules` service
+（"incremental `dsh.client` scan + wire composition + bundle route + index
+injection rows"），其 `WebBootGraph` 条目形状为：
+
+```typescript
+interface WebBootEntry {
+  id: string            // = package name
+  url: string           // client bundle URL
+  rev: string
+  inject?: string[]
+  immediately?: boolean
+  external?: string[]
+}
+```
+
+**但 `dsh.client` 这个 package.json 字段的确切形状，在当前环境中无法确定**：
+DSH 发行包只带 `lib/` 里的 bundled launcher，没有 client 扫描的源码；README
+未记录；已装依赖里没有可参考的 client 包（`dsh-client-ui-*` 都在 dsh 的
+dependency 列表里但未以独立目录安装）。
+
+本次会话已经证明「猜 API 形状」的代价：host 侧四个 service 的假设形状里，
+`open()` 是否 async、`KvTable` 是否有 `values()`、slot 注册参数、prompt
+section 字段名**全都是错的**，其中三个会导致插件根本无法 mount。
+
+而且 `clientModules` 的失败模式很重：
+> "a malformed declaration or missing bundle among the already-loaded entries
+> aggregates into one loud throw (**FAILED fiber**; the boot activation audit
+> reports it)"
+
+即：**一个形状猜错的 `dsh.client` 声明可能让整个 GUI 启动失败。**
+
+因此这里刻意**不**提交一个无法验证的 client bundle。正确做法是先用真实环境
+确认 `dsh.client` 形状，再实现——而不是再猜一次并把风险转嫁给用户的 GUI。
+
+**解除阻塞所需**：一台能 `pnpm run dev:web` 的 DSH 源码环境，或任一已装
+client 插件（`@deepseek-ai/dsh-client-ui-cordis` 等）的 `package.json`，
+用来读出 `dsh.client` 的字段形状。
 
 ### 7.2 StoryNotifier（轮询模式）
 
@@ -1498,7 +1560,21 @@ priority: 'background'——不打断用户当前对话
 
 ### 7.4 System Prompt Section
 
-文件：`services/system-prompt-section.ts`，id `auto-rd-overview`，order 50
+文件：`services/system-prompt-section.ts`，`name` = `auto-rd-overview`，`order` = 50
+
+> **字段名已更正（2026-09）**：真实 `PromptSection` 是
+> ```typescript
+> interface PromptSection {
+>   readonly name: string                                              // 不是 id
+>   readonly order: number
+>   readonly text: string | ((context: AssembleContext) => string)     // 不是 content
+>   readonly complete?: boolean
+> }
+> ```
+> 早先实现传的是 `{ id, order, content }`，service 收到的是 undefined 的
+> name 与 undefined 的 body —— 这段 prompt **从未真正注册成功**，模型也就
+> 不会知道这三个工具的存在。`section()` 返回精确的 Cordis effect disposer；
+> 重名或非有限 order 会 throw，因此调用点用 try/catch 包住并降级为一条 error 日志。
 
 注入内容（截短）：
 
@@ -1523,25 +1599,47 @@ auto-rd or a story has just transitioned to blocked.
 
 ### 7.5 真实 DSH Service 接口（本地 narrow 类型）
 
-Cordis 包**不**暴露 slots / tools / systemPrompt / sessions —— 这些是 DSH 进程注入。代码用**本地 narrow 类型**（`src/types/dsh-services.ts`）+ `ctx.get('xxx') as Service | undefined`，避免 import `@deepseek-ai/dsh-*` 包
+Cordis 包**不**暴露 storageDomain / tools / systemPrompt / subagents —— 这些由 DSH 进程注入。代码用**本地 narrow 类型**（`src/types/dsh-services.ts`）+ `ctx.get('xxx') as Service | undefined`，避免 import `@deepseek-ai/dsh-*` 包。
+
+**这些类型不是猜测**：每一个都通过 Cordis Inspect 的 host `Service` provider 从真实运行时读出并裁剪到本插件实际调用的成员。维护时应以该来源为准，而不是以调用点的假设为准。
 
 ```typescript
-// src/types/dsh-services.ts
-export interface SlotsService {
-  register(slot: string, entry: {...}, renderer: SlotRenderer): () => void
+// src/types/dsh-services.ts（验证后的形状，节选）
+export interface StorageDomainService {
+  open(spec: DomainSpec): Promise<Domain>      // 异步！且同名 domain 重复 open 会 reject
 }
-export interface ToolsService {
-  register(tool: ToolDefinition): () => void
+export interface KvTable<K extends string, V> {
+  get(key: K): V | undefined
+  entries(): IterableIterator<[K, V]>          // 没有 values()
+  keys(): IterableIterator<K>
+  readonly size: number
+  put(key: K, value: V): Promise<void>
+  delete(key: K): Promise<boolean>
+  update(key: K, fn: (current: V) => V): Promise<V>
 }
-export interface SystemPromptService {
-  section(section: SystemPromptSection): void
+export interface ToolDefinition {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  output: ToolOutputDefinition                 // 必填！缺了 register 会 reject
+  execute(args: unknown, exec?: unknown): Promise<unknown>
+}
+export interface PromptSection {
+  readonly name: string                        // 不是 id
+  readonly order: number
+  readonly text: string | ((context: unknown) => string)   // 不是 content
+  readonly complete?: boolean
 }
 export interface SubagentsService {
-  sendMessage(agentName: string, sessionId: string, content: ..., options?: ...): Promise<unknown>
+  sendMessage(sender: AgentRef, targetId: string, content: ..., options?: ...): Promise<unknown>
+  //           ^^^^^^^^^^^^^ Agent，不是 provider 名字符串
+}
+export interface SessionsService {
+  list(): SessionRef[]                         // 不接受参数
 }
 ```
 
-**为什么不 import DSH 包**：plugin 在 standalone build（CI / 测试）下也需要编译通过。DSH 是私有部署包，import 会失败。窄类型**保留 local compile + runtime contract enforcement by DSH service**
+**为什么不 import DSH 包**：plugin 在 standalone build（CI / 测试）下也需要编译通过。DSH 是私有部署包，import 会失败。窄类型保留 local compile；真实契约由上面的核验流程负责维护。
 
 ---
 
