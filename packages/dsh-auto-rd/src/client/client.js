@@ -277,7 +277,7 @@ window.__ModuleLoader__.load({
             )
           }),
         ),
-        ReconfigureForm({ issues: issues, onApplied: onApplied, lastResult: lastResult }),
+        h(ReconfigureForm, { issues: issues, onApplied: onApplied, lastResult: lastResult }),
       )
     }
 
@@ -581,7 +581,7 @@ window.__ModuleLoader__.load({
           },
         },
         h('h3', { style: { margin: '0 0 4px', fontSize: 15 } }, 'Auto-RD Pipeline'),
-        health ? HealthStrip(health) : null,
+        health ? h(HealthStrip, { health: health }) : null,
         totals
           ? h(
               'div',
@@ -606,7 +606,7 @@ window.__ModuleLoader__.load({
         // list; the user always sees a clear list of what to fix AND a
         // textarea to apply a fix in-place without restarting DSH.
         health && health.setupRequired
-          ? SetupChecklist({ issues: health.issues, onApplied: applyBody, lastResult: lastResult })
+          ? h(SetupChecklist, { issues: health.issues, onApplied: applyBody, lastResult: lastResult })
           : null,
         panel.status === 'error'
           ? h(
@@ -712,4 +712,4 @@ window.__ModuleLoader__.load({
 
     return module
   },
-})
+})// MARKER: 1789576198
