@@ -92,9 +92,9 @@ export function autoRdRetryTool(deps: AutoRdRetryToolDeps) {
         story.state = 'pending'
         // retryCount untouched on purpose.
       } else {
-        // skip
+        // skip — reason is code-prefixed per the runner's convention (§12.1).
         story.state = 'failed'
-        story.blockedReason = `Skipped via auto_rd_retry${noteSuffix}`
+        story.blockedReason = `retry: skipped via auto_rd_retry${noteSuffix}`
       }
 
       story.updatedAt = now

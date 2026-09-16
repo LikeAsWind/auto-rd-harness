@@ -58,6 +58,22 @@ interface StageHandler {
 }
 
 /**
+ * Blocked / failed reason convention (design §12.1).
+ *
+ * Every `blockedReason` and `task.blockedReason` the runner writes starts
+ * with a lowercase stage code and a colon, then human-readable detail:
+ *
+ *   clarification: 3 blocking question(s): What are the acceptance criteria?
+ *   fixing: 5-round breaker tripped after 5 attempts on task T001
+ *   mr_creating: GitLab rejected the request (config error): 403 ...
+ *
+ * The prefix is what the human-recovery tools and the notifier key off, so
+ * it must stay a stable identifier rather than prose. Stage codes in use:
+ * `runner`, `clarification`, `critic`, `spec`, `planning`, `implementing`,
+ * `fixing`, `verifying`, `mr_creating`, `tapd_syncing`.
+ */
+
+/**
  * Stage dispatch table.
  *
  * Every state has a handler. The deterministic handlers produce real
@@ -113,7 +129,7 @@ export class StoryRunner {
       const handler = STAGE_HANDLERS[story!.state]
       if (!handler) {
         story!.state = 'failed'
-        story!.blockedReason = `No handler for state ${story!.state}`
+        story!.blockedReason = `runner: no handler for state ${story!.state}`
         story!.updatedAt = new Date().toISOString()
         await stories.put(story!.id, story!)
         break
@@ -127,7 +143,7 @@ export class StoryRunner {
         story!.retryCount += 1
         if (story!.retryCount >= 3) {
           story!.state = 'failed'
-          story!.blockedReason = `Stage ${previousState} failed 3 times: ${(err as Error).message}`
+          story!.blockedReason = `runner: stage ${previousState} failed 3 times: ${(err as Error).message}`
         } else {
           // Stay in the same state and let StoryQueue retry.
           this.deps.logger.warn(
@@ -271,7 +287,7 @@ async function runClarificationAgent(
 
   if (result.status === 'blocked') {
     // HARD-GATE (B-4): unresolved questions park the story in `blocked`.
-    story.blockedReason = `Clarification blocked: ${result.reason}`
+    story.blockedReason = `clarification: ${result.reason}`
     deps.logger.warn(`ClarificationAgent blocked story ${story.id}: ${result.reason}`)
     return 'blocked'
   }
@@ -367,7 +383,7 @@ async function runCriticAgent(
 
   if (result.status === 'blocked') {
     // CRITIQUE_BLOCKED: a systemic gap surfaced, roll back to clarification.
-    story.blockedReason = `Critic blocked — rolling back: ${result.reason}`
+    story.blockedReason = `critic: rolling back — ${result.reason}`
     deps.logger.warn(`CriticAgent blocked story ${story.id}: ${result.reason}`)
     return 'clarification'
   }
@@ -420,7 +436,7 @@ async function runSpecAgent(
   })
 
   if (result.status === 'blocked') {
-    story.blockedReason = `Spec blocked: ${result.reason}`
+    story.blockedReason = `spec: ${result.reason}`
     deps.logger.warn(`SpecAgent blocked story ${story.id}: ${result.reason}`)
     return 'blocked'
   }
@@ -470,13 +486,13 @@ async function runPlanningStage(
     const markdown = readFileSync(tasksPath, 'utf-8')
     parsed = parsePlannerMarkdown(markdown)
   } catch (err) {
-    story.blockedReason = `Planning: failed to read 07-tasks.md: ${(err as Error).message}`
+    story.blockedReason = `planning: failed to read 07-tasks.md: ${(err as Error).message}`
     deps.logger.error(`Planning: cannot read 07-tasks.md for story ${story.id}: ${story.blockedReason}`)
     return 'blocked'
   }
 
   if (parsed.length === 0) {
-    story.blockedReason = `Planning: planner produced zero tasks in 07-tasks.md`
+    story.blockedReason = `planning: planner produced zero tasks in 07-tasks.md`
     deps.logger.error(`Planning: zero tasks for story ${story.id}`)
     return 'blocked'
   }
@@ -559,7 +575,7 @@ async function runImplementingStage(
     if (anyBlocked || anyFailed) {
       // Surface upstream blocker.
       const blockedTask = allTasks.find((t) => t.status === 'blocked' || t.status === 'failed')
-      story.blockedReason = `Implementing: task ${blockedTask?.id} ${blockedTask?.status}: ${blockedTask?.blockedReason ?? 'unknown'}`
+      story.blockedReason = `implementing: task ${blockedTask?.id} ${blockedTask?.status}: ${blockedTask?.blockedReason ?? 'unknown'}`
       return 'blocked'
     }
     // All completed.
@@ -592,7 +608,7 @@ async function runImplementingStage(
     } else if (result.status === 'blocked') {
       task.status = 'blocked'
       task.blockedReason = result.reason
-      story.blockedReason = `Implementing: task ${task.id} blocked — ${result.reason}`
+      story.blockedReason = `implementing: task ${task.id} blocked — ${result.reason}`
       await tasks.put(task.id, task)
       return 'blocked'
     } else {
@@ -663,7 +679,7 @@ async function runFixingStage(
   // SD-4 5-round breaker: if any task has tried >= 5 times, park the story.
   const totalAttempts = storyTasks.reduce((acc, t) => acc + t.attemptCount, 0)
   if (totalAttempts >= 5) {
-    story.blockedReason = `Fixing: 5-round breaker tripped after ${totalAttempts} attempts on task ${target.id}`
+    story.blockedReason = `fixing: 5-round breaker tripped after ${totalAttempts} attempts on task ${target.id}`
     deps.logger.warn(`Fixing: breaker tripped for story ${story.id}`)
     return 'blocked'
   }
@@ -688,7 +704,7 @@ async function runFixingStage(
     target.status = 'blocked'
     target.blockedReason = result.reason
     await tasks.put(target.id, target)
-    story.blockedReason = `Fixing: task ${target.id} blocked — ${result.reason}`
+    story.blockedReason = `fixing: task ${target.id} blocked — ${result.reason}`
     return 'blocked'
   }
   if (result.status !== 'success') {
@@ -738,7 +754,7 @@ async function runVerifyingStage(
   })
 
   if (result.status === 'blocked') {
-    story.blockedReason = `Verifying: ${result.reason}`
+    story.blockedReason = `verifying: ${result.reason}`
     deps.logger.warn(`VerificationAgent blocked story ${story.id}: ${result.reason}`)
     return 'blocked'
   }

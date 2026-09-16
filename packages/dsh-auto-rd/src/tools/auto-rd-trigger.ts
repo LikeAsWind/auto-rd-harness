@@ -159,13 +159,14 @@ export function autoRdTriggerTool(deps: AutoRdTriggerToolDeps) {
         story.blockedReason = undefined
         story.retryCount = 0
       } else if (args.decision === 'request_changes') {
-        story.blockedReason = `Human review requested changes${noteSuffix}`
+        // Reasons are code-prefixed per the runner's convention (§12.1).
+        story.blockedReason = `review: requested changes${noteSuffix}`
         // State stays as-is; runner will see blockedReason and route.
       } else {
         // skip -> terminal failed state. The user opted out; we record
         // the reason and stop processing.
         story.state = 'failed'
-        story.blockedReason = `Skipped by human review${noteSuffix}`
+        story.blockedReason = `review: skipped by human${noteSuffix}`
       }
       story.updatedAt = now
       await deps.storage.stories().put(story.id, story)
