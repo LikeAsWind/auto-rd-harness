@@ -19,6 +19,7 @@ import { z } from 'zod'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import { StoryStateSchema, type StoryRecord, type TaskRecord } from '../domain/schema.js'
+import { jsonOutput } from './tool-output.js'
 
 const ParametersSchema = z.object({
   scope: z.enum(['stories', 'tasks', 'summary']).default('summary'),
@@ -35,13 +36,16 @@ export interface AutoRdStatusToolDeps {
 }
 
 /**
- * Build the tool definition. The shape follows `ToolsService.register`
- * from src/types/dsh-services.ts: name, description, parameters (JSON
- * Schema), execute.
+ * Build the tool definition. The shape follows the VERIFIED
+ * `ToolDefinition` contract: name, description, parameters (JSON
+ * Schema), a REQUIRED `output` definition, and execute.
+ *
+ * `output.render` is not optional — a definition without it is rejected
+ * by `tools.register()`, so the tool would never reach the model.
  *
  * The execute body parses `args` through zod (so DSH can pass either
- * raw JSON or already-typed objects) and returns a plain JSON object.
- * DSH serializes the return back into the model's context.
+ * raw JSON or already-typed objects) and returns a plain JSON object,
+ * which `output.render` pretty-prints.
  */
 export function autoRdStatusTool(deps: AutoRdStatusToolDeps) {
   return {
@@ -71,6 +75,20 @@ export function autoRdStatusTool(deps: AutoRdStatusToolDeps) {
         },
       },
     },
+    output: jsonOutput({
+      properties: {
+        ok: { type: 'boolean' },
+        scope: { type: 'string' },
+        totalStories: { type: 'number' },
+        byState: { type: 'object', additionalProperties: { type: 'number' } },
+        activeModules: { type: 'number' },
+        pendingTasks: { type: 'number' },
+        count: { type: 'number' },
+        stories: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        tasks: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        error: { type: 'string' },
+      },
+    }),
     async execute(rawArgs: unknown) {
       const parsed = ParametersSchema.safeParse(rawArgs ?? {})
       if (!parsed.success) {

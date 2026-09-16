@@ -25,6 +25,7 @@
     "test:design": "node scripts/test-design-loop.mjs",
     "test:storage": "node scripts/test-storage-adapter.mjs",
     "test:ui": "node scripts/test-ui-panel.mjs",
+    "test:tools": "node scripts/test-tool-contract.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
   },

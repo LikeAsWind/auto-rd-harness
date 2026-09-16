@@ -27,6 +27,7 @@
 import { z } from 'zod'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
+import { jsonOutput } from './tool-output.js'
 
 const ParametersSchema = z.object({
   storyId: z.string().min(1),
@@ -58,6 +59,16 @@ export function autoRdRetryTool(deps: AutoRdRetryToolDeps) {
         note: { type: 'string' },
       },
     },
+    output: jsonOutput({
+      properties: {
+        ok: { type: 'boolean' },
+        storyId: { type: 'string' },
+        action: { type: 'string' },
+        previousState: { type: 'string' },
+        newState: { type: 'string' },
+        error: { type: 'string' },
+      },
+    }),
     async execute(rawArgs: unknown) {
       const parsed = ParametersSchema.safeParse(rawArgs ?? {})
       if (!parsed.success) {

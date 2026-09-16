@@ -124,18 +124,40 @@ export interface SessionsService {
 
 // ---- tools -----------------------------------------------------------
 
+/** A content block as it appears in a message or a rendered tool result. */
+export type ContentBlock = { readonly type: string; readonly [key: string]: unknown }
+
+/**
+ * How a tool's return value is described to, and rendered for, the model.
+ *
+ * This is REQUIRED on ToolDefinition. Omitting it makes
+ * `tools.register()` reject the definition, so a tool that only declares
+ * name/description/parameters/execute silently never appears.
+ */
+export interface ToolOutputDefinition {
+  /** JSON Schema for the value returned by `execute`. */
+  readonly schema: Record<string, unknown>
+  render(args: unknown, value: unknown): ContentBlock[]
+  presentationMeta?(args: unknown, value: unknown): unknown
+}
+
 export interface ToolDefinition {
   name: string
   description: string
   /** JSON Schema describing the parameters. */
   parameters: Record<string, unknown>
-  execute: (args: any, exec?: unknown) => Promise<unknown>
+  /** Required output contract; see ToolOutputDefinition. */
+  output: ToolOutputDefinition
+  execute(args: unknown, exec?: unknown): Promise<unknown>
+  timeoutMs?: number
+  isConcurrencySafe?(args: unknown): boolean
 }
 
 export interface ToolsService {
+  /** Returns the exact disposer that unregisters the tool. */
   register(definition: ToolDefinition): () => void
-  get(name: string, scope?: string): ToolDefinition | undefined
-  restrict(filter: unknown): () => void
+  get(name: string, scope?: unknown): ToolDefinition | undefined
+  restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
 }
 
 // ---- systemPrompt ----------------------------------------------------

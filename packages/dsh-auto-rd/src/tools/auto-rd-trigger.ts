@@ -24,6 +24,7 @@
 import { z } from 'zod'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
+import { jsonOutput } from './tool-output.js'
 
 const ParametersSchema = z.discriminatedUnion('action', [
   z.object({
@@ -87,6 +88,17 @@ export function autoRdTriggerTool(deps: AutoRdTriggerToolDeps) {
         note: { type: 'string', description: 'Optional reviewer note.' },
       },
     },
+    output: jsonOutput({
+      properties: {
+        ok: { type: 'boolean' },
+        action: { type: 'string' },
+        storyId: { type: 'string' },
+        decision: { type: 'string' },
+        polled: { type: 'number' },
+        enqueued: { type: 'number' },
+        error: { type: 'string' },
+      },
+    }),
     async execute(rawArgs: unknown) {
       const parsed = ParametersSchema.safeParse(rawArgs ?? {})
       if (!parsed.success) {

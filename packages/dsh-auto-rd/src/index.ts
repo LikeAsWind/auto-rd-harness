@@ -40,7 +40,7 @@ import { registerAutoRdPromptSection } from './services/system-prompt-section.js
 import { autoRdStatusTool } from './tools/auto-rd-status.js'
 import { autoRdTriggerTool } from './tools/auto-rd-trigger.js'
 import { autoRdRetryTool } from './tools/auto-rd-retry.js'
-import type { ToolsService, StorageDomainService } from './types/dsh-services.js'
+import type { ToolsService, StorageDomainService, ToolDefinition } from './types/dsh-services.js'
 import { Logger } from './utils/logger.js'
 
 /**
@@ -177,37 +177,55 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     }
   }, 'auto-rd:timers')
 
-  // 6. Register UI surface (slots / prompt section) and tools. Each
-  // is best-effort: if the underlying DSH service is unavailable we
-  // log a warning and move on. The plugin continues to work without
-  // a sidebar; the headless tools / status surface are independent.
+  // 6. Register the prompt section and tools. Each is best-effort: if
+  // the underlying DSH service is unavailable we log a warning and move
+  // on, because the plugin still drives stories without them.
+  //
+  // Registration also happens per-tool so one rejected definition cannot
+  // take the others down with it.
   ctx.effect(() => {
+    registerAutoRdPromptSection(ctx)
+
     const tools = ctx.get('tools') as ToolsService | undefined
-    if (tools) {
-      tools.register(
-        autoRdStatusTool({ storage, logger }) as unknown as Parameters<ToolsService['register']>[0],
-      )
-      tools.register(
+    if (!tools) {
+      logger.warn('[auto-rd] tools service unavailable — model will not see auto-rd tools')
+      return () => {}
+    }
+
+    const definitions: Array<[string, ToolDefinition]> = [
+      ['auto_rd_status', autoRdStatusTool({ storage, logger }) as ToolDefinition],
+      [
+        'auto_rd_trigger',
         autoRdTriggerTool({
           storage,
           logger,
           pollNow: () => poller.tick(),
           advanceStory: (storyId) => runner.runStory(storyId),
-        }) as unknown as Parameters<ToolsService['register']>[0],
-      )
-      tools.register(
-        autoRdRetryTool({ storage, logger }) as unknown as Parameters<ToolsService['register']>[0],
-      )
-      logger.info('[auto-rd] registered tools: auto_rd_status / auto_rd_trigger / auto_rd_retry')
-    } else {
-      logger.warn('[auto-rd] tools service unavailable — model will not see auto-rd tools')
-    }
+        }) as ToolDefinition,
+      ],
+      ['auto_rd_retry', autoRdRetryTool({ storage, logger }) as ToolDefinition],
+    ]
 
-    registerAutoRdPromptSection(ctx)
+    const registered: string[] = []
+    for (const [name, definition] of definitions) {
+      try {
+        tools.register(definition)
+        registered.push(name)
+      } catch (err) {
+        // A rejected definition (bad schema, duplicate name, missing
+        // output contract) must not stop the pipeline from running.
+        logger.error(`[auto-rd] failed to register tool ${name}: ${(err as Error).message}`)
+      }
+    }
+    logger.info(`[auto-rd] registered tools: ${registered.join(' / ') || '(none)'}`)
+
+    // Report the UI situation (see ui-panel.ts: the sidebar panel is a
+    // client-side contribution, so the host exposes the same data
+    // through auto_rd_status instead).
     registerAutoRdPanel(ctx, { storage, logger })
 
     return () => {
-      // Cordis tears down slots/tools registrations when the parent
+      // Cordis tears down tool / prompt registrations when the parent
       // ctx disposes; explicit cleanup is unnecessary here.
     }
   }, 'auto-rd:ui')
