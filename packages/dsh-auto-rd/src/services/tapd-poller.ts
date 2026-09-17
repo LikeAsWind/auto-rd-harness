@@ -254,10 +254,13 @@ export class TapdPoller {
         m.tapdApiToken || this.deps.config.tapdApiToken ? m.id : undefined,
       )
       if (!tapdResolution) {
+        const noTokenMsg = `no TAPD token configured (per-module ${m.tapdApiToken ?? 'unset'} nor global)`
         this.deps.logger.warn(
-          `[TapdPoller] module ${m.id} (TAPD ${tapdWorkspaceId}): no TAPD token configured ` +
-            `neither per-module (${m.tapdApiToken ?? 'unset'}) nor globally; skipping this module.`,
+          `[TapdPoller] module ${m.id} (TAPD ${tapdWorkspaceId}): ${noTokenMsg}; skipping this module.`,
         )
+        // Still record a per-workspace error so the pull panel can show
+        // *why* this workspace has nothing, instead of "尚未同步".
+        results.push({ moduleId: m.id, error: noTokenMsg, newCount: 0 })
         continue
       }
       this.deps.logger.info(
