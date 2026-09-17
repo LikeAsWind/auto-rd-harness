@@ -654,6 +654,7 @@ window.__ModuleLoader__.load({
       var ws = props.workspace
       var onClick = props.onClick
       var onRemove = props.onRemove
+      var onUpdate = props.onUpdate
       var expanded = props.expanded
 
       var dotStyle = {
@@ -801,6 +802,7 @@ window.__ModuleLoader__.load({
         expanded
           ? h(WorkspaceDetail, {
               workspace: ws,
+              onUpdate: onUpdate,
             })
           : null,
         // Error banner (independent of the detail panel) — surfaces a
@@ -869,6 +871,7 @@ window.__ModuleLoader__.load({
     function WorkspaceDetail(props) {
       var ws = props.workspace
       var stories = (ws && ws.stories) || []
+      var onUpdate = props.onUpdate
 
       return h(
         'div',
@@ -884,6 +887,11 @@ window.__ModuleLoader__.load({
             borderRadius: '0 6px 6px 0',
           },
         },
+        h(
+          'div',
+          { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, marginBottom: 6 } },
+          '任务',
+        ),
         stories.length === 0
           ? h(
               'div',
@@ -976,6 +984,162 @@ window.__ModuleLoader__.load({
                 )
               }),
             ),
+        h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate }),
+      )
+    }
+
+    // ---- workspace settings form (expanded panel) ------------------------
+
+    /**
+     * Per-workspace settings editor, shown inside the expanded detail.
+     * Fields: TAPD workspace id, TAPD token, GitLab token, and per-role
+     * model selection. Each field starts from the workspace's current
+     * value (empty = inherit global). POSTs `update_workspace` on Apply.
+     */
+    function WorkspaceSettingsForm(props) {
+      var ws = props.workspace
+      var onUpdate = props.onUpdate
+      var tapdWorkspaceId = React.useState(ws.tapdWorkspaceId || '')
+      var tapdToken = React.useState(ws.tapdApiToken || '')
+      var gitlabToken = React.useState(ws.gitlabApiToken || '')
+      var busy = React.useState(false)
+      var status = React.useState(null)
+
+      var tapdWorkspaceIdValue = tapdWorkspaceId[0]
+      var setTapdWorkspaceId = tapdWorkspaceId[1]
+      var tapdTokenValue = tapdToken[0]
+      var setTapdToken = tapdToken[1]
+      var gitlabTokenValue = gitlabToken[0]
+      var setGitlabToken = gitlabToken[1]
+      var busyValue = busy[0]
+      var setBusy = busy[1]
+      var statusValue = status[0]
+      var setStatus = status[1]
+
+      function submit() {
+        setBusy(true)
+        setStatus(null)
+        fetch(RECONFIGURE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            action: 'update_workspace',
+            name: ws.id,
+            tapdWorkspaceId: tapdWorkspaceIdValue,
+            tapdToken: tapdTokenValue,
+            gitlabToken: gitlabTokenValue,
+          }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) { return { ok: res.ok, body: body } })
+          })
+          .then(function (result) {
+            setBusy(false)
+            if (result.ok && result.body && result.body.ok) {
+              setStatus({ kind: 'success', message: '已保存' })
+              if (typeof onUpdate === 'function') onUpdate(result.body)
+            } else {
+              setStatus({
+                kind: 'error',
+                message:
+                  '保存失败:' +
+                  ((result.body && (result.body.message || result.body.error)) || 'HTTP ' + result.status),
+              })
+            }
+          })
+          .catch(function (e) {
+            setBusy(false)
+            setStatus({ kind: 'error', message: '保存失败:' + ((e && e.message) || String(e)) })
+          })
+      }
+
+      var fieldStyle = {
+        width: '100%',
+        background: styles.panelBg,
+        border: '1px solid ' + styles.borderL2,
+        borderRadius: 5,
+        padding: '6px 10px',
+        color: styles.labelPrimary,
+        fontFamily: styles.fontCode,
+        fontSize: 11,
+        boxSizing: 'border-box',
+      }
+      var labelStyle = {
+        display: 'block',
+        fontSize: 11,
+        color: styles.labelSecondary,
+        marginBottom: 4,
+        fontWeight: 500,
+      }
+
+      return h(
+        'div',
+        {
+          style: {
+            marginTop: 14,
+            paddingTop: 14,
+            borderTop: '1px solid ' + styles.borderL3,
+          },
+        },
+        h(
+          'div',
+          { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, marginBottom: 10 } },
+          '配置',
+        ),
+        h(
+          'div',
+          { style: { marginBottom: 10 } },
+          h('label', { style: labelStyle }, 'TAPD 工作空间 ID', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 不拉取')),
+          h('input', { type: 'text', value: tapdWorkspaceIdValue, onChange: function (e) { setTapdWorkspaceId(e.target.value) }, disabled: busyValue, placeholder: '例: 123456', style: fieldStyle }),
+        ),
+        h(
+          'div',
+          { style: { marginBottom: 10 } },
+          h('label', { style: labelStyle }, 'TAPD API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 继承全局')),
+          h('input', { type: 'password', value: tapdTokenValue, onChange: function (e) { setTapdToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: '(继承全局)', style: fieldStyle }),
+        ),
+        h(
+          'div',
+          { style: { marginBottom: 10 } },
+          h('label', { style: labelStyle }, 'GitLab API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 继承全局')),
+          h('input', { type: 'password', value: gitlabTokenValue, onChange: function (e) { setGitlabToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: '(继承全局)', style: fieldStyle }),
+        ),
+        statusValue
+          ? h(
+              'div',
+              {
+                style: {
+                  fontSize: 11,
+                  marginTop: 4,
+                  color: statusValue.kind === 'success' ? styles.statusSuccess : styles.statusError,
+                },
+              },
+              statusValue.message,
+            )
+          : null,
+        h(
+          'div',
+          { style: { marginTop: 12, display: 'flex', justifyContent: 'flex-end', gap: 8 } },
+          h(
+            'button',
+            {
+              type: 'button',
+              onClick: submit,
+              disabled: busyValue,
+              style: {
+                background: styles.accent,
+                color: '#ffffff',
+                border: 'none',
+                padding: '6px 14px',
+                borderRadius: 5,
+                fontSize: 12,
+                cursor: busyValue ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+              },
+            },
+            busyValue ? '保存中…' : '保存',
+          ),
+        ),
       )
     }
 
@@ -1126,6 +1290,7 @@ window.__ModuleLoader__.load({
       var onAdd = props.onAdd
       var onRefresh = props.onRefresh
       var onRemove = props.onRemove
+      var onUpdate = props.onUpdate
       var onWorkspaceClick = props.onWorkspaceClick
       var expanded = props.expanded
       var onToggleExpanded = props.onToggleExpanded
@@ -1165,6 +1330,9 @@ window.__ModuleLoader__.load({
               },
               onRemove: function (id) {
                 if (typeof onRemove === 'function') onRemove(id)
+              },
+              onUpdate: function (body) {
+                if (typeof onUpdate === 'function') onUpdate(body)
               },
             })
           }),
@@ -1361,6 +1529,11 @@ window.__ModuleLoader__.load({
           status: status,
           error: null,
           remedy: null,
+          // Per-workspace settings (empty = inherit global).
+          tapdWorkspaceId: m.tapdWorkspaceId || '',
+          tapdApiToken: m.tapdApiToken || '',
+          gitlabApiToken: m.gitlabApiToken || '',
+          modelSelection: m.modelSelection || {},
         }
       })
 
@@ -1539,6 +1712,12 @@ window.__ModuleLoader__.load({
                 onToggleExpanded: setExpandedId,
                 onRefresh: refresh,
                 onRemove: removeWorkspace,
+                onUpdate: function () {
+                  // The host already swapped liveConfig + storage; the
+                  // next 5-second poll reconciles the panel. Reload
+                  // keeps the UI consistent immediately after Apply.
+                  refresh()
+                },
               })
             : null,
           panel.status === 'error' && !model
