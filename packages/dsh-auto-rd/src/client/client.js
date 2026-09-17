@@ -2642,10 +2642,21 @@ window.__ModuleLoader__.load({
       // surface it in a second modal instead of an ugly `window.alert`.
       var confirmRemove = React.useState(null)
       var removeError = React.useState(null)
+      // Global error modal — every user-initiated API action that fails
+      // routes its error here so failures are never silent.
+      var errorModal = React.useState(null)
       var confirmRemoveValue = confirmRemove[0]
       var setConfirmRemove = confirmRemove[1]
       var removeErrorValue = removeError[0]
       var setRemoveError = removeError[1]
+      var errorModalValue = errorModal[0]
+      var setErrorModal = errorModal[1]
+
+      // Show a modal with the given title and message. Used by every
+      // mutating action (add / update / remove / poll) on failure.
+      function showError(title, message) {
+        setErrorModal({ title: title, message: message })
+      }
 
       var addOpenValue = addOpen[0]
       var setAddOpen = addOpen[1]
@@ -2849,10 +2860,13 @@ window.__ModuleLoader__.load({
           .then(function (result) {
             if (result.ok && result.body && result.body.ok) {
               refresh(result.body)
+            } else {
+              var msg = (result.body && (result.body.message || result.body.error)) || ('HTTP ' + result.status)
+              showError('拉取失败', msg)
             }
           })
-          .catch(function () {
-            // The 5s panel poll reconciles on the next tick.
+          .catch(function (e) {
+            showError('拉取失败', String((e && e.message) || e))
           })
       }
 
@@ -2905,23 +2919,6 @@ window.__ModuleLoader__.load({
           .then(function (result) {
             setConfirmRemove(null)
             if (result.ok && result.body && result.body.ok) {
-              // Drop the user's remembered open/closed preference for
-              // the removed workspace; otherwise the override hangs
-              // around in state pointing at a workspace that no longer
-              // exists. `refresh` then rebuilds the list from the
-              // host's response.
-              setExpandedOverrides(function (prev) {
-                if (!prev || !Object.prototype.hasOwnProperty.call(prev, id)) return prev
-                var next = Object.assign({}, prev)
-                delete next[id]
-                return next
-              })
-              // Same for the settings panel — if it was open for this
-              // workspace, the panel is now dangling. The render path
-              // would already short-circuit (the workspace is gone), but
-              // we clear the state so reopening another workspace does
-              // not see a stale id.
-              setSettingsOpen(function (cur) { return cur === id ? null : cur })
               refresh(result.body)
             } else {
               setRemoveError(
@@ -3107,6 +3104,17 @@ window.__ModuleLoader__.load({
                 danger: true,
                 onCancel: function () { setRemoveError(null) },
                 onConfirm: function () { setRemoveError(null) },
+              })
+            : null,
+          errorModalValue
+            ? h(ConfirmModal, {
+                title: errorModalValue.title,
+                body: errorModalValue.message,
+                confirmLabel: '关闭',
+                cancelLabel: null,
+                danger: true,
+                onCancel: function () { setErrorModal(null) },
+                onConfirm: function () { setErrorModal(null) },
               })
             : null,
         ),
