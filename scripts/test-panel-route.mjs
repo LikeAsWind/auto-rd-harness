@@ -30,6 +30,10 @@ const { registerPanelRoute, PANEL_ROUTE_PATH } = await import(
   pathToFileURL(resolve(libBase, 'services', 'panel-route.js')).href
 )
 
+const { registerStoryTrajectoryRoute, STORY_TRAJECTORY_ROUTE_PREFIX } = await import(
+  pathToFileURL(resolve(libBase, 'services', 'story-trajectory-route.js')).href
+)
+
 let pass = 0
 let fail = 0
 function check(name, ok, extra) {
@@ -523,6 +527,47 @@ async function makeJsonReq(method, body) {
   stream.headers = { 'content-type': 'application/json' }
   stream.url = RECONFIGURE_ROUTE_PATH
   return stream
+}
+
+// ---- story trajectory route -----------------------------------------
+
+{
+  const TRAJ_EVENTS = [
+    { id: 'e1', storyId: 'S1', at: '2025-01-01T00:00:00.000Z', kind: 'state_transition', label: 'pending → context' },
+    { id: 'e2', storyId: 'S1', at: '2025-01-01T00:01:00.000Z', kind: 'agent_dispatch', label: 'spec' },
+    { id: 'e3', storyId: 'OTHER', at: '2025-01-01T00:02:00.000Z', kind: 'note', label: 'not mine' },
+  ]
+  const ws = fakeWebServer()
+  registerStoryTrajectoryRoute(ctxWith(ws), {
+    storage: {
+      trajectories: () => ({ *values() { for (const e of TRAJ_EVENTS) yield e } }),
+      stories: () => ({ *values() {} }),
+      modules: () => ({ *values() {} }),
+      tasks: () => ({ *values() {} }),
+    },
+    logger: silentLogger(),
+  })
+  check('trajectory: route is bound', ws.routes.length === 1, String(ws.routes.length))
+  check('trajectory: kind is prefix', ws.routes[0]?.kind === 'prefix', String(ws.routes[0]?.kind))
+  check('trajectory: path is the prefix', ws.routes[0]?.path === STORY_TRAJECTORY_ROUTE_PREFIX, String(ws.routes[0]?.path))
+
+  const res = fakeRes()
+  await ws.routes[0].handler({ method: 'GET', url: '/auto-rd/story/S1' }, res)
+  check('trajectory: GET returns 200', res.statusCode === 200, String(res.statusCode))
+  const body = JSON.parse(res.body)
+  check('trajectory: ok flag', body.ok === true)
+  check('trajectory: echoes the storyId', body.storyId === 'S1', String(body.storyId))
+  check('trajectory: filters to the story, sorted ascending', body.events.length === 2 && body.events[0].id === 'e1' && body.events[1].id === 'e2', JSON.stringify(body.events.map((e) => e.id)))
+  check('trajectory: no-store', res.headers['cache-control'] === 'no-store', res.headers['cache-control'])
+
+  const res2 = fakeRes()
+  await ws.routes[0].handler({ method: 'GET', url: '/auto-rd/story/UNKNOWN' }, res2)
+  const body2 = JSON.parse(res2.body)
+  check('trajectory: unknown story returns empty events', Array.isArray(body2.events) && body2.events.length === 0, JSON.stringify(body2.events))
+
+  const res3 = fakeRes()
+  await ws.routes[0].handler({ method: 'POST', url: '/auto-rd/story/S1' }, res3)
+  check('trajectory: POST is 405', res3.statusCode === 405, String(res3.statusCode))
 }
 
 // ---- Summary --------------------------------------------------------

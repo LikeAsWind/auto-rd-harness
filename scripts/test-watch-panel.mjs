@@ -210,16 +210,36 @@ async function settleFetch() {
     texts.includes('1 进行') || texts.includes('2 进行'),
     texts.slice(0, 200))
 
+  // #5: gauges now live in the workspace detail view. Render
+  // WorkspaceDetail directly to assert the gauge contract.
+  const shim = makeReact()
+  const exportsW = spec.factory(makeRequire(shim.react))
+  const WorkspaceDetail = exportsW.__autoRd.components.WorkspaceDetail
+  const ws = {
+    id: 'm1',
+    name: 'Payment',
+    stories: HEALTHY_NO_ISSUES.model.modules[0].stories,
+    overflow: 0,
+    inFlight: 2,
+    blocked: 0,
+    completed: 0,
+    failed: 0,
+    status: 'polling',
+    issues: [],
+    pollStat: null,
+  }
+  const detail = expandTree(WorkspaceDetail({ workspace: ws, onBack: function () {}, onStoryClick: function () {}, onUpdate: function () {} }))
+
   // #5: gauge data-fill colours come from the StageView (live / halt /
   // done) — NOT the bare state name.
   check('#5: gauge stage renders data-fill="live"',
-    someElement(tree, (el) => el.props && el.props['data-fill'] === 'live'),
+    someElement(detail, (el) => el.props && el.props['data-fill'] === 'live'),
     'no data-fill=live element')
 
   // #5: each gauge block has exactly 4 ticks (filter false-y kids
   // first so the children-count check matches what the user sees).
   check('#5: gauge block has 4 ticks',
-    someElement(tree, (el) => {
+    someElement(detail, (el) => {
       if (!el.props || el.props.className !== 'auto-rd-gauge-stage') return false
       // walk the tree to count tick <i> elements inside this stage
       var tickCount = 0
@@ -272,7 +292,7 @@ const MIXED_ISSUES_MODEL = {
 }
 
 {
-  const { tree } = await renderAndReread(MIXED_ISSUES_MODEL)
+  const { tree, panel, shim } = await renderAndReread(MIXED_ISSUES_MODEL)
   const texts = collectText(tree)
 
   // #6: global issue banner appears at the top of the panel
@@ -284,10 +304,19 @@ const MIXED_ISSUES_MODEL = {
   check('#6: global banner uses auto-rd-global-issues class',
     someElement(tree, (el) => el.props && el.props.className === 'auto-rd-global-issues'))
 
-  // #6: per-workspace GitLab token issue appears near the row
-  check('#6: payment row mentions GitLab token',
-    texts.includes('GitLab token'),
-    texts.slice(0, 400))
+  // #6 (updated): per-workspace GitLab token issues live in the
+  // workspace detail view. Navigate into the payment row (index 0) and
+  // assert the token issue is surfaced there.
+  const paymentRow = findElement(tree, (el) => el.props && (el.props.className || '').indexOf('auto-rd-ws-row') === 0 && collectText(el).includes('Payment'))
+  if (paymentRow && typeof paymentRow.props.onClick === 'function') {
+    paymentRow.props.onClick()
+    shim.resetCursor()
+  }
+  const after = expandTree(panel())
+  const afterTexts = collectText(after)
+  check('#6: payment workspace detail mentions GitLab token',
+    afterTexts.includes('GitLab token'),
+    afterTexts.slice(0, 400))
 
   // #6: the legacy contradictory legend ("tokens are not configured
   // here") is gone — the new legend describes the dot colours instead.
@@ -334,66 +363,32 @@ const ATTENTION_MODEL = {
 {
   const { tree, panel, shim } = await renderAndReread(ATTENTION_MODEL)
 
-  // #7: each workspace row is a <details> with an inline summary.
+  // #7 (updated): rows are clickable list items that navigate into the
+  // workspace detail view — no more <details> inline expansion.
   const wsRows = []
   walk(tree, (el) => {
     if (el.props && el.props.className && el.props.className.indexOf('auto-rd-ws-row') === 0) {
       wsRows.push(el)
     }
   })
-  check('#7: workspace rows are <details>-based', wsRows.length === 2, 'got ' + wsRows.length + ' rows')
-  // The halted workspace carries the is-open modifier; the healthy one does not.
-  const haltedOpen = wsRows.some((r) => (r.props.className || '').includes('is-open'))
-  const healthyOpen = wsRows.filter((r) => (r.props.className || '').includes('is-open')).length > 1
-  check('#7: blocked workspace auto-expands (is-open)', haltedOpen)
-  check('#7: healthy workspace does NOT auto-expand', !healthyOpen)
+  check('#7: workspace rows are clickable list items',
+    wsRows.length === 2 && wsRows.every((r) => typeof r.props.onClick === 'function'),
+    'got ' + wsRows.length + ' rows')
 
-  // #7 follow-up: the settings form is NOT auto-shown with the row.
-  // It lives behind its own gear button next to the delete × so the
-  // user can review or edit workspace config without flipping the
-  // row's open state.
-  const settingsButton = findElement(tree, (el) =>
-    el.props && el.props.className === 'auto-rd-ws-settings',
-  )
-  check('#7: row carries a settings (gear) button', !!settingsButton)
-  const settingsFormVisible = someElement(tree, (el) => {
-    // WorkspaceSettingsForm renders a top-level "配置" heading inside
-    // its container; if any element under the tree carries that text,
-    // the form is currently shown. The default render should NOT.
-    return el && el.children && Array.isArray(el.children)
-      ? el.children.some((c) => typeof c === 'string' && c === '配置')
-      : false
-  })
-  check('#7: settings form is NOT auto-opened by default', !settingsFormVisible)
-
-  // #7 follow-up: clicking the gear button opens the settings form.
-  // We invoke the React handler directly (the test shim's React just
-  // runs onClick as a plain callback) and re-read the tree. The shim
-  // re-uses state slots only when cursor is reset, so we have to
-  // reset before re-rendering — the original `renderAndReread` does
-  // the same thing after the fetch resolves.
-  if (settingsButton && typeof settingsButton.props.onClick === 'function') {
-    settingsButton.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  // Click the halted row (index 1) to navigate into workspace detail.
+  if (wsRows[1] && typeof wsRows[1].props.onClick === 'function') {
+    wsRows[1].props.onClick()
     shim.resetCursor()
-    const after = expandTree(panel())
-    const settingsNowVisible = someElement(after, (el) => {
-      return el && el.children && Array.isArray(el.children)
-        ? el.children.some((c) => typeof c === 'string' && c === '配置')
-        : false
-    })
-    check('#7: clicking the gear button opens the settings form', settingsNowVisible)
-  } else {
-    check('#7: clicking the gear button opens the settings form', false, 'no settingsButton.props.onClick')
   }
+  const after = expandTree(panel())
+  const afterText = collectText(after)
 
-  // #7: completed stories fold into a <details> summary line; the
-  // user can still expand them.
+  check('#7: workspace detail shows the back button', afterText.includes('返回'), afterText.slice(0, 300))
+  check('#7: workspace detail shows the settings form ("配置")', afterText.includes('配置'), afterText.slice(0, 300))
   check('#7: completed stories sit inside a <details> summary',
-    someElement(tree, (el) => el.props && el.props.className === 'auto-rd-done-summary'),
+    someElement(after, (el) => el.props && el.props.className === 'auto-rd-done-summary'),
     'no auto-rd-done-summary element')
-  check('#7: done summary mentions the count',
-    collectText(tree).includes('1 条已完成'),
-    collectText(tree).slice(0, 400))
+  check('#7: done summary mentions the count', afterText.includes('1 条已完成'), afterText.slice(0, 400))
 }
 
 const OVERFLOW_MODEL = {
@@ -417,7 +412,26 @@ const OVERFLOW_MODEL = {
 }
 
 {
-  const { tree } = await renderAndReread(OVERFLOW_MODEL)
+  // #7: the overflow tag lives in the workspace detail view now (the
+  // list no longer expands stories inline), so render WorkspaceDetail
+  // directly with the model's module shape.
+  const shim = makeReact()
+  const exportsW = spec.factory(makeRequire(shim.react))
+  const WorkspaceDetail = exportsW.__autoRd.components.WorkspaceDetail
+  const ws = {
+    id: 'big',
+    name: 'Big',
+    stories: OVERFLOW_MODEL.model.modules[0].stories,
+    overflow: OVERFLOW_MODEL.model.modules[0].overflow,
+    inFlight: 0,
+    blocked: 0,
+    completed: 1,
+    failed: 0,
+    status: 'idle',
+    issues: [],
+    pollStat: null,
+  }
+  const tree = expandTree(WorkspaceDetail({ workspace: ws, onBack: function () {}, onStoryClick: function () {}, onUpdate: function () {} }))
   const texts = collectText(tree)
 
   // #7: when the host truncates the list, the UI says so honestly.
@@ -567,28 +581,22 @@ const EMPTY_WORKSPACE_MODEL = {
   const wsRow = findElement(tree, (el) => el.props && (el.props.className || '').startsWith('auto-rd-ws-row'))
   check('empty: workspace row present', !!wsRow)
 
-  // Force the row open so the "任务" branch would render if it could.
-  // The WorkspaceList computes defaultOpen from workspaceNeedsAttention
-  // — for an empty / non-blocked / non-failed workspace that returns
-  // false. We toggle via the row's caret onClick handler.
-  const caret = findElement(tree, (el) => el.props && el.props.className === 'auto-rd-ws-caret')
-  // Caret itself is not a button — toggle goes through the summary's
-  // onClick. We grab the summary instead.
-  const summary = findElement(tree, (el) => el.props && el.props.onClick && Array.isArray(el.children))
-  if (summary && typeof summary.props.onClick === 'function') {
-    summary.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  // Navigate into the workspace detail view (the row is now a clickable
+  // card, not a <details>).
+  if (wsRow && typeof wsRow.props.onClick === 'function') {
+    wsRow.props.onClick()
     shimFn.resetCursor()
   }
   const after = expandTree(panelFn())
   const text = collectText(after)
 
   check(
-    'empty: expanded empty workspace does NOT show "还没有需求" placeholder',
+    'empty: empty workspace detail does NOT show "还没有需求" placeholder',
     !text.includes('还没有需求'),
     text.slice(0, 200),
   )
   check(
-    'empty: expanded empty workspace does NOT show the "任务" heading',
+    'empty: empty workspace detail does NOT show the "任务" heading',
     !text.match(/\b任务\b/),
     text.slice(0, 200),
   )

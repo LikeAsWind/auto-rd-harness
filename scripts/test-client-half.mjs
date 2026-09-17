@@ -226,7 +226,8 @@ const exportsObj = spec.factory(makeRequire(reactShim))
 check('exports: apply is a function', typeof exportsObj.apply === 'function')
 check('exports: inject is an array', Array.isArray(exportsObj.inject))
 check('inject: declares the short name "slots"', exportsObj.inject.includes('slots'), JSON.stringify(exportsObj.inject))
-check('inject: exactly one service', exportsObj.inject.length === 1, JSON.stringify(exportsObj.inject))
+check('inject: declares sessions for the session jump', exportsObj.inject.includes('sessions'), JSON.stringify(exportsObj.inject))
+check('inject: exactly two services', exportsObj.inject.length === 2, JSON.stringify(exportsObj.inject))
 check(
   'externals: only react is required',
   requiredIds.length === 1 && requiredIds[0] === 'react',
@@ -253,6 +254,7 @@ function fakeClientCtx() {
           return () => {}
         },
       },
+      sessions: { open: function () {} },
     },
   }
 }
@@ -771,6 +773,35 @@ const PULSE_MODEL = {
   } finally {
     globalThis.fetch = realFetch
   }
+}
+
+// ---- session jump ----------------------------------------------------
+
+{
+  // When ctx.sessions is present, the "会话" fact renders a button that
+  // calls sessions.open(mainSessionId).
+  const shim = makeReact()
+  const exportsS = spec.factory(makeRequire(shim))
+  const StoryDetail = exportsS.__autoRd.components.StoryDetail
+  let opened = null
+  const tree = StoryDetail({
+    story: { id: 'S1', title: 'x', state: 'pending', branch: '', worktreePath: '', mainSessionId: 'ses_1', acceptanceCriteria: '', blockedReason: '', artifacts: [], tapdId: 'S1', retryCount: 0, createdAt: '', pushedSha: '', mrIid: null },
+    workspace: { name: 'Payment' },
+    sessions: { open: function (id) { opened = id } },
+    onBack: function () {},
+  })
+  let found = null
+  function findSessionButton(node) {
+    if (node == null || found) return
+    if (Array.isArray(node)) { for (const n of node) findSessionButton(n); return }
+    if (typeof node !== 'object' || !node.__el) return
+    var kids = node.children || []
+    if (node.props && typeof node.props.onClick === 'function' && String(kids).includes('ses_1')) found = node
+    for (const c of node.children) findSessionButton(c)
+  }
+  findSessionButton(tree)
+  check('session: clickable button rendered for mainSessionId', !!found, 'no session button')
+  if (found) { found.props.onClick(); check('session: button calls sessions.open', opened === 'ses_1', String(opened)) }
 }
 
 // ---- cross-realm consistency ---------------------------------------

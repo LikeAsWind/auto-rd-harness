@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
     var DATA_URL = '/auto-rd/panel'
     var RECONFIGURE_URL = '/auto-rd/reconfigure'
     var PICK_DIRECTORY_URL = '/auto-rd/pick-directory'
+    var TRAJECTORY_URL_PREFIX = '/auto-rd/story/'
     var POLL_MS = 5000
 
     // ---- sidebar icon ----------------------------------------------------
@@ -480,6 +481,37 @@ window.__ModuleLoader__.load({
       load()
 
       return { panel: value, applyBody: applyBody, resync: load }
+    }
+
+    // Fetch one story's execution log on demand. The trajectory is
+    // static between polls (recover resets it, the runner appends), so
+    // the detail view fetches once on open instead of riding the 5s
+    // panel poll.
+    function useStoryTrajectory(storyId) {
+      var state = React.useState({ status: 'loading', events: [] })
+      var value = state[0]
+      var setValue = state[1]
+      React.useEffect(function () {
+        if (!storyId) { setValue({ status: 'idle', events: [] }); return }
+        var alive = true
+        setValue({ status: 'loading', events: [] })
+        fetch(TRAJECTORY_URL_PREFIX + encodeURIComponent(storyId), { headers: { accept: 'application/json' } })
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status)
+            return res.json()
+          })
+          .then(function (body) {
+            if (!alive) return
+            if (!body || body.ok !== true) throw new Error('trajectory_unavailable')
+            setValue({ status: 'ok', events: body.events || [] })
+          })
+          .catch(function () {
+            if (!alive) return
+            setValue({ status: 'error', events: [] })
+          })
+        return function () { alive = false }
+      }, [storyId])
+      return value
     }
 
     // ---- add-workspace form ----------------------------------------------
@@ -1020,15 +1052,36 @@ window.__ModuleLoader__.load({
      * <details>/<summary> gives the keyboard and screen-reader behaviour
      * for free.
      */
+    function PollStatBadge(props) {
+      var s = props.pollStat
+      if (!s) return h('span', { style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.labelTertiary } }, '尚未同步')
+      if (s.lastError) {
+        return h('span', { className: 'auto-rd-poll-error', title: s.lastError, style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.statusError } }, '⚠ 同步失败')
+      }
+      if (s.lastSuccessAt) {
+        var time = String(s.lastSuccessAt).slice(11, 16)
+        return h('span', { className: 'auto-rd-poll-ok', style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.statusSuccess } }, '✓ ' + time + (s.lastNewCount ? ' · +' + s.lastNewCount : ''))
+      }
+      return h('span', { style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.labelTertiary } }, '尚未同步')
+    }
+
+    function Pager(props) {
+      var page = props.page
+      var totalPages = props.totalPages
+      var onPage = props.onPage
+      return h(
+        'div',
+        { className: 'auto-rd-pager', style: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 20px 14px', justifyContent: 'center', fontFamily: styles.fontCode, fontSize: 11, color: styles.labelSecondary } },
+        h('button', { type: 'button', onClick: function () { if (page > 0) onPage(page - 1) }, disabled: page === 0, style: { border: '1px solid ' + styles.borderL3, background: 'transparent', color: styles.labelPrimary, borderRadius: 4, padding: '3px 8px', cursor: page === 0 ? 'default' : 'pointer' } }, '‹ 上一页'),
+        h('span', null, (page + 1) + ' / ' + totalPages),
+        h('button', { type: 'button', onClick: function () { if (page < totalPages - 1) onPage(page + 1) }, disabled: page >= totalPages - 1, style: { border: '1px solid ' + styles.borderL3, background: 'transparent', color: styles.labelPrimary, borderRadius: 4, padding: '3px 8px', cursor: page >= totalPages - 1 ? 'default' : 'pointer' } }, '下一页 ›'),
+      )
+    }
+
     function WorkspaceRow(props) {
       var ws = props.workspace
-      var defaultOpen = !!props.defaultOpen
-      var onToggle = props.onToggle
+      var onOpen = props.onOpen
       var onRemove = props.onRemove
-      var onUpdate = props.onUpdate
-      var onStoryClick = props.onStoryClick
-      var settingsOpen = !!props.settingsOpen
-      var onToggleSettings = props.onToggleSettings
 
       var dotStyle = {
         width: 8,
@@ -1047,150 +1100,73 @@ window.__ModuleLoader__.load({
 
       return h(
         'li',
-        { className: 'auto-rd-ws-row' + (defaultOpen ? ' is-open' : '') },
-        h(
-          'summary',
-          {
-            onClick: function () {
-              if (typeof onToggle === 'function') onToggle(ws.id)
-            },
+        {
+          className: 'auto-rd-ws-row',
+          onClick: function () { if (typeof onOpen === 'function') onOpen() },
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '14px 16px',
+            border: '1px solid ' + styles.borderL3,
+            borderRadius: 7,
+            marginBottom: 8,
+            cursor: 'pointer',
           },
-          h('span', { className: 'auto-rd-ws-caret', 'aria-hidden': 'true' }, '▶'),
-          h('div', { style: dotStyle, 'aria-hidden': 'true' }),
+        },
+        h('div', { style: dotStyle, 'aria-hidden': 'true' }),
+        h(
+          'div',
+          { style: { flex: '1 1 auto', minWidth: 0 } },
           h(
             'div',
-            { className: 'auto-rd-ws-text' },
-            h(
-              'div',
-              {
-                style: {
-                  fontSize: 13,
-                  color: styles.labelPrimary,
-                  fontWeight: 500,
-                  marginBottom: 2,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                },
-              },
-              ws.name,
-            ),
-            h(
-              'div',
-              {
-                style: {
-                  fontSize: 11,
-                  color: styles.labelSecondary,
-                  fontFamily: styles.fontCode,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                },
-              },
-              ws.path,
-              h(
-                'span',
-                { style: { color: styles.labelTertiary, margin: '0 6px' } },
-                '·',
-              ),
-              ws.storyCount + ' 个需求',
-            ),
+            { style: { fontSize: 13, color: styles.labelPrimary, fontWeight: 500, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            ws.name,
           ),
           h(
             'div',
-            {
-              className: 'auto-rd-ws-progress',
-              style: {
-                fontFamily: styles.fontCode,
-                fontSize: 11,
-                color: styles.labelSecondary,
-                textAlign: 'right',
-              },
-            },
-            progress.length
-              ? progress.map(function (p) {
-                  return h(
-                    'span',
-                    { key: p.label, style: { marginLeft: 8, color: p.color } },
-                    p.label,
-                  )
-                })
-              : h(
-                  'span',
-                  { style: { color: styles.labelTertiary } },
-                  ws.status === 'idle' && ws.storyCount === 0 ? '尚未拉取需求' : '—',
-                ),
-          ),
-          h(
-            'div',
-            { className: 'auto-rd-ws-actions' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'auto-rd-ws-settings',
-                title: settingsOpen ? '收起配置' : '编辑配置',
-                'aria-pressed': settingsOpen ? 'true' : 'false',
-                'aria-label': settingsOpen ? '收起配置' : '编辑配置',
-                onClick: function (e) {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  if (typeof onToggleSettings === 'function') onToggleSettings()
-                },
-                style: {
-                  width: 22,
-                  height: 22,
-                  padding: 0,
-                  background: settingsOpen ? styles.panelBg : 'transparent',
-                  border: '1px solid ' + (settingsOpen ? styles.borderL2 : styles.borderL3),
-                  borderRadius: 4,
-                  color: settingsOpen ? styles.labelPrimary : styles.labelTertiary,
-                  fontSize: 12,
-                  lineHeight: '20px',
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                },
-              },
-              '⚙',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'auto-rd-ws-remove',
-                title: '删除工作空间(不删除本地代码)',
-                'aria-label': '删除工作空间',
-                onClick: function (e) {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  if (typeof onRemove === 'function') onRemove(ws.id)
-                },
-                style: {
-                  width: 22,
-                  height: 22,
-                  padding: 0,
-                  background: 'transparent',
-                  border: '1px solid ' + styles.borderL3,
-                  borderRadius: 4,
-                  color: styles.labelTertiary,
-                  fontSize: 14,
-                  lineHeight: '20px',
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                },
-              },
-              '×',
-            ),
+            { style: { fontSize: 11, color: styles.labelSecondary, fontFamily: styles.fontCode, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            ws.path,
           ),
         ),
-        h(WorkspaceDetail, {
-          workspace: ws,
-          onUpdate: onUpdate,
-          onStoryClick: onStoryClick,
-        }),
-        settingsOpen
-          ? h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate })
-          : null,
+        h(
+          'div',
+          { style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.labelSecondary, textAlign: 'right', whiteSpace: 'nowrap' } },
+          progress.length
+            ? progress.map(function (p) {
+                return h('span', { key: p.label, style: { marginLeft: 8, color: p.color } }, p.label)
+              })
+            : h('span', null, ws.status === 'idle' && ws.storyCount === 0 ? '尚未拉取需求' : '—'),
+        ),
+        h(PollStatBadge, { pollStat: ws.pollStat }),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'auto-rd-ws-remove',
+            title: '删除工作空间(不删除本地代码)',
+            'aria-label': '删除工作空间',
+            onClick: function (e) {
+              e.preventDefault()
+              e.stopPropagation()
+              if (typeof onRemove === 'function') onRemove(ws.id)
+            },
+            style: {
+              width: 22,
+              height: 22,
+              padding: 0,
+              background: 'transparent',
+              border: '1px solid ' + styles.borderL3,
+              borderRadius: 4,
+              color: styles.labelTertiary,
+              fontSize: 14,
+              lineHeight: '20px',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            },
+          },
+          '×',
+        ),
       )
 
       function statusColor(status) {
@@ -1260,6 +1236,7 @@ window.__ModuleLoader__.load({
       var story = props.story
       var workspace = props.workspace
       var onBack = props.onBack
+      var sessions = props.sessions
 
       var bucket = (typeof STATE_TO_BUCKET === 'object') ? STATE_TO_BUCKET[story.state] : null
       var phaseLabel = (typeof currentPhaseLabel === 'function') ? currentPhaseLabel(story.state) : null
@@ -1354,7 +1331,25 @@ window.__ModuleLoader__.load({
             },
           ),
           fact('工作树', story.worktreePath, { render: function (v) { return h('span', null, v, pendingTag()) } }),
-          fact('会话', story.mainSessionId, { render: function (v) { return h('span', null, v, pendingTag()) } }),
+          fact('会话', story.mainSessionId, {
+            placeholder: '尚未创建',
+            render: function (v) {
+              if (sessions && typeof sessions.open === 'function') {
+                return h('button', {
+                  type: 'button',
+                  onClick: function () { sessions.open(v) },
+                  style: { border: 'none', background: 'none', color: styles.accent, cursor: 'pointer', fontSize: 'inherit', fontFamily: 'inherit', padding: 0, textDecoration: 'underline' },
+                }, v + ' →')
+              }
+              return h('span', null, v)
+            },
+          }),
+          fact('所属工作空间', workspace ? workspace.name : '', { placeholder: '—' }),
+          fact('TAPD ID', story.tapdId || story.id, { placeholder: '—' }),
+          fact('重试次数', story.retryCount != null ? String(story.retryCount) : '0', { placeholder: '0' }),
+          story.createdAt ? fact('创建时间', String(story.createdAt).slice(0, 16).replace('T', ' '), { placeholder: '—' }) : null,
+          story.pushedSha ? fact('推送 SHA', story.pushedSha, { placeholder: '—' }) : null,
+          story.mrIid != null ? fact('MR IID', String(story.mrIid), { placeholder: '—' }) : null,
         ),
         h(
           'section',
@@ -1380,6 +1375,45 @@ window.__ModuleLoader__.load({
             ? h('ul', { className: 'auto-rd-trail' }, story.artifacts.map(artifactRow))
             : h('p', { className: 'empty' }, '还没有产物记录'),
         ),
+        h(TrajectoryTimeline, { storyId: story.id }),
+      )
+    }
+
+    function TrajectoryTimeline(props) {
+      var storyId = props.storyId
+      var traj = useStoryTrajectory(storyId)
+      var kindLabel = {
+        state_transition: '状态转移',
+        agent_dispatch: '派发 agent',
+        agent_result: 'agent 结果',
+        checkpoint_write: '检查点',
+        external_side_effect: '外部副作用',
+        recovery: '恢复',
+        note: '笔记',
+      }
+      return h(
+        'section',
+        { className: 'auto-rd-detail-section' },
+        h('h3', null, '轨迹'),
+        traj.status === 'loading'
+          ? h('p', { className: 'empty' }, '加载中…')
+          : traj.status === 'error'
+            ? h('p', { className: 'empty' }, '轨迹加载失败')
+            : traj.events.length === 0
+              ? h('p', { className: 'empty' }, '暂无轨迹记录')
+              : h(
+                  'ul',
+                  { className: 'auto-rd-trajectory', style: { listStyle: 'none', margin: 0, padding: 0 } },
+                  traj.events.map(function (ev, i) {
+                    return h(
+                      'li',
+                      { key: ev.id || i, style: { display: 'flex', gap: 9, padding: '4px 0', fontSize: 12, fontFamily: styles.fontCode, color: styles.labelSecondary, borderTop: i === 0 ? 'none' : '1px solid ' + styles.borderL3 } },
+                      h('span', { style: { color: styles.labelTertiary, flex: 'none' } }, String(ev.at).slice(11, 19)),
+                      h('span', { style: { color: styles.accent, flex: 'none' } }, kindLabel[ev.kind] || ev.kind),
+                      h('span', { style: { flex: '1 1 auto' } }, ev.label),
+                    )
+                  }),
+                ),
       )
     }
 
@@ -1470,6 +1504,7 @@ window.__ModuleLoader__.load({
       var stories = (ws && ws.stories) || []
       var onUpdate = props.onUpdate
       var onStoryClick = props.onStoryClick
+      var onBack = props.onBack
       var issues = (ws && ws.issues) || []
 
       var open = []
@@ -1630,16 +1665,37 @@ window.__ModuleLoader__.load({
         )
       }
 
+      function back() {
+        if (typeof onBack === 'function') onBack()
+      }
+
       return h(
         'div',
         {
           style: {
-            padding: '0 20px 14px 30px',
+            padding: '0 20px 20px',
             color: styles.labelSecondary,
             fontSize: 12,
             lineHeight: 1.7,
           },
         },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 } },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'auto-rd-back',
+              onClick: back,
+              'aria-label': '返回工作空间列表',
+              style: { border: 'none', background: 'none', color: styles.accent, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', padding: 0 },
+            },
+            '← 返回',
+          ),
+          h('span', { style: { fontSize: 14, fontWeight: 600, color: styles.labelPrimary } }, ws.name),
+          h(PollStatBadge, { pollStat: ws.pollStat }),
+        ),
         issues.length
           ? h(
               'div',
@@ -1698,6 +1754,7 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
+        h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate }),
       )
     }
 
@@ -2048,10 +2105,12 @@ window.__ModuleLoader__.load({
       var onRefresh = props.onRefresh
       var onRemove = props.onRemove
       var onUpdate = props.onUpdate
-      var onStoryClick = props.onStoryClick
-      var expandedOverrides = props.expandedOverrides || {}
-      var settingsOpenId = props.settingsOpenId
-      var onToggleSettings = props.onToggleSettings
+      var onOpenWorkspace = props.onOpenWorkspace
+
+      var PAGE_SIZE = 5
+      var page = React.useState(0)
+      var pageValue = page[0]
+      var setPage = page[1]
 
       if (!workspaces || workspaces.length === 0) {
         return h(
@@ -2072,26 +2131,23 @@ window.__ModuleLoader__.load({
         )
       }
 
+      var totalPages = Math.max(1, Math.ceil(workspaces.length / PAGE_SIZE))
+      var currentPage = pageValue >= totalPages ? totalPages - 1 : pageValue
+      var start = currentPage * PAGE_SIZE
+      var pageItems = workspaces.slice(start, start + PAGE_SIZE)
+
       return h(
         'div',
         null,
         h(
           'ul',
           { className: 'auto-rd-ws-list', style: { listStyle: 'none', margin: 0, padding: '0 14px' } },
-          workspaces.map(function (ws) {
-            var hasOverride = Object.prototype.hasOwnProperty.call(expandedOverrides, ws.id)
-            var defaultOpen = hasOverride ? !!expandedOverrides[ws.id] : workspaceNeedsAttention(ws)
-            var isSettingsOpen = settingsOpenId === ws.id
+          pageItems.map(function (ws) {
             return h(WorkspaceRow, {
               key: ws.id,
               workspace: ws,
-              defaultOpen: defaultOpen,
-              settingsOpen: isSettingsOpen,
-              onToggle: function () {
-                if (typeof props.onToggleExpanded === 'function') props.onToggleExpanded(ws.id)
-              },
-              onToggleSettings: function () {
-                if (typeof onToggleSettings === 'function') onToggleSettings(ws.id)
+              onOpen: function () {
+                if (typeof onOpenWorkspace === 'function') onOpenWorkspace(ws.id)
               },
               onRemove: function (id) {
                 if (typeof onRemove === 'function') onRemove(id)
@@ -2099,41 +2155,18 @@ window.__ModuleLoader__.load({
               onUpdate: function (body) {
                 if (typeof onUpdate === 'function') onUpdate(body)
               },
-              onStoryClick: onStoryClick,
             })
           }),
         ),
+        totalPages > 1
+          ? h(Pager, {
+              page: currentPage,
+              totalPages: totalPages,
+              onPage: function (p) { setPage(p) },
+            })
+          : null,
         legend(),
       )
-    }
-
-    /**
-     * "Should this workspace auto-expand?" — issue #7 acceptance rule.
-     *
-     * A workspace needs attention (= expand on first paint) when it
-     * carries any blocked / failed story OR any per-workspace setup
-     * issue. Everything else collapses — the user sees a quiet list
-     * until something goes wrong, which is exactly the situation
-     * they need the watch panel for.
-     */
-    function workspaceNeedsAttention(ws) {
-      if (!ws) return false
-      if ((ws.blocked || 0) > 0) return true
-      if ((ws.failed || 0) > 0) return true
-      // Per-workspace setup hints (e.g. missing TAPD workspace id, missing
-      // GitLab token) are informational — they do NOT auto-expand the
-      // row. Only issues that block pipeline progress should pop the
-      // row open without user action. tapd_workspace_id in particular
-      // fires for any new workspace the user has not configured yet,
-      // and we don't want every freshly-added row to be expanded.
-      if (Array.isArray(ws.issues)) {
-        for (var i = 0; i < ws.issues.length; i++) {
-          var k = ws.issues[i] && ws.issues[i].key
-          if (k === 'tapd_token' || k === 'gitlab_token' || k === 'tapd_workspace_id') continue
-          return true
-        }
-      }
-      return false
     }
 
     function legend() {
@@ -2238,19 +2271,18 @@ window.__ModuleLoader__.load({
       var onResync = props.onResync
       var now = props.now
 
-      var synced = status === 'ok'
-      // Error WITH a cache: content stays on screen, so the pulse must
-      // own up to its age. Error without a cache: the error banner
-      // speaks; the pulse just says 重连中.
+      // Normal state renders nothing — "已同步 · 刚刚" is a sentence that
+      // is always true (the snapshot refreshes every 5s), so it said
+      // nothing. The pulse only speaks when the panel can't reach the
+      // host: with a cache it owns up to its age, without one it says
+      // 重连中.
+      if (status === 'ok') return null
       var stale = status === 'error' && lastSyncedAt != null
-
-      var label = synced
-        ? '已同步 · ' + agoLabel(now - lastSyncedAt)
-        : stale
-          ? '重连中 · 数据停在 ' + clockLabel(lastSyncedAt)
-          : status === 'loading'
-            ? '首次同步中…'
-            : '重连中…'
+      var label = stale
+        ? '面板连接失败 · 数据停在 ' + clockLabel(lastSyncedAt)
+        : status === 'loading'
+          ? '首次同步中…'
+          : '面板连接失败 · 重连中…'
 
       return h(
         'div',
@@ -2266,7 +2298,7 @@ window.__ModuleLoader__.load({
             borderBottom: '1px solid ' + styles.borderL3,
             fontFamily: styles.fontCode,
             fontSize: 11,
-            color: stale || status === 'error' ? styles.statusError : styles.labelSecondary,
+            color: styles.statusError,
           },
         },
         h('span', {
@@ -2275,7 +2307,7 @@ window.__ModuleLoader__.load({
             width: 6,
             height: 6,
             borderRadius: '50%',
-            background: synced ? styles.statusSuccess : styles.statusError,
+            background: styles.statusError,
             display: 'inline-block',
             flex: 'none',
           },
@@ -2286,8 +2318,8 @@ window.__ModuleLoader__.load({
           {
             type: 'button',
             onClick: function () { if (onResync) onResync() },
-            'aria-label': '立即同步',
-            title: '立即同步',
+            'aria-label': '重试',
+            title: '重试',
             style: {
               marginLeft: 'auto',
               border: 'none',
@@ -2327,7 +2359,7 @@ window.__ModuleLoader__.load({
     function StatusBar(props) {
       var workspaces = props.workspaces
       var totals = props.totals
-      var isPolling = props.isPolling
+      var lastPollAt = props.lastPollAt
 
       var totalStories = totals ? totals.stories : 0
       var running =
@@ -2341,18 +2373,14 @@ window.__ModuleLoader__.load({
 
       var statusLabel = hasError
         ? '出错'
-        : isPolling
-          ? '采集中'
-          : wsCount === 0
-            ? '空闲'
-            : '已停止'
+        : lastPollAt
+          ? '上次采集 ' + clockLabel(Date.parse(lastPollAt))
+          : '尚未采集'
       var statusColor = hasError
         ? styles.statusError
-        : isPolling
+        : lastPollAt
           ? styles.statusSuccess
-          : wsCount === 0
-            ? styles.statusWarning
-            : styles.labelTertiary
+          : styles.labelTertiary
 
       return h(
         'div',
@@ -2448,23 +2476,13 @@ window.__ModuleLoader__.load({
       var health = (model && model.health) || null
 
       var addOpen = React.useState(false)
-      // expandedOverrides records the user's last open/closed choice
-      // for each workspace id. The natural default — expand if blocked
-      // or failed, collapse otherwise (issue #7) — is computed by
-      // `workspaceNeedsAttention`; the override wins when the user has
-      // explicitly toggled that workspace, so their preference is
-      // remembered across polls.
-      var expandedOverrides = React.useState({})
-      // settingsOpen tracks which workspace the user has explicitly
-      // expanded the settings form for. Distinct from the
-      // <details>/<summary> row expansion: clicking the row caret
-      // shows stories, clicking the gear button shows the settings
-      // form. Either can be open without the other.
-      var settingsOpen = React.useState(null)
+      // Three-level navigation: 'list' → 'workspace' → 'story'.
+      // activeWorkspaceId and selectedStoryId together locate the detail
+      // view; a back button pops one level at a time.
+      var view = React.useState('list')
+      var activeWorkspaceId = React.useState(null)
       // Selected story drives the detail view (issue #8). When set, the
-      // main panel renders StoryDetail instead of WorkspaceList. The
-      // selected story id is remembered across re-renders; clicking
-      // the back button or pressing Escape clears it.
+      // main panel renders StoryDetail instead of WorkspaceList.
       var selectedStoryId = React.useState(null)
       // Workspace-removal modal state. `confirmRemove` holds the id of
       // the workspace the user is being asked to confirm; `removeError`
@@ -2479,10 +2497,10 @@ window.__ModuleLoader__.load({
 
       var addOpenValue = addOpen[0]
       var setAddOpen = addOpen[1]
-      var expandedOverridesValue = expandedOverrides[0]
-      var setExpandedOverrides = expandedOverrides[1]
-      var settingsOpenValue = settingsOpen[0]
-      var setSettingsOpen = settingsOpen[1]
+      var viewValue = view[0]
+      var setView = view[1]
+      var activeWorkspaceIdValue = activeWorkspaceId[0]
+      var setActiveWorkspaceId = activeWorkspaceId[1]
       var selectedStoryIdValue = selectedStoryId[0]
       var setSelectedStoryId = selectedStoryId[1]
 
@@ -2495,19 +2513,6 @@ window.__ModuleLoader__.load({
         window.addEventListener('keydown', onKey)
         return function () { window.removeEventListener('keydown', onKey) }
       }, [selectedStoryIdValue])
-
-      function toggleExpanded(id) {
-        setExpandedOverrides(function (prev) {
-          var cur = prev && Object.prototype.hasOwnProperty.call(prev, id) ? prev[id] : workspaceNeedsAttention(workspaces.find(function (w) { return w.id === id }))
-          var next = Object.assign({}, prev)
-          next[id] = !cur
-          return next
-        })
-      }
-
-      function toggleSettings(id) {
-        setSettingsOpen(function (cur) { return cur === id ? null : id })
-      }
 
       // Derive the workspaces[] shape that the UI consumes from the host's
       // modules[] shape. Until the host exposes per-workspace errors /
@@ -2575,6 +2580,7 @@ window.__ModuleLoader__.load({
           tapdTokenConfigured: !!m.tapdTokenConfigured,
           gitlabTokenConfigured: !!m.gitlabTokenConfigured,
           modelSelection: m.modelSelection || {},
+          pollStat: m.pollStat || null,
         }
       })
 
@@ -2593,12 +2599,9 @@ window.__ModuleLoader__.load({
 
       var isPolling = health && health.lastTapdPollAt != null
 
-      // Body dispatcher (issue #8 + #7 acceptance). Branches on the
-      // four states the main panel can be in: loading skeleton, error
-      // fallback, add-form mode, or the normal list / story-detail
-      // view. Defined as a function (not nested in the JSX) so the
-      // JSX below can call it as `renderMain()` without confusing the
-      // parser.
+      // Body dispatcher (three-level navigation). Branches on the panel's
+      // view state: loading skeleton, error fallback, add-form mode,
+      // story detail, workspace detail, or the paginated list.
       function renderMain() {
         if (!model) {
           return panel.status === 'loading' ? h(PanelSkeleton) : null
@@ -2609,7 +2612,7 @@ window.__ModuleLoader__.load({
             onAdded: function (body) { setAddOpen(false); refresh(body) },
           })
         }
-        if (selectedStoryIdValue) {
+        if (viewValue === 'story' && selectedStoryIdValue) {
           var found = null
           for (var wi = 0; wi < workspaces.length; wi++) {
             var stories = workspaces[wi].stories || []
@@ -2625,23 +2628,38 @@ window.__ModuleLoader__.load({
             return h(StoryDetail, {
               story: found.story,
               workspace: found.workspace,
-              onBack: function () { setSelectedStoryId(null) },
+              sessions: module.__autoRd.sessions,
+              onBack: function () {
+                setSelectedStoryId(null)
+                setView('workspace')
+              },
             })
           }
-          // Selected story no longer in the model (deleted, gone
-          // across a poll). Drop back to the list silently.
           setSelectedStoryId(null)
+          setView('list')
+        }
+        if (viewValue === 'workspace' && activeWorkspaceIdValue) {
+          var ws = null
+          for (var wj = 0; wj < workspaces.length; wj++) {
+            if (workspaces[wj].id === activeWorkspaceIdValue) { ws = workspaces[wj]; break }
+          }
+          if (ws) {
+            return h(WorkspaceDetail, {
+              workspace: ws,
+              onBack: function () { setActiveWorkspaceId(null); setView('list') },
+              onStoryClick: function (id) { setSelectedStoryId(id); setView('story') },
+              onUpdate: refresh,
+            })
+          }
+          setActiveWorkspaceId(null)
+          setView('list')
         }
         return h(WorkspaceList, {
           workspaces: workspaces,
-          expandedOverrides: expandedOverridesValue,
-          settingsOpenId: settingsOpenValue,
-          onToggleExpanded: toggleExpanded,
-          onToggleSettings: toggleSettings,
+          onOpenWorkspace: function (id) { setActiveWorkspaceId(id); setView('workspace') },
           onRefresh: refresh,
           onRemove: removeWorkspace,
           onUpdate: refresh,
-          onStoryClick: function (id) { setSelectedStoryId(id) },
         })
       }
 
@@ -2813,7 +2831,7 @@ window.__ModuleLoader__.load({
         h(StatusBar, {
           workspaces: workspaces,
           totals: totals,
-          isPolling: isPolling,
+          lastPollAt: health ? health.lastTapdPollAt : null,
         }),
         // Global setup issues (issue #6) — workspaceRoot / modules
         // config that touches every workspace. Per-workspace issues
@@ -2910,6 +2928,13 @@ window.__ModuleLoader__.load({
         return
       }
 
+      // Session jump (story detail "会话" → clickable). The host exposes
+      // ctx.sessions.open(id) (see @deepseek-ai/dsh-api-session-controller);
+      // absent in fixtures / headless, in which case the session button
+      // degrades to a plain id string.
+      var sessions = ctx.sessions || (typeof ctx.get === 'function' ? ctx.get('sessions') : undefined)
+      module.__autoRd.sessions = sessions
+
       ctx.slots.inject(PANEL_SLOT, function () {
         return slots.register(
           {
@@ -2933,7 +2958,7 @@ window.__ModuleLoader__.load({
       })
     }
 
-    var inject = ['slots']
+    var inject = ['slots', 'sessions']
 
     var module = {
       apply: apply,
@@ -2953,6 +2978,9 @@ window.__ModuleLoader__.load({
       STYLE_ELEMENT_ID: STYLE_ELEMENT_ID,
       PANEL_CSS: PANEL_CSS,
       injectStyles: injectStyles,
+      // Populated by apply(): the live ctx.sessions service (or undefined
+      // in headless / fixtures).
+      sessions: null,
       // Set to the live resync function once AutoRdPanel renders; tests
       // use it to drive a poll without waiting for the interval.
       // Test seam: direct component handles so the client-half suite can
@@ -2964,6 +2992,8 @@ window.__ModuleLoader__.load({
         PanelSkeleton: PanelSkeleton,
         StageGauge: StageGauge,
         StoryDetail: StoryDetail,
+        WorkspaceDetail: WorkspaceDetail,
+        useStoryTrajectory: useStoryTrajectory,
       },
     }
 
