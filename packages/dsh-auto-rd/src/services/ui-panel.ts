@@ -62,6 +62,26 @@ export interface PanelStory {
   mrUrl?: string
   updatedAt: string
   badge: string
+  /**
+   * Story detail fields, mirrored from StoryRecord so the client can
+   * render a read-only detail view without another round trip. Empty
+   * values (never undefined) when the pipeline has not filled them in
+   * yet — the client renders "尚未创建" rather than guessing.
+   */
+  branch: string
+  worktreePath: string
+  mainSessionId: string
+  acceptanceCriteria: string
+  blockedReason: string
+  /** Newest-last artifact refs, ready for a timeline. */
+  artifacts: PanelArtifactRef[]
+}
+
+/** Flattened ArtifactRef: kind, filename, when it was written. */
+export interface PanelArtifactRef {
+  kind: string
+  filename: string
+  createdAt: string
 }
 
 export interface PanelModule {
@@ -310,6 +330,16 @@ export function buildPanelModel(
         mrUrl: s.mrUrl,
         updatedAt: s.updatedAt,
         badge: stateBadge(s.state),
+        branch: s.branch ?? '',
+        worktreePath: s.worktreePath ?? '',
+        mainSessionId: s.mainSessionId ?? '',
+        acceptanceCriteria: s.acceptanceCriteria ?? '',
+        blockedReason: s.blockedReason ?? '',
+        // Record insertion order is arbitrary; the timeline reads in
+        // chronological order.
+        artifacts: Object.values(s.artifacts ?? {}).sort((a, b) =>
+          a.createdAt < b.createdAt ? -1 : 1,
+        ),
       })),
       overflow: Math.max(0, all.length - visible.length),
       inFlight,
@@ -431,6 +461,8 @@ export function renderPanelText(model: PanelModel): string {
     for (const s of m.stories) {
       const mr = s.mrUrl ? ` [MR](${s.mrUrl})` : ''
       lines.push(`  ${s.badge} ${s.id}: ${s.title} [${s.state}]${mr}`)
+      if (s.branch) lines.push(`      branch: ${s.branch}`)
+      if (s.blockedReason) lines.push(`      blocked: ${s.blockedReason}`)
     }
     if (m.overflow > 0) {
       lines.push(`  +${m.overflow} more (query with auto_rd_status)`)

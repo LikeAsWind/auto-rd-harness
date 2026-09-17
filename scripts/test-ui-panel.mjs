@@ -74,6 +74,7 @@ function story(over = {}) {
     title: 'A story',
     state: 'pending',
     updatedAt: '2025-01-01T00:00:00.000Z',
+    artifacts: {},
     ...over,
   }
 }
@@ -212,6 +213,64 @@ function mod(over = {}) {
   check('text: module line has id and target branch', text.includes('Payment (m1)') && text.includes('target: main'))
   check('text: story line has id, title, state', text.includes('S1: Refund endpoint') && text.includes('[implementing]'))
   check('text: MR link rendered', text.includes('[MR](https://gitlab/mr/1)'))
+}
+
+// ---- detail fields: branch / acceptance / artifacts / session -----------
+
+{
+  // Everything the story detail view needs must survive the projection
+  // from StoryRecord to PanelStory — a missing field in the panel model
+  // is a field the UI can never render.
+  const model = panelModel({
+    modules: [mod()],
+    stories: [
+      story({
+        id: 'S9',
+        title: 'Coupon stacking',
+        state: 'blocked',
+        branch: 'auto-rd/TAPD-8821',
+        worktreePath: 'D:/repos/payment/.auto-rd/8821',
+        mainSessionId: 'ses_4f2a',
+        acceptanceCriteria: '- 支持部分退款\n- 幂等',
+        blockedReason: 'TAPD 接口返回 401 Unauthorized',
+        artifacts: {
+          spec: { kind: 'spec', filename: '06-spec.md', summary: '规格', createdAt: '2026-09-17T10:22:00Z' },
+          plan: { kind: 'plan', filename: '07-plan.md', summary: '计划', createdAt: '2026-09-17T10:31:00Z' },
+        },
+      }),
+    ],
+  })
+  const s = model.modules[0].stories[0]
+  check('detail: branch carried through', s.branch === 'auto-rd/TAPD-8821', String(s.branch))
+  check('detail: worktree path carried through', s.worktreePath === 'D:/repos/payment/.auto-rd/8821', String(s.worktreePath))
+  check('detail: session id carried through', s.mainSessionId === 'ses_4f2a', String(s.mainSessionId))
+  check('detail: acceptance criteria carried through', s.acceptanceCriteria === '- 支持部分退款\n- 幂等', String(s.acceptanceCriteria))
+  check('detail: blocked reason carried through', s.blockedReason === 'TAPD 接口返回 401 Unauthorized', String(s.blockedReason))
+  check(
+    'detail: artifacts carried as ordered refs',
+    Array.isArray(s.artifacts) && s.artifacts.length === 2 && s.artifacts[0].filename === '06-spec.md',
+    JSON.stringify(s.artifacts),
+  )
+
+  const text = renderPanelText(model)
+  check('detail: text renders the branch', text.includes('branch: auto-rd/TAPD-8821'), text.split('\n').find((l) => l.includes('8821')))
+}
+
+{
+  // A story created before the pipeline filled anything in — every
+  // optional field is absent. The projection must yield explicit empty
+  // values, never crash and never silently drop keys.
+  const model = panelModel({
+    modules: [mod()],
+    stories: [story({ id: 'S0', title: 'Fresh from TAPD', state: 'pending' })],
+  })
+  const s = model.modules[0].stories[0]
+  check('detail: branch absent → empty string', s.branch === '', String(s.branch))
+  check('detail: worktree absent → empty string', s.worktreePath === '', String(s.worktreePath))
+  check('detail: session absent → empty string', s.mainSessionId === '', String(s.mainSessionId))
+  check('detail: acceptance absent → empty string', s.acceptanceCriteria === '', String(s.acceptanceCriteria))
+  check('detail: blocked reason absent → empty string', s.blockedReason === '', String(s.blockedReason))
+  check('detail: artifacts absent → empty array', Array.isArray(s.artifacts) && s.artifacts.length === 0, JSON.stringify(s.artifacts))
 }
 
 {
