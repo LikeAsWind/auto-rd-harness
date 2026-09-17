@@ -485,6 +485,7 @@ window.__ModuleLoader__.load({
       // the user has explicitly opted into storing them in plaintext
       // (see docs/ui-mockup-workspaces.html).
       var tapdToken = React.useState('')
+      var tapdWorkspaceId = React.useState('')
       var gitlabToken = React.useState('')
       // Name is pre-filled from the path/URL but the user can override
       // it freely. We only re-derive from the path when the user has
@@ -502,6 +503,8 @@ window.__ModuleLoader__.load({
       var setPickError = pickError[1]
       var tapdTokenValue = tapdToken[0]
       var setTapdToken = tapdToken[1]
+      var tapdWorkspaceIdValue = tapdWorkspaceId[0]
+      var setTapdWorkspaceId = tapdWorkspaceId[1]
       var gitlabTokenValue = gitlabToken[0]
       var setGitlabToken = gitlabToken[1]
       var nameValue = name[0]
@@ -543,6 +546,7 @@ window.__ModuleLoader__.load({
             name: nameValue,
             source: sourceValue,
             path: pathValue,
+            tapdWorkspaceId: tapdWorkspaceIdValue,
             tapdToken: tapdTokenValue,
             gitlabToken: gitlabTokenValue,
           }),
@@ -799,6 +803,46 @@ window.__ModuleLoader__.load({
                 fontSize: 12,
                 boxSizing: 'border-box',
               },
+          }),
+        ),
+        h(
+          'div',
+          { style: { marginBottom: 14 } },
+          h(
+            'label',
+            {
+              style: {
+                display: 'block',
+                fontSize: 11,
+                color: styles.labelSecondary,
+                marginBottom: 6,
+                fontWeight: 500,
+              },
+            },
+            'TAPD 工作空间 ID',
+            h(
+              'span',
+              { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } },
+              '— 留空 = 不会拉取需求。TAPD 项目页 URL 末尾的数字。',
+            ),
+          ),
+          h('input', {
+            type: 'text',
+            value: tapdWorkspaceIdValue,
+            onChange: function (e) { setTapdWorkspaceId(e.target.value); setErr(null) },
+            disabled: busyValue,
+            placeholder: '例: 69280376',
+            style: {
+              width: '100%',
+              background: styles.panelBg,
+              border: '1px solid ' + styles.borderL2,
+              borderRadius: 5,
+              padding: '8px 10px',
+              color: tapdWorkspaceIdValue ? styles.labelPrimary : styles.labelTertiary,
+              fontFamily: styles.fontCode,
+              fontSize: 12,
+              boxSizing: 'border-box',
+            },
           }),
         ),
         h(tokenField, {
