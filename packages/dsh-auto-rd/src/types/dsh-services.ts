@@ -116,10 +116,69 @@ export interface SessionRef {
   id: string
 }
 
+/**
+ * Options accepted by `SessionStore.create()`. We only use `meta.cwd`
+ * (an absolute working directory that keys the session's storage).
+ */
+export interface CreateSessionOptions {
+  meta?: {
+    cwd?: string
+    parentSession?: string
+    origin?: 'subagent'
+    agentPreset?: string
+  }
+}
+
+/** The live session returned by `sessions.create()`. */
+export interface SessionHandle {
+  id: string
+}
+
 export interface SessionsService {
   /** Takes NO arguments and returns every live session. */
   list(): SessionRef[]
   get(id: string): SessionRef | undefined
+  /**
+   * Create a session owned by the calling fiber. Requires `meta.cwd`
+   * to be an absolute path. Returns the live session (already entered
+   * and announced); its `.id` is what we persist into
+   * `StoryRecord.mainSessionId`.
+   */
+  create(id?: string, options?: CreateSessionOptions): SessionHandle
+}
+
+// ---- sessionTitle ----------------------------------------------------
+
+/**
+ * Sets / refreshes a session's display title. We call `rename` after
+ * creating a story session so the DSH session list shows the story
+ * title instead of a generated id.
+ */
+export interface SessionTitleService {
+  rename(session: SessionHandle, title: string): unknown
+}
+
+// ---- workspaceController ---------------------------------------------
+
+/**
+ * Host Workspace controller (`ctx.workspaceController`). We use only
+ * `create`, which idempotently adopts an existing directory as a DSH
+ * workspace and returns the workspace id (plus whether this call
+ * actually created it).
+ */
+export interface WorkspaceView {
+  readonly workspaceId: string
+  readonly title?: string
+  readonly path?: string
+}
+
+export interface WorkspaceCreateValue {
+  readonly workspace: WorkspaceView
+  readonly created: boolean
+}
+
+export interface WorkspaceControllerService {
+  create(request: { readonly path: string }): Promise<WorkspaceCreateValue>
 }
 
 // ---- tools -----------------------------------------------------------

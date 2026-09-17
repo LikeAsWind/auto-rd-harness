@@ -78,6 +78,8 @@ export const inject = [
   'tools',
   'systemPrompt',
   'sessions',
+  'sessionTitle',
+  'workspaceController',
 ] as const
 
 /**
@@ -293,6 +295,27 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     // round-trip. Also served under the optional webServer (same pattern
     // as the panel route).
     ctx.effect(() => {
+      // DSH workspace + session-title services. Both are declared in
+      // `inject`, so `ctx.get()` resolves them; absent in headless
+      // profiles (inject would block mount there, so this web-only path
+      // is guarded by the effect being inside the web UI branch).
+      let workspaceController: import('./types/dsh-services.js').WorkspaceControllerService | undefined
+      let sessionTitle: import('./types/dsh-services.js').SessionTitleService | undefined
+      try {
+        workspaceController = ctx.get('workspaceController' as never) as
+          | import('./types/dsh-services.js').WorkspaceControllerService
+          | undefined
+      } catch {
+        workspaceController = undefined
+      }
+      try {
+        sessionTitle = ctx.get('sessionTitle' as never) as
+          | import('./types/dsh-services.js').SessionTitleService
+          | undefined
+      } catch {
+        sessionTitle = undefined
+      }
+
       const dispose = registerReconfigureRoute(ctx, {
         storage,
         logger,
@@ -305,6 +328,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
           svcs.notifier.stop()
         },
         currentServices: services,
+        workspaceController,
+        sessionTitle,
       })
       return () => {
         if (dispose) dispose()
@@ -362,7 +387,23 @@ function startServices(
   const trajectory = new TrajectoryRecorder(ctx, { storage, logger })
   const workspaceManager = new WorkspaceManager(ctx, { storage, logger, config })
   const agentProvider = new AgentProvider(ctx, { logger, config, trajectory })
-  const runner = new StoryRunner(ctx, { storage, logger, config, workspaceManager, agentProvider, trajectory })
+  // DSH session services — declared in `inject`, so `ctx.get()` works.
+  const sessions = ctx.get('sessions' as never) as
+    | import('./types/dsh-services.js').SessionsService
+    | undefined
+  const sessionTitle = ctx.get('sessionTitle' as never) as
+    | import('./types/dsh-services.js').SessionTitleService
+    | undefined
+  const runner = new StoryRunner(ctx, {
+    storage,
+    logger,
+    config,
+    workspaceManager,
+    agentProvider,
+    trajectory,
+    sessions,
+    sessionTitle,
+  })
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })
   const poller = new TapdPoller(ctx, {
     storage,
