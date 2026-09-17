@@ -245,8 +245,9 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
   const el = exports2.__autoRd.components.AutoRdPanel()
 
   check('panel: uses React state', shim.calls.useState >= 1, String(shim.calls.useState))
-  // Two mount-once effects: the data poll and the stylesheet injection.
-  check('panel: uses exactly two React effects', shim.calls.useEffect.length === 2, String(shim.calls.useEffect.length))
+  // Three mount-once effects: the data poll, the pulse clock, and the
+  // stylesheet injection.
+  check('panel: uses exactly three React effects', shim.calls.useEffect.length === 3, String(shim.calls.useEffect.length))
   for (const eff of shim.calls.useEffect) {
     check(`panel: effect [${shim.calls.useEffect.indexOf(eff)}] has empty deps (mount once)`, JSON.stringify(eff.deps) === '[]', JSON.stringify(eff.deps))
   }
@@ -404,6 +405,9 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
 
 {
   // A failing fetch surfaces the error in state instead of throwing.
+  // This block fails from the very first poll, so there is no cached
+  // model and no lastSyncedAt to preserve — that case is covered below
+  // in the sync-pulse section.
   const shim = makeReact()
   const exports4 = spec.factory(makeRequire(shim))
   const realFetch = globalThis.fetch
@@ -419,6 +423,89 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
       String(shim.slots[0]?.error).includes('503'),
       String(shim.slots[0]?.error),
     )
+    cleanup()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+// ---- the sync pulse ---------------------------------------------------
+//
+// The poll runs every 5s. The pulse is the only element that always
+// says how fresh the screen is: "已同步 · N 秒前" while healthy, and
+// "重连中 · 数据停在 <时刻>" once fetches fail but a cached model
+// remains. It also offers a manual resync button.
+//
+// The shim's setState is synchronous, so a state machine emerges that
+// the tests can read directly from shim.slots.
+
+const PULSE_MODEL = {
+  ok: true,
+  model: {
+    modules: [
+      { id: 'm1', title: 'Payment', defaultBranch: 'main', overflow: 0, inFlight: 0, stories: [] },
+    ],
+    totals: { modules: 1, stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 },
+  },
+  text: 'Auto-RD: 1 module(s)',
+}
+
+{
+  // First failure with no cache: lastSyncedAt must stay unset — the
+  // panel has never synced, so there is no honest "data stopped at".
+  const shim = makeReact()
+  const exports5 = spec.factory(makeRequire(shim))
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: false, status: 503, async json() { return {} } })
+
+  try {
+    exports5.__autoRd.components.AutoRdPanel()
+    shim.calls.useEffect[0].fn()
+    await new Promise((r) => setTimeout(r, 30))
+    const state = shim.slots[0]
+    check('pulse: never-synced state has no lastSyncedAt', state?.lastSyncedAt == null, String(state?.lastSyncedAt))
+    check('pulse: never-synced state stays error (not stale)', state?.status === 'error', String(state?.status))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+{
+  // Success then failure: cached model stays, status flips to error,
+  // and lastSyncedAt pins when the data stopped moving.
+  const shim = makeReact()
+  const exports6 = spec.factory(makeRequire(shim))
+  const realFetch = globalThis.fetch
+  let calls = 0
+  const t0 = Date.now()
+  globalThis.fetch = async () => {
+    calls += 1
+    if (calls === 1) return { ok: true, status: 200, async json() { return PULSE_MODEL } }
+    return { ok: false, status: 503, async json() { return {} } }
+  }
+
+  try {
+    // One render only: the shim's useState appends fresh slots on every
+    // call, so re-rendering would orphan the setters the fetch closures
+    // captured. The hook's setState writes into slot 0 in place, which
+    // is exactly what the assertions below read.
+    exports6.__autoRd.components.AutoRdPanel()
+    const cleanup = shim.calls.useEffect[0].fn()
+    await new Promise((r) => setTimeout(r, 30))
+    const okState = shim.slots[0]
+    check('pulse: success stamps lastSyncedAt', typeof okState?.lastSyncedAt === 'number' && okState.lastSyncedAt >= t0 - 5 && okState.lastSyncedAt <= Date.now() + 5, String(okState?.lastSyncedAt))
+
+    // Force a poll now (skip the 5s interval): the manual resync path
+    // exercises the same load() the interval uses.
+    const resync = exports6.__autoRd.resync
+    check('pulse: exposes a resync trigger for tests', typeof resync === 'function', typeof resync)
+    await resync()
+    await new Promise((r) => setTimeout(r, 30))
+
+    const staleState = shim.slots[0]
+    check('pulse: failure keeps the cached model', staleState?.model?.modules?.[0]?.id === 'm1', JSON.stringify(staleState?.model?.modules?.[0]?.id))
+    check('pulse: failure flips status to error with cache', staleState?.status === 'error', String(staleState?.status))
+    check('pulse: lastSyncedAt unchanged after the failure', staleState?.lastSyncedAt === okState.lastSyncedAt, `${okState?.lastSyncedAt} -> ${staleState?.lastSyncedAt}`)
     cleanup()
   } finally {
     globalThis.fetch = realFetch

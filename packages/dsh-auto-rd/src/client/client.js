@@ -163,50 +163,81 @@ window.__ModuleLoader__.load({
     }
 
     // ---- panel data hook -------------------------------------------------
+    //
+    // State shape (the sync pulse reads the last two fields):
+    //   status: 'loading' | 'ok' | 'error'
+    //   model / text: the latest successful payload (cached across
+    //     failures so the screen keeps its content)
+    //   error: the last failure message, '' when healthy
+    //   lastSyncedAt: Date.now() of the last successful fetch — null
+    //     until then, and NOT advanced by failures. The pulse uses it
+    //     to say "已同步 · N 秒前" or, on error-with-cache,
+    //     "重连中 · 数据停在 <时刻>".
 
     function usePanelData() {
-      var state = React.useState({ status: 'loading', model: null, text: '', error: '' })
+      var state = React.useState({
+        status: 'loading',
+        model: null,
+        text: '',
+        error: '',
+        lastSyncedAt: null,
+      })
       var value = state[0]
       var setValue = state[1]
 
       function applyBody(body) {
-        setValue({ status: 'ok', model: body.model, text: body.text || '', error: '' })
+        setValue({
+          status: 'ok',
+          model: body.model,
+          text: body.text || '',
+          error: '',
+          lastSyncedAt: Date.now(),
+        })
+      }
+
+      function load() {
+        return fetch(DATA_URL, { headers: { accept: 'application/json' } })
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status)
+            return res.json()
+          })
+          .then(function (body) {
+            if (!body || body.ok !== true) throw new Error('panel_unavailable')
+            setValue({
+              status: 'ok',
+              model: body.model,
+              text: body.text || '',
+              error: '',
+              lastSyncedAt: Date.now(),
+            })
+          })
+          .catch(function (err) {
+            setValue(function (prev) {
+              return {
+                status: 'error',
+                model: prev.model,
+                text: prev.text,
+                error: String((err && err.message) || err),
+                lastSyncedAt: prev.lastSyncedAt,
+              }
+            })
+          })
       }
 
       React.useEffect(function () {
         var alive = true
-        function load() {
-          fetch(DATA_URL, { headers: { accept: 'application/json' } })
-            .then(function (res) {
-              if (!res.ok) throw new Error('HTTP ' + res.status)
-              return res.json()
-            })
-            .then(function (body) {
-              if (!alive) return
-              if (!body || body.ok !== true) throw new Error('panel_unavailable')
-              setValue({ status: 'ok', model: body.model, text: body.text || '', error: '' })
-            })
-            .catch(function (err) {
-              if (!alive) return
-              setValue(function (prev) {
-                return {
-                  status: 'error',
-                  model: prev.model,
-                  text: prev.text,
-                  error: String((err && err.message) || err),
-                }
-              })
-            })
-        }
-        load()
-        var timer = setInterval(load, POLL_MS)
+        var timer = setInterval(function () {
+          if (alive) load()
+        }, POLL_MS)
         return function () {
           alive = false
           clearInterval(timer)
         }
       }, [])
 
-      return { panel: value, applyBody: applyBody }
+      load()
+
+      return { panel: value, applyBody: applyBody, resync: load }
     }
 
     // ---- add-workspace form ----------------------------------------------
@@ -1433,6 +1464,109 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---- sync pulse (always-on freshness line) ---------------------------
+    //
+    // The one element that always tells the truth about how fresh the
+    // screen is: "已同步 · N 秒前" while the poll succeeds, and
+    // "重连中 · 数据停在 HH:MM" once fetches fail but the cached
+    // model is still on screen. Without it a stalled poll looks
+    // exactly like a quiet pipeline.
+    //
+    // `now` is passed in so the re-render that the poll interval can't
+    // trigger on its own (the pulse text only changes with time, not
+    // with state) is driven by the same 5s tick as the data itself —
+    // one clock, one heartbeat.
+
+    function SyncPulse(props) {
+      var status = props.status
+      var lastSyncedAt = props.lastSyncedAt
+      var onResync = props.onResync
+      var now = props.now
+
+      var synced = status === 'ok'
+      // Error WITH a cache: content stays on screen, so the pulse must
+      // own up to its age. Error without a cache: the error banner
+      // speaks; the pulse just says 重连中.
+      var stale = status === 'error' && lastSyncedAt != null
+
+      var label = synced
+        ? '已同步 · ' + agoLabel(now - lastSyncedAt)
+        : stale
+          ? '重连中 · 数据停在 ' + clockLabel(lastSyncedAt)
+          : status === 'loading'
+            ? '首次同步中…'
+            : '重连中…'
+
+      return h(
+        'div',
+        {
+          className: 'auto-rd-pulse',
+          'aria-live': 'polite',
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+            padding: '7px 20px',
+            background: styles.panelBgSubtle,
+            borderBottom: '1px solid ' + styles.borderL3,
+            fontFamily: styles.fontCode,
+            fontSize: 11,
+            color: stale || status === 'error' ? styles.statusError : styles.labelSecondary,
+          },
+        },
+        h('span', {
+          className: 'auto-rd-pulse-dot',
+          style: {
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: synced ? styles.statusSuccess : styles.statusError,
+            display: 'inline-block',
+            flex: 'none',
+          },
+        }),
+        h('span', null, label),
+        h(
+          'button',
+          {
+            type: 'button',
+            onClick: function () { if (onResync) onResync() },
+            'aria-label': '立即同步',
+            title: '立即同步',
+            style: {
+              marginLeft: 'auto',
+              border: 'none',
+              background: 'none',
+              padding: '3px 6px',
+              margin: '-3px -6px -3px auto',
+              color: styles.labelTertiary,
+              cursor: 'pointer',
+              fontSize: 12,
+              lineHeight: 1,
+              borderRadius: 4,
+            },
+          },
+          '↻',
+        ),
+      )
+    }
+
+    function agoLabel(ms) {
+      if (ms < 0) ms = 0
+      var sec = Math.floor(ms / 1000)
+      if (sec < 5) return '刚刚'
+      if (sec < 60) return sec + ' 秒前'
+      var min = Math.floor(sec / 60)
+      if (min < 60) return min + ' 分钟前'
+      return Math.floor(min / 60) + ' 小时前'
+    }
+
+    function clockLabel(epochMs) {
+      var d = new Date(epochMs)
+      function pad(n) { return (n < 10 ? '0' : '') + n }
+      return pad(d.getHours()) + ':' + pad(d.getMinutes())
+    }
+
     // ---- status bar (one row, three stats) -------------------------------
 
     function StatusBar(props) {
@@ -1527,6 +1661,16 @@ window.__ModuleLoader__.load({
       var data = usePanelData()
       var panel = data.panel
       var applyBody = data.applyBody
+      // resync trigger for tests: routes the panel's resync (which lives
+      // in a hook closure) to the outside world once the panel renders.
+      var resync = data.resync
+      module.__autoRd.resync = resync
+
+      // Drives the pulse's "N 秒前" text on the same cadence as the
+      // poll, without an extra timer.
+      var now = React.useState(Date.now())
+      var nowValue = now[0]
+      var setNow = now[1]
 
       // The responsive/focus rules live in the injected stylesheet
       // (see PANEL_CSS). Mounted once, kept for the panel's lifetime.
@@ -1534,6 +1678,15 @@ window.__ModuleLoader__.load({
         injectStyles(null)
       }, [])
 
+      React.useEffect(function () {
+        function tick() { setNow(Date.now()) }
+        var timer = setInterval(tick, POLL_MS)
+        return function () { clearInterval(timer) }
+      }, [])
+
+      // The model content re-renders only when data changes; the pulse
+      // text depends on `now` too, so refresh it whenever the tick
+      // fires (React skips the work if nothing changed).
       var model = panel.model
       var modules = (model && model.modules) || []
       var totals = (model && model.totals) || { stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 }
@@ -1764,6 +1917,12 @@ window.__ModuleLoader__.load({
             'v0.1.0',
           ),
         ),
+        h(SyncPulse, {
+          status: panel.status,
+          lastSyncedAt: panel.lastSyncedAt,
+          onResync: resync,
+          now: nowValue,
+        }),
         h(StatusBar, {
           workspaces: workspaces,
           totals: totals,
@@ -1890,9 +2049,11 @@ window.__ModuleLoader__.load({
       STYLE_ELEMENT_ID: STYLE_ELEMENT_ID,
       PANEL_CSS: PANEL_CSS,
       injectStyles: injectStyles,
+      // Set to the live resync function once AutoRdPanel renders; tests
+      // use it to drive a poll without waiting for the interval.
       // Test seam: direct component handles so the client-half suite can
       // render the icon and panel without a full shell.
-      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel },
+      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel, SyncPulse: SyncPulse },
     }
 
     return module
