@@ -484,20 +484,16 @@ function main() {
         };
         copyRecursive(src, dst);
       };
-      // Force-copy everything `package.json#files` ships. The list
-      // mirrors what `npm pack` puts into the tarball; if `files`
-      // changes, update this list too (and test-install-to-dsh.mjs).
+      // Force-copy everything `package.json#files` ships: the whole
+      // `lib/` tree plus three top-level config files. Copying the tree
+      // (rather than enumerating subdirs) means any newly-added source
+      // file — e.g. a new lib/domain/credentials.js — lands in the
+      // installed bundle even when pnpm reuses a cached install without
+      // bumping the version.
       forceCopyFile('cordis.patch.yml');
       forceCopyFile('dsh.plugin.json');
       forceCopyFile('package.json');
-      forceCopyFile('lib/index.js');
-      forceCopyFile('lib/index.d.ts');
-      forceCopyFile('lib/client.js');
-      forceCopyTree('lib/agents/personas');
-      // `lib/services/*.js` are the per-route host implementations. Each
-      // one is its own compiled .js file produced by tsc; `npm pack`
-      // ships the whole `lib/` tree, so we mirror that.
-      forceCopyTree('lib/services');
+      forceCopyTree('lib');
       process.stdout.write(`[2b/5] force-refreshed ${BUNDLE_NAME} from the freshly built sources\n`);
     }
   }
