@@ -186,8 +186,7 @@ window.__ModuleLoader__.load({
       // summary's `aria-expanded` reflection. The caret rotates on
       // `[open]`.
       '.auto-rd-ws-row summary {',
-      '  display: grid;',
-      '  grid-template-columns: 16px minmax(0, 1fr) auto auto auto;',
+      '  display: flex;',
       '  align-items: center;',
       '  gap: 12px;',
       '  padding: 14px 16px;',
@@ -197,6 +196,25 @@ window.__ModuleLoader__.load({
       '  cursor: pointer;',
       '  background: var(--dsw-alias-surface-primary, #ffffff);',
       '  list-style: none;',
+      '  min-width: 0;',
+      '}',
+      '.auto-rd-ws-row .auto-rd-ws-text {',
+      '  flex: 1 1 auto;',
+      '  min-width: 0;',
+      '  overflow: hidden;',
+      '}',
+      '.auto-rd-ws-row .auto-rd-ws-progress {',
+      '  flex: 0 0 auto;',
+      '  max-width: 40%;',
+      '  overflow: hidden;',
+      '  text-overflow: ellipsis;',
+      '  white-space: nowrap;',
+      '}',
+      '.auto-rd-ws-row .auto-rd-ws-actions {',
+      '  flex: 0 0 auto;',
+      '  display: flex;',
+      '  gap: 4px;',
+      '  align-items: center;',
       '}',
       '.auto-rd-ws-row summary::-webkit-details-marker { display: none; }',
       '.auto-rd-ws-row summary::marker { content: ""; }',
@@ -1041,7 +1059,7 @@ window.__ModuleLoader__.load({
           h('div', { style: dotStyle, 'aria-hidden': 'true' }),
           h(
             'div',
-            { style: { minWidth: 0 } },
+            { className: 'auto-rd-ws-text' },
             h(
               'div',
               {
@@ -1050,6 +1068,9 @@ window.__ModuleLoader__.load({
                   color: styles.labelPrimary,
                   fontWeight: 500,
                   marginBottom: 2,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
                 },
               },
               ws.name,
@@ -1078,15 +1099,12 @@ window.__ModuleLoader__.load({
           h(
             'div',
             {
+              className: 'auto-rd-ws-progress',
               style: {
                 fontFamily: styles.fontCode,
                 fontSize: 11,
                 color: styles.labelSecondary,
                 textAlign: 'right',
-                whiteSpace: 'nowrap',
-                maxWidth: '40%',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
               },
             },
             progress.length
@@ -1104,61 +1122,65 @@ window.__ModuleLoader__.load({
                 ),
           ),
           h(
-            'button',
-            {
-              type: 'button',
-              className: 'auto-rd-ws-settings',
-              title: settingsOpen ? '收起配置' : '编辑配置',
-              'aria-pressed': settingsOpen ? 'true' : 'false',
-              'aria-label': settingsOpen ? '收起配置' : '编辑配置',
-              onClick: function (e) {
-                e.preventDefault()
-                e.stopPropagation()
-                if (typeof onToggleSettings === 'function') onToggleSettings()
+            'div',
+            { className: 'auto-rd-ws-actions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'auto-rd-ws-settings',
+                title: settingsOpen ? '收起配置' : '编辑配置',
+                'aria-pressed': settingsOpen ? 'true' : 'false',
+                'aria-label': settingsOpen ? '收起配置' : '编辑配置',
+                onClick: function (e) {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (typeof onToggleSettings === 'function') onToggleSettings()
+                },
+                style: {
+                  width: 22,
+                  height: 22,
+                  padding: 0,
+                  background: settingsOpen ? styles.panelBg : 'transparent',
+                  border: '1px solid ' + (settingsOpen ? styles.borderL2 : styles.borderL3),
+                  borderRadius: 4,
+                  color: settingsOpen ? styles.labelPrimary : styles.labelTertiary,
+                  fontSize: 12,
+                  lineHeight: '20px',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                },
               },
-              style: {
-                width: 22,
-                height: 22,
-                padding: 0,
-                background: settingsOpen ? styles.panelBg : 'transparent',
-                border: '1px solid ' + (settingsOpen ? styles.borderL2 : styles.borderL3),
-                borderRadius: 4,
-                color: settingsOpen ? styles.labelPrimary : styles.labelTertiary,
-                fontSize: 12,
-                lineHeight: '20px',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
+              '⚙',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'auto-rd-ws-remove',
+                title: '删除工作空间(不删除本地代码)',
+                'aria-label': '删除工作空间',
+                onClick: function (e) {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (typeof onRemove === 'function') onRemove(ws.id)
+                },
+                style: {
+                  width: 22,
+                  height: 22,
+                  padding: 0,
+                  background: 'transparent',
+                  border: '1px solid ' + styles.borderL3,
+                  borderRadius: 4,
+                  color: styles.labelTertiary,
+                  fontSize: 14,
+                  lineHeight: '20px',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                },
               },
-            },
-            '⚙',
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'auto-rd-ws-remove',
-              title: '删除工作空间(不删除本地代码)',
-              'aria-label': '删除工作空间',
-              onClick: function (e) {
-                e.preventDefault()
-                e.stopPropagation()
-                if (typeof onRemove === 'function') onRemove(ws.id)
-              },
-              style: {
-                width: 22,
-                height: 22,
-                padding: 0,
-                background: 'transparent',
-                border: '1px solid ' + styles.borderL3,
-                borderRadius: 4,
-                color: styles.labelTertiary,
-                fontSize: 14,
-                lineHeight: '20px',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-              },
-            },
-            '×',
+              '×',
+            ),
           ),
         ),
         h(WorkspaceDetail, {
