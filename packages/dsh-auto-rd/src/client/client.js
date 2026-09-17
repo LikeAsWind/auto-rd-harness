@@ -1552,14 +1552,19 @@ window.__ModuleLoader__.load({
 
       var isPolling = health && health.lastTapdPollAt != null
 
-      function refresh() {
-        // Force a fresh fetch by toggling state through usePanelData.
-        // Simpler: trigger via a custom event usePanelData can listen to.
-        // For now, the next 5s poll picks it up; reload the page if
-        // urgent.
-        // TODO(workspace-add): make usePanelData expose a refresh().
-        if (typeof window !== 'undefined' && window.location) {
-          window.location.reload()
+      /**
+       * Apply a mutation response in place — no page reload.
+       *
+       * Every mutating host action (add / remove / update workspace)
+       * returns the freshly-built panel model in its response, so the
+       * client can render the new state directly instead of reloading
+       * the page and losing scroll position and expansion state. The
+       * 5-second poll still reconciles anything a concurrent change
+       * did on the host side.
+       */
+      function refresh(body) {
+        if (body && body.model) {
+          applyBody(body)
         }
       }
 
@@ -1596,7 +1601,10 @@ window.__ModuleLoader__.load({
           .then(function (result) {
             setConfirmRemove(null)
             if (result.ok && result.body && result.body.ok) {
-              refresh()
+              // Collapse the row we just removed so a stale expansion
+              // does not point at a workspace that no longer exists.
+              if (expandedIdValue === id) setExpandedId(null)
+              refresh(result.body)
             } else {
               setRemoveError(
                 (result.body && (result.body.message || result.body.error)) ||
@@ -1702,7 +1710,7 @@ window.__ModuleLoader__.load({
           addOpenValue
             ? h(AddWorkspaceForm, {
                 onCancel: function () { setAddOpen(false) },
-                onAdded: function () { setAddOpen(false); refresh() },
+                onAdded: function (body) { setAddOpen(false); refresh(body) },
               })
             : null,
           !addOpenValue
@@ -1712,12 +1720,7 @@ window.__ModuleLoader__.load({
                 onToggleExpanded: setExpandedId,
                 onRefresh: refresh,
                 onRemove: removeWorkspace,
-                onUpdate: function () {
-                  // The host already swapped liveConfig + storage; the
-                  // next 5-second poll reconciles the panel. Reload
-                  // keeps the UI consistent immediately after Apply.
-                  refresh()
-                },
+                onUpdate: refresh,
               })
             : null,
           panel.status === 'error' && !model
