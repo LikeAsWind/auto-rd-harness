@@ -18,6 +18,27 @@ export const ModuleRecordSchema = z.object({
   defaultBranch: z.string(),
   workspacePath: z.string().describe('Absolute path to the cloned module workspace'),
   createdAt: z.string().describe('ISO 8601 timestamp'),
+  /** TAPD workspace id this module polls from (1:1). Empty = skip. */
+  tapdWorkspaceId: z.string().default('').optional(),
+  /**
+   * DSH workspace id this module is bound to (1:1). Set when the
+   * workspace is adopted into DSH via `ctx.workspaceController.create`.
+   * Empty until the binding succeeds.
+   */
+  dsWorkspaceId: z.string().default('').optional(),
+  /**
+   * Per-workspace credentials. Empty string means "inherit the
+   * top-level config token" — the poller / runner resolve the effective
+   * token at use time: workspace value if non-empty, else the global
+   * value. See services/tapd-poller.ts + story-runner.ts.
+   */
+  tapdApiToken: z.string().default('').optional(),
+  gitlabApiToken: z.string().default('').optional(),
+  /**
+   * Per-workspace model override. Partial; each role falls back to the
+   * top-level modelSelection when absent.
+   */
+  modelSelection: z.record(z.string(), z.string()).default({}).optional(),
 })
 
 export type ModuleRecord = z.infer<typeof ModuleRecordSchema>

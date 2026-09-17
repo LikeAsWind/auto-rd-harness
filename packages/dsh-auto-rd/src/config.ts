@@ -33,13 +33,6 @@
  */
 import { z } from 'zod'
 
-export const ModuleConfigSchema = z.object({
-  id: z.string().min(1).describe('Stable identifier used as workspace directory name and story module key'),
-  title: z.string().describe('Human-readable title shown in the sidebar'),
-  repoUrl: z.string().url().describe('Git URL of the module repository'),
-  defaultBranch: z.string().default('main').describe('Branch that PRs target'),
-})
-
 export const ModelSelectionSchema = z.object({
   brainstorm: z.string().default('sonnet'),
   critic: z.string().default('sonnet'),
@@ -52,6 +45,38 @@ export const ModelSelectionSchema = z.object({
   verification: z.string().default('sonnet'),
   review: z.string().default('sonnet'),
   finalVerify: z.string().default('opus'),
+})
+
+export const ModuleConfigSchema = z.object({
+  id: z.string().min(1).describe('Stable identifier used as workspace directory name and story module key'),
+  title: z.string().describe('Human-readable title shown in the sidebar'),
+  repoUrl: z.string().url().describe('Git URL of the module repository'),
+  defaultBranch: z.string().default('main').describe('Branch that PRs target'),
+  /**
+   * TAPD workspace id this module polls from (1:1). Optional — when
+   * empty the module is skipped by the poller. The old global
+   * `tapdWorkspaceIds` array is superseded by this per-module field.
+   */
+  tapdWorkspaceId: z.string().default('').optional(),
+  /**
+   * Per-workspace TAPD API token. Optional — when empty, the poller
+   * falls back to the top-level `tapdApiToken`. A workspace with its
+   * own token talks to TAPD with that identity; one without it inherits
+   * the global value (or the mock fixture when neither is set).
+   */
+  tapdApiToken: z.string().default('').optional(),
+  /**
+   * Per-workspace GitLab API token. Optional — empty means "use the
+   * top-level `gitlabApiToken`". Same inheritance rule as TAPD.
+   */
+  gitlabApiToken: z.string().default('').optional(),
+  /**
+   * Per-workspace model selection. Optional — a PARTIAL map of role →
+   * model; each role falls back to the top-level `modelSelection` when
+   * absent. Stored as a free-form record so a workspace can pin just
+   * one role (e.g. implementation → haiku) without repeating the rest.
+   */
+  modelSelection: z.record(z.string(), z.string()).default({}).optional(),
 })
 
 export const ConfigSchema = z.object({
