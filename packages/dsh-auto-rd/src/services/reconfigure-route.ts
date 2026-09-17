@@ -43,7 +43,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { ConfigSchema, normalizeConfig, type Config } from '../config.js'
+import { ConfigSchema, type Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import type {
@@ -398,7 +398,7 @@ async function handleReconfigure(
     return
   }
 
-  const next = normalizeConfig(parsed)
+  const next = parsed
 
   // If the full-config-swap carries literal (non-reference-name) tokens
   // in either global field, route them through the credentials store
@@ -517,7 +517,6 @@ async function handleReconfigure(
 
   logger.info(
     `[auto-rd] reconfigured: modules: ${previous.modules.length} -> ${next.modules.length}, ` +
-      `mock: ${previous.useTapdMock} -> ${next.useTapdMock}, ` +
       `tapd-token: ${previous.tapdApiToken ? 'set' : 'empty'} -> ${next.tapdApiToken ? 'set' : 'empty'}, ` +
       `gitlab-token: ${previous.gitlabApiToken ? 'set' : 'empty'} -> ${next.gitlabApiToken ? 'set' : 'empty'}, ` +
       `workspaceRoot: "${previous.workspaceRoot}" -> "${next.workspaceRoot}"`,

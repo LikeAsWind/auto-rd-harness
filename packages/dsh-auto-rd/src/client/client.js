@@ -1794,16 +1794,23 @@ window.__ModuleLoader__.load({
       function submit() {
         setBusy(true)
         setStatus(null)
+        // Tokens never travel back from the host, so the inputs start
+        // empty. An empty input means "leave the stored token alone" —
+        // omit the field entirely so the host's update_workspace keeps
+        // the existing value. Sending an empty string would be read as
+        // "clear the token" and wipe a credential the user never meant
+        // to touch.
+        var body = {
+          action: 'update_workspace',
+          name: ws.id,
+          tapdWorkspaceId: tapdWorkspaceIdValue,
+        }
+        if (tapdTokenValue !== '') body.tapdToken = tapdTokenValue
+        if (gitlabTokenValue !== '') body.gitlabToken = gitlabTokenValue
         fetch(RECONFIGURE_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            action: 'update_workspace',
-            name: ws.id,
-            tapdWorkspaceId: tapdWorkspaceIdValue,
-            tapdToken: tapdTokenValue,
-            gitlabToken: gitlabTokenValue,
-          }),
+          body: JSON.stringify(body),
         })
           .then(function (res) {
             return res.json().then(function (body) { return { ok: res.ok, body: body } })
@@ -2833,32 +2840,33 @@ window.__ModuleLoader__.load({
           totals: totals,
           lastPollAt: health ? health.lastTapdPollAt : null,
         }),
-        // Global setup issues (issue #6) — workspaceRoot / modules
-        // config that touches every workspace. Per-workspace issues
-        // travel with their row; only the truly cross-cutting ones
-        // belong here.
-        (health && health.issues && health.issues.length)
-          ? h(
-              'div',
-              { className: 'auto-rd-global-issues', role: 'region', 'aria-label': '全局配置问题' },
-              health.issues
-                .filter(function (iss) { return iss.key === 'workspace_root' || iss.key === 'modules' })
-                .map(function (iss) {
-                  return h(
-                    'span',
-                    { key: iss.key, style: { display: 'contents' } },
-                    h('span', { className: 'auto-rd-global-issues-mark', 'aria-hidden': 'true' }, '\u2717'),
-                    h(
-                      'span',
-                      null,
-                      h('span', { className: 'auto-rd-global-issues-msg' }, iss.message),
-                      h('br'),
-                      h('span', { className: 'auto-rd-global-issues-fix' }, iss.remedy),
-                    ),
-                  )
-                }),
-            )
-          : null,
+        // Global setup issues (issue #6) — workspaceRoot config that
+        // touches every workspace. Per-workspace issues travel with
+        // their row; only the truly cross-cutting ones belong here.
+        (function () {
+          var globalIssues = (health && health.issues && health.issues.length)
+            ? health.issues.filter(function (iss) { return iss.key === 'workspace_root' })
+            : []
+          if (globalIssues.length === 0) return null
+          return h(
+            'div',
+            { className: 'auto-rd-global-issues', role: 'region', 'aria-label': '全局配置问题' },
+            globalIssues.map(function (iss) {
+              return h(
+                'span',
+                { key: iss.key, style: { display: 'contents' } },
+                h('span', { className: 'auto-rd-global-issues-mark', 'aria-hidden': 'true' }, '\u2717'),
+                h(
+                  'span',
+                  null,
+                  h('span', { className: 'auto-rd-global-issues-msg' }, iss.message),
+                  h('br'),
+                  h('span', { className: 'auto-rd-global-issues-fix' }, iss.remedy),
+                ),
+              )
+            }),
+          )
+        })(),
         h(
           'div',
           {

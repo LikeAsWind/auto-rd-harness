@@ -2,11 +2,6 @@
  * TapdPoller — fetches new stories from TAPD on a timer and adds them to the
  * auto-rd story queue.
  *
- * M4-A: real HTTP fetch path is wired and selected when `useTapdMock=false`.
- * The mock fixture remains for offline development and tests; the same
- * internal `TapdStory` shape is produced either way, so the orchestrator
- * doesn't care which path returned the data.
- *
  * Module routing: each TAPD story is mapped to a Module by a label /
  * category rule. The simplest rule (used here) is: if the story's
  * `category` field matches a configured module.id, route to that module.
@@ -82,7 +77,9 @@ interface RawTapdApiStory {
   acceptanceCriteria?: string
   /**
    * Module routing hint. TAPD supports either a free-form category
-   * label or a structured `module` object; we accept either.
+   * label or a structured `module` object; we accept either. In
+   * practice the real TAPD API returns neither — the poller tags each
+   * story with the module it was fetched under.
    */
   category?: string
   module?: string | { id?: string; name?: string }
@@ -92,38 +89,15 @@ interface RawTapdApiStory {
 /**
  * GET /stories response envelope. TAPD has historically returned
  * multiple shapes depending on the API version; we accept the most
- * common ones.
+ * common ones. The real API wraps each row in a `Story` key:
+ * `{ data: [ { Story: { id, name, ... } } ] }`, while older/mocked
+ * shapes are flat arrays or `{ data: [ { id, name } ] }`.
  */
 interface RawTapdListResponse {
-  data?: RawTapdApiStory[]
-  stories?: RawTapdApiStory[]
-  items?: RawTapdApiStory[]
+  data?: Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
+  stories?: Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
+  items?: Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
 }
-
-// M1 mock fixtures — replaced by HTTP fetch in M2.
-const MOCK_TAPD_FIXTURE: TapdStory[] = [
-  {
-    id: 'TAPD-MOCK-001',
-    title: 'Add /refunds endpoint to payment service',
-    description:
-      'Users want to be able to issue a partial refund against a captured payment. ' +
-      'The endpoint should accept an order id + amount and call the gateway.',
-    acceptanceCriteria:
-      'Given a captured payment, when POST /refunds with {orderId, amount}, ' +
-      'then a refund record is created and the gateway is called with the right args.',
-    category: 'payment',
-  },
-  {
-    id: 'TAPD-MOCK-002',
-    title: 'Add order cancellation reason field',
-    description:
-      'When an order is cancelled, capture the user-supplied reason for analytics.',
-    acceptanceCriteria:
-      'Given an open order, when POST /orders/:id/cancel with {reason}, ' +
-      'then the order transitions to cancelled with the reason persisted.',
-    category: 'order',
-  },
-]
 
 export class TapdPoller {
   private timer: ReturnType<typeof setInterval> | null = null
@@ -137,8 +111,7 @@ export class TapdPoller {
     if (this.timer) return
     this.deps.logger.info(
       `TapdPoller starting (interval ${this.deps.config.tapdPollIntervalMs}ms, ` +
-        `${this.deps.config.modules.length} modules configured, ` +
-        `mock=${this.deps.config.useTapdMock})`,
+        `${this.deps.config.modules.length} modules configured)`,
     )
 
     // Run once immediately, then on interval.
@@ -239,34 +212,20 @@ export class TapdPoller {
   /**
    * Fetch from TAPD.
    *
-   * Branches on `useTapdMock`:
-   *   - true:  returns the local fixture (offline dev / unit tests).
-   *   - false: iterates every configured module and fetches the module's
-   *            own TAPD workspace (1:1 mapping). A module without a
-   *            `tapdWorkspaceId` is skipped. Each module uses its own
-   *            `tapdApiToken` when set, otherwise the global token.
+   * Iterates every configured module and fetches the module's own TAPD
+   * workspace (1:1 mapping). A module without a `tapdWorkspaceId` is
+   * skipped. Each module resolves its own token through the credentials
+   * seam (per-module override first, else the global token).
    *
    * Per-module errors are caught and logged; one workspace being 401/500
    * does not prevent the others from advancing. Persistent failures show
    * up as repeated error logs but never crash the plugin.
    */
   private async fetchStories(): Promise<{ stories: TapdStory[]; results: PollResult[] }> {
-    if (this.deps.config.useTapdMock) {
-      // Mock fixture: every story's category doubles as its moduleId.
-      const results: PollResult[] = this.deps.config.modules.map((m) => ({
-        moduleId: m.id,
-        error: null,
-        newCount: 0,
-      }))
-      const stories = MOCK_TAPD_FIXTURE.filter((t) =>
-        this.deps.config.modules.some((m) => m.id === t.category),
-      )
-      return { stories, results }
-    }
     const modules = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
     if (modules.length === 0) {
       this.deps.logger.warn(
-        'TapdPoller: useTapdMock=false but no module has a tapdWorkspaceId -- nothing to fetch',
+        'TapdPoller: no module has a tapdWorkspaceId -- nothing to fetch',
       )
       return { stories: [], results: [] }
     }
@@ -299,6 +258,12 @@ export class TapdPoller {
       )
       try {
         const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, tapdResolution.value)
+        // Tag every story with the module we fetched it under. The real
+        // TAPD API carries no `category`/`module` routing hint, so
+        // enqueueIfNew needs this explicit tag to know where to route.
+        for (const s of stories) {
+          s.category = m.id
+        }
         all.push(...stories)
         results.push({ moduleId: m.id, error: null, newCount: 0 })
       } catch (err) {
@@ -322,7 +287,11 @@ export class TapdPoller {
     const url = new URL(this.deps.config.tapdBaseUrl)
     url.pathname = join(url.pathname, 'stories')
     url.searchParams.set('workspace_id', tapdWorkspaceId)
-    url.searchParams.set('status', 'open')
+    // Do NOT filter by `status=open`: TAPD workspaces define their own
+    // workflow states (e.g. "planning", "developing"), and `open` is
+    // not one of them for many workspaces — it returned an empty list
+    // even when stories existed. We fetch all stories and let
+    // enqueueIfNew's `stories.get(id)` dedupe against storage.
 
     const resp = await this.httpClient.request<RawTapdListResponse>({
       url: url.toString(),
@@ -334,11 +303,18 @@ export class TapdPoller {
       timeoutMs: 20_000,
     })
 
-    // TAPD returns one of { data, stories, items } or a top-level array.
-    const body = resp.json() as RawTapdListResponse | RawTapdApiStory[]
-    const raw: RawTapdApiStory[] = Array.isArray(body)
+    // TAPD returns { data: [ { Story: {...} } ] } (real), or flat
+    // `{ data: [ { id, name } ] }`, or `{ stories }` / `{ items }` /
+    // a top-level array (older versions). Unwrap each variant.
+    const body = resp.json() as
+      | RawTapdListResponse
+      | Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
+    const rows = Array.isArray(body)
       ? body
       : (body.data ?? body.stories ?? body.items ?? [])
+    const raw: RawTapdApiStory[] = rows
+      .map((row) => (row && (row as { Story?: RawTapdApiStory }).Story ? (row as { Story: RawTapdApiStory }).Story : (row as RawTapdApiStory)))
+      .filter((s): s is RawTapdApiStory => s != null)
     return raw.map(normalizeRawStory).filter((s): s is TapdStory => s !== null)
   }
 }

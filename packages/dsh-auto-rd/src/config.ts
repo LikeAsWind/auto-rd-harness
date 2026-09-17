@@ -15,11 +15,9 @@
  *
  * Concrete behaviour with empty config:
  *
- *   - `tapdApiToken` empty + `useTapdMock=false` → poller skips real HTTP
- *     and falls back to the mock fixture (also useful for offline dev).
- *     If `useTapdMock` is left at default `false`, we force it to
- *     `true` when there is no token, because production hits with an
- *     empty bearer token would just 401.
+ *   - `tapdApiToken` empty → the poller skips any module whose token
+ *     cannot be resolved (per-module or global), so no 401-bound HTTP
+ *     call is ever made with an empty bearer header.
  *   - `gitlabApiToken` empty → StoryRunner's `mr_creating` stage will
  *     fail loudly per-story; `auto_rd_status` reports it. The plugin
  *     itself still mounts.
@@ -62,7 +60,7 @@ export const ModuleConfigSchema = z.object({
    * Per-workspace TAPD API token. Optional — when empty, the poller
    * falls back to the top-level `tapdApiToken`. A workspace with its
    * own token talks to TAPD with that identity; one without it inherits
-   * the global value (or the mock fixture when neither is set).
+   * the global value.
    */
   tapdApiToken: z.string().default('').optional(),
   /**
@@ -83,27 +81,21 @@ export const ConfigSchema = z.object({
   // TAPD integration
   tapdBaseUrl: z.string().url().default('https://api.tapd.cn'),
   /**
-   * TAPD API token. Optional — when empty, the poller falls back to the
-   * local mock fixture regardless of `useTapdMock`. The env var
-   * `DSH_TAPD_API_TOKEN` is the documented place to set this (the
-   * example cordis.yml wires it via `!!js`).
+   * TAPD API token. Optional — when empty, the poller resolves the
+   * per-workspace token (module-level override) before falling back to
+   * this global value. The env var `DSH_TAPD_API_TOKEN` is the
+   * documented place to set this (the example cordis.yml wires it via
+   * `!!js`).
    */
   tapdApiToken: z.string().default(''),
   tapdPollIntervalMs: z.number().int().positive().default(60_000),
   /**
-   * TAPD workspace_id. Required when useMock=false AND a real token is
-   * configured. Multiple workspaces can be polled by providing a
-   * comma-separated list (the poller iterates). Empty by default — the
-   * poller simply does nothing when there is nothing to route to.
+   * TAPD workspace_id. Required when a real token is configured.
+   * Multiple workspaces can be polled by providing a comma-separated
+   * list (the poller iterates). Empty by default — the poller simply
+   * does nothing when there is nothing to route to.
    */
   tapdWorkspaceIds: z.array(z.string()).default([]),
-  /**
-   * When true, the poller returns the local MOCK_TAPD_FIXTURE instead of
-   * calling TAPD. The plugin auto-elevates this to true when
-   * `tapdApiToken` is empty, so production never hits TAPD with an
-   * empty bearer header.
-   */
-  useTapdMock: z.boolean().default(false),
 
   // GitLab integration
   gitlabBaseUrl: z.string().url().default('https://gitlab.com'),
@@ -146,17 +138,3 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>
 export type ModuleConfig = z.infer<typeof ModuleConfigSchema>
 export type ModelSelection = z.infer<typeof ModelSelectionSchema>
-
-/**
- * Normalise a parsed config: when `tapdApiToken` is empty, force
- * `useTapdMock` to true so the poller never makes a 401-bound HTTP
- * call. Pure function — same input always produces same output.
- *
- * The original `Config` is otherwise passed through unchanged.
- */
-export function normalizeConfig(config: Config): Config {
-  if (!config.tapdApiToken && !config.useTapdMock) {
-    return { ...config, useTapdMock: true }
-  }
-  return config
-}

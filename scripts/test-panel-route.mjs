@@ -337,7 +337,6 @@ for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
   currentConfig = {
     tapdApiToken: 'tok',
     gitlabApiToken: 'gtok',
-    useTapdMock: true,
     workspaceRoot: '/w',
     modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', defaultBranch: 'main' }],
   }
@@ -448,7 +447,6 @@ const silentLog = silentLogger()
       tapdApiToken: 'new-tok',
       gitlabApiToken: 'new-gtok',
       workspaceRoot: 'C:/work',
-      useTapdMock: true,
       modules: [{ id: 'payment', title: 'Payment', repoUrl: 'https://gitlab.example.com/pay.git' }],
     },
   })

@@ -25,7 +25,7 @@
  */
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { ConfigSchema, normalizeConfig, type Config } from './config.js'
+import { ConfigSchema, type Config } from './config.js'
 import { AutoRdStorage } from './domain/storage.js'
 import { WorkspaceManager } from './services/workspace-manager.js'
 import { TapdPoller } from './services/tapd-poller.js'
@@ -111,7 +111,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   // (see config.ts) so the plugin MOUNTS even on a bare config; the UI then
   // shows a setup checklist instead of going dark.
   const parsed = ConfigSchema.parse(rawConfig)
-  const config = normalizeConfig(parsed)
+  const config = parsed
   const logger = new Logger(ctx, config.logLevel)
 
   logger.info('='.repeat(60))
@@ -119,13 +119,12 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   logger.info(`  modules: ${config.modules.map((m) => m.id).join(', ') || '(none configured)'}`)
   logger.info(`  workspaceRoot: ${config.workspaceRoot || '(not configured)'}`)
   logger.info(`  pollIntervalMs: ${config.tapdPollIntervalMs}`)
-  logger.info(`  useTapdMock: ${config.useTapdMock}`)
   logger.info('='.repeat(60))
 
   // Log every missing piece at WARN level. None of these aborts the mount:
   // the UI will surface them again as a setup checklist via /auto-rd/panel.
   if (!config.tapdApiToken) {
-    logger.warn('tapdApiToken is empty — poller forced to mock mode. Set DSH_TAPD_API_TOKEN to talk to real TAPD.')
+    logger.warn('tapdApiToken is empty — set DSH_TAPD_API_TOKEN or a per-workspace token to poll real TAPD.')
   }
   if (!config.gitlabApiToken) {
     logger.warn('gitlabApiToken is empty — MR creation will fail per story. Set DSH_GITLAB_API_TOKEN to enable MRs.')

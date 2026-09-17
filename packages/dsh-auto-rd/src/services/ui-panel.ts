@@ -147,8 +147,6 @@ export interface PanelSetupIssue {
     | 'tapd_token'
     | 'gitlab_token'
     | 'workspace_root'
-    | 'modules'
-    | 'tapd_workspaces'
   /** Human-readable short message ("Set DSH_TAPD_API_TOKEN to fetch real stories"). */
   message: string
   /** Suggested fix — usually a `cordis.patch.yml` edit or an env var. */
@@ -193,7 +191,7 @@ const TERMINAL_STATES = new Set(['completed', 'failed'])
  *   - set DSH_GITLAB_API_TOKEN
  *   - set `workspaceRoot`
  *   - add at least one module under `modules:`
- *   - add at least one workspace id when not in mock mode
+ *   - add at least one TAPD workspace id on the modules that need it
  *
  * Empty array = plugin is fully configured and polling for real.
  *
@@ -215,20 +213,6 @@ export function buildSetupIssues(config: Config | undefined, tokenState: TokenSt
   if (!config) return []
   const issues: PanelSetupIssue[] = []
 
-  // Mock mode is auto-enabled by normalizeConfig when tapdApiToken is
-  // empty and useTapdMock is not explicitly false. We replicate that
-  // decision here because tests (and any host path that skips
-  // normalizeConfig) hand us the raw config, and the user-facing rule
-  // is: "if the plugin will end up reading the mock fixture, do not
-  // warn about missing modules / workspace ids — those are not how
-  // the fixture is routed".
-  //
-  // The token-state path is the post-#10 source of truth: both the
-  // per-module probes and the global probe come from
-  // `resolveTokenStates`. Pre-#10 plaintext migration is handled by
-  // `migrateStorageToCredentials` before any of this code runs.
-  const isMock = !!config.useTapdMock || !tokenState.tapdGlobal
-
   // tapd_token / gitlab_token are per-workspace concerns, not global:
   // the panel UI has a "workspace settings" form where the user pastes
   // per-module tokens. A user who has not set DSH_TAPD_API_TOKEN but
@@ -247,7 +231,7 @@ export function buildSetupIssues(config: Config | undefined, tokenState: TokenSt
   if (!tokenState.tapdGlobal && !anyModuleHasTapdToken) {
     issues.push({
       key: 'tapd_token',
-      message: 'TAPD token is empty — the poller is running against a local mock fixture.',
+      message: 'TAPD token is empty — the poller has nothing to authenticate with.',
       remedy:
         'Set the DSH_TAPD_API_TOKEN env var in the shell that launches DSH, ' +
         'or paste a real token into a workspace under cordis.patch.yml.',
@@ -271,43 +255,6 @@ export function buildSetupIssues(config: Config | undefined, tokenState: TokenSt
       remedy:
         'Set an absolute path under config.workspaceRoot in cordis.patch.yml, ' +
         'e.g. `workspaceRoot: "C:/work"`.',
-    })
-  }
-
-  // Skip the "modules is empty" warning in mock mode — the local
-  // fixture carries its own category labels, so a missing modules list
-  // is the expected dev state, not a misconfiguration.
-  if (!isMock && modules.length === 0) {
-    issues.push({
-      key: 'modules',
-      message: 'modules is empty — TAPD stories cannot be routed to a repo.',
-      remedy:
-        'Add at least one module under config.modules in cordis.patch.yml. ' +
-        'Example:\n' +
-        '  modules:\n' +
-        '    - id: payment\n' +
-        '      title: Payment Service\n' +
-        '      repoUrl: https://gitlab.example.com/payment/payment-service.git\n' +
-        '      defaultBranch: main',
-    })
-  }
-
-  // Read through defaults rather than the declared types: these fields
-  // only acquire their Zod defaults when the config was parsed, and the
-  // panel is also handed configs assembled by hand. Same mock-mode
-  // skip as above — the tapd_workspaces list is meaningless while
-  // TapdPoller is reading from the local fixture.
-  if (
-    !isMock &&
-    (config.tapdApiToken ?? '').length > 0 &&
-    (config.tapdWorkspaceIds ?? []).length === 0
-  ) {
-    issues.push({
-      key: 'tapd_workspaces',
-      message: 'TAPD token is set but tapdWorkspaceIds is empty — the poller has nothing to route to.',
-      remedy:
-        'Add at least one TAPD workspace id under config.tapdWorkspaceIds in cordis.patch.yml, ' +
-        'or temporarily set `useTapdMock: true` to develop offline.',
     })
   }
 
@@ -387,8 +334,7 @@ export async function resolveTokenStates(
 }
 
 /** Whether the GLOBAL TAPD ref resolves. Used by the panel setup
- *  checklist to decide whether to suppress the per-module token hint
- *  and whether to mark the panel as mock-mode. */
+ *  checklist to decide whether to suppress the per-module token hint. */
 async function tapdGlobalConfigured(credentials: CredentialsService): Promise<boolean> {
   return (await credentials.describe(TAPD_GLOBAL_REF)).configured
 }

@@ -19,7 +19,6 @@
         tapdApiToken: ''
         tapdPollIntervalMs: 60000
         tapdWorkspaceIds: []
-        useTapdMock: false
 
         # GitLab integration
         gitlabBaseUrl: 'https://gitlab.com'
