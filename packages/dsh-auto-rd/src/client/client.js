@@ -138,6 +138,19 @@ window.__ModuleLoader__.load({
       '@container auto-rd-panel (max-width: 480px) {',
       '  .auto-rd-story-line { flex-direction: column; align-items: flex-start; }',
       '}',
+      // Skeleton bars. The mockup (docs/ui-mockup-watch.html scene 3)
+      // uses short/mid/long widths so the placeholder reads as three
+      // upcoming workspace rows, not as decoration.
+      '.auto-rd-skel { padding: 14px; display: grid; gap: 15px; }',
+      '.auto-rd-skel-row { display: grid; gap: 6px; }',
+      '.auto-rd-skel-bar {',
+      '  height: 11px;',
+      '  border-radius: 2px;',
+      '  background: var(--dsw-alias-surface-secondary, rgba(0,0,0,0.04));',
+      '}',
+      '.auto-rd-skel-bar.auto-rd-skel-s { width: 22%; }',
+      '.auto-rd-skel-bar.auto-rd-skel-m { width: 46%; }',
+      '.auto-rd-skel-bar.auto-rd-skel-l { width: 64%; }',
       '.auto-rd-panel button:focus-visible, .auto-rd-panel a:focus-visible {',
       '  outline: 2px solid var(--dsw-alias-status-info, rgba(58,111,190,1));',
       '  outline-offset: 1px;',
@@ -1374,6 +1387,45 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ---- first-frame skeleton -------------------------------------------
+    //
+    // The fetch starts on mount and takes at least one round trip.
+    // Until it settles there is no honest answer to "what is on this
+    // screen" — least of all "还没有工作空间", which is what the panel
+    // used to say. The skeleton stands in for content that is known to
+    // be coming: three placeholder rows shaped like the workspace rows
+    // that replace them. Styling (bar widths, surfaces) lives in the
+    // injected stylesheet so it follows the shell theme.
+
+    function PanelSkeleton() {
+      var widths = [
+        ['s', 'l'],
+        ['s', 'm'],
+        ['s', 'l'],
+      ]
+      return h(
+        'div',
+        {
+          className: 'auto-rd-skel',
+          role: 'status',
+          'aria-busy': 'true',
+          'aria-label': '正在载入',
+        },
+        widths.map(function (row, i) {
+          return h(
+            'div',
+            { key: i, className: 'auto-rd-skel-row' },
+            row.map(function (w, j) {
+              return h('div', {
+                key: j,
+                className: 'auto-rd-skel-bar auto-rd-skel-' + w,
+              })
+            }),
+          )
+        }),
+      )
+    }
+
     // ---- workspace list / empty state -----------------------------------
 
     function WorkspaceList(props) {
@@ -1933,22 +1985,30 @@ window.__ModuleLoader__.load({
           {
             style: { padding: '18px 20px', flex: 1 },
           },
-          addOpenValue
-            ? h(AddWorkspaceForm, {
-                onCancel: function () { setAddOpen(false) },
-                onAdded: function (body) { setAddOpen(false); refresh(body) },
-              })
-            : null,
-          !addOpenValue
-            ? h(WorkspaceList, {
-                workspaces: workspaces,
-                expanded: expandedIdValue,
-                onToggleExpanded: setExpandedId,
-                onRefresh: refresh,
-                onRemove: removeWorkspace,
-                onUpdate: refresh,
-              })
-            : null,
+          // The body branches on (status, model):
+          //   loading + no model  → skeleton (content is coming)
+          //   error  + no model   → error line (nothing to show)
+          //   ok / cached model   → the real list / confirmed empty state
+          // The empty state ("还没有工作空间") only renders once a
+          // successful fetch confirmed the server really has zero —
+          // before that it would be a guess.
+          !model
+            ? panel.status === 'loading'
+              ? h(PanelSkeleton)
+              : null
+            : addOpenValue
+              ? h(AddWorkspaceForm, {
+                  onCancel: function () { setAddOpen(false) },
+                  onAdded: function (body) { setAddOpen(false); refresh(body) },
+                })
+              : h(WorkspaceList, {
+                  workspaces: workspaces,
+                  expanded: expandedIdValue,
+                  onToggleExpanded: setExpandedId,
+                  onRefresh: refresh,
+                  onRemove: removeWorkspace,
+                  onUpdate: refresh,
+                }),
           panel.status === 'error' && !model
             ? h(
                 'div',
@@ -2053,7 +2113,7 @@ window.__ModuleLoader__.load({
       // use it to drive a poll without waiting for the interval.
       // Test seam: direct component handles so the client-half suite can
       // render the icon and panel without a full shell.
-      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel, SyncPulse: SyncPulse },
+      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel, SyncPulse: SyncPulse, PanelSkeleton: PanelSkeleton },
     }
 
     return module

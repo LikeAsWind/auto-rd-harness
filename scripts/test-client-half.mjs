@@ -47,6 +47,14 @@ function check(name, ok, extra) {
 }
 
 // ---- a React shim sufficient for these components -------------------
+//
+// The shim is synchronous and single-shot by default (a render call
+// appends fresh useState slots). `makeRerenderableReact()` additionally
+// lets a test re-invoke a component fn so a later render sees the state
+// the fetch callbacks wrote — needed for the first-frame branch tests,
+// where the panel renders once with `status: 'loading'` and again after
+// the fetch settles. Its useState keeps ONE slot per index instead of
+// appending on every render.
 
 function makeReact() {
   const calls = { useState: 0, useEffect: [], createElement: [] }
@@ -75,6 +83,99 @@ function makeReact() {
       },
     },
   }
+}
+
+/** React shim whose useState slots persist across re-renders. */
+function makeRerenderableReact() {
+  const calls = { useState: 0, useEffect: [], createElement: 0 }
+  const slots = []
+  let cursor = 0
+  function resetCursor() {
+    cursor = 0
+  }
+  return {
+    calls,
+    slots,
+    resetCursor,
+    react: {
+      createElement(type, props, ...children) {
+        calls.createElement += 1
+        return { __el: true, type, props: props || {}, children: children.filter((c) => c != null && c !== false) }
+      },
+      useState(initial) {
+        const i = cursor
+        cursor += 1
+        if (slots.length <= i) slots.push(typeof initial === 'function' ? initial() : initial)
+        calls.useState += 1
+        return [
+          slots[i],
+          (next) => {
+            slots[i] = typeof next === 'function' ? next(slots[i]) : next
+          },
+        ]
+      },
+      useEffect(fn, deps) {
+        calls.useEffect.push({ fn, deps })
+      },
+    },
+  }
+}
+
+/** Depth-first walk of a shim element tree; cb receives every node. */
+function walkElements(node, cb) {
+  if (node == null || node === false || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const n of node) walkElements(n, cb)
+    return
+  }
+  if (!node.__el) return
+  cb(node)
+  for (const c of node.children) walkElements(c, cb)
+}
+
+/** All text nodes concatenated, in tree order. */
+function collectTexts(node) {
+  const texts = []
+  walkElements(node, (el) => {
+    for (const c of el.children) {
+      if (typeof c === 'string' || typeof c === 'number') texts.push(String(c))
+    }
+  })
+  return texts
+}
+
+/** True when some element in the tree satisfies pred. */
+function someElement(node, pred) {
+  let found = false
+  walkElements(node, (el) => {
+    if (pred(el)) found = true
+  })
+  return found
+}
+
+/**
+ * Fully expand a shim tree by CALLING every function-typed node, the
+ * way real React would render child components. The shim's createElement
+ * leaves `h(WorkspaceList, props)` as a thunk; expansion turns it into
+ * the subtree so class/text assertions see inside components.
+ */
+function expandTree(node) {
+  if (node == null || node === false) return node
+  if (Array.isArray(node)) return node.map(expandTree).filter((n) => n != null && n !== false)
+  if (typeof node !== 'object' || !node.__el) return node
+  if (typeof node.type === 'function') {
+    try {
+      return {
+        __el: true,
+        type: node.type.name || 'fn',
+        props: node.props,
+        children: [expandTree(node.type(node.props))],
+      }
+    } catch {
+      return node
+    }
+  }
+  return { ...node, children: node.children.map(expandTree) }
 }
 
 /** Evaluate the bundle in a shell sandbox. */
@@ -427,6 +528,154 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
   } finally {
     globalThis.fetch = realFetch
   }
+}
+
+// ---- first-frame branches: skeleton / empty / error ------------------
+//
+// The panel's first frame used to render "还没有工作空间" even while the
+// first fetch was still in flight — a lie whenever the user has
+// workspaces. The body must branch on (status, model):
+//
+//   loading + no model  → skeleton, aria-busy, NO empty state
+//   ok + zero modules   → confirmed empty state + add form
+//   error + no model    → error message, NO empty state
+//
+// Each case below uses the rerenderable shim: render once (loading),
+// settle the fetch, render again, and read the tree.
+
+const EMPTY_MODEL = {
+  ok: true,
+  model: {
+    modules: [],
+    totals: { modules: 0, stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 },
+    health: { setupRequired: false, issues: [], mountedForSec: 1, lastTapdPollAt: null, lastTapdError: null },
+  },
+  text: '',
+}
+
+const ONE_WS_MODEL = {
+  ok: true,
+  model: {
+    modules: [
+      { id: 'm1', title: 'Payment', defaultBranch: 'main', stories: [], overflow: 0, inFlight: 0 },
+    ],
+    totals: { modules: 1, stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 },
+    health: { setupRequired: false, issues: [], mountedForSec: 1, lastTapdPollAt: null, lastTapdError: null },
+  },
+  text: '',
+}
+
+/** Render the panel twice (before/after fetch settles) and return both trees. */
+async function renderPanelAcrossFetch(shim, factory, fetchImpl) {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = fetchImpl
+  try {
+    const panel = factory(makeRequire(shim)).__autoRd.components.AutoRdPanel
+    const first = panel()
+    await new Promise((r) => setTimeout(r, 30))
+    shim.resetCursor()
+    const second = panel()
+    return { first, second }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+{
+  // First frame: status starts 'loading', model is null. The body must
+  // show the skeleton and must NOT claim there are no workspaces.
+  const shim = makeRerenderableReact()
+  const { first } = await renderPanelAcrossFetch(shim, spec.factory, async () => ({
+    ok: true,
+    status: 200,
+    async json() { return ONE_WS_MODEL },
+  }))
+  const firstTree = expandTree(first)
+
+  const isSkeleton = (el) => String(el.props?.className || '').includes('auto-rd-skel')
+  check('skeleton: first frame renders the skeleton block', someElement(firstTree, isSkeleton), 'no .auto-rd-skel in tree')
+  check('skeleton: first frame is aria-busy', someElement(firstTree, (el) => el.props?.['aria-busy'] === 'true'))
+  check(
+    'skeleton: first frame has no workspace rows yet',
+    !someElement(firstTree, (el) => String(el.props?.className || '').includes('auto-rd-ws')),
+    'a workspace row rendered before any data',
+  )
+  const texts = collectTexts(firstTree).join(' ')
+  check('skeleton: first frame does not show the empty state', !texts.includes('还没有工作空间'), texts.slice(0, 80))
+}
+
+{
+  // Confirmed empty: fetch resolves with zero modules. Now — and only
+  // now — the empty state and the add form appear.
+  const shim = makeRerenderableReact()
+  const { second } = await renderPanelAcrossFetch(shim, spec.factory, async () => ({
+    ok: true,
+    status: 200,
+    async json() { return EMPTY_MODEL },
+  }))
+  const secondTree = expandTree(second)
+
+  const texts = collectTexts(secondTree).join(' ')
+  check('empty: confirmed zero renders the empty state', texts.includes('还没有工作空间'), texts.slice(0, 80))
+  check('empty: confirmed zero offers the add form', texts.includes('添加工作空间'))
+  check('empty: no skeleton after data lands', !someElement(secondTree, (el) => String(el.props?.className || '').includes('auto-rd-skel')))
+}
+
+{
+  // First fetch fails with no cache: an error, not the empty state.
+  const shim = makeRerenderableReact()
+  const { second } = await renderPanelAcrossFetch(shim, spec.factory, async () => ({
+    ok: false,
+    status: 503,
+    async json() { return {} },
+  }))
+  const secondTree = expandTree(second)
+
+  const texts = collectTexts(secondTree).join(' ')
+  check('error: fetch failure with no cache shows the error', texts.includes('面板数据不可用'), texts.slice(0, 80))
+  check('error: fetch failure is not the empty state', !texts.includes('还没有工作空间'))
+  check('error: no skeleton on error', !someElement(secondTree, (el) => String(el.props?.className || '').includes('auto-rd-skel')))
+}
+
+{
+  // Fetch error WITH a cached model: content stays, no skeleton. The
+  // panel's own load() runs once at mount (the 5s interval does not
+  // fire within the 30ms wait), so cached-error rendering is driven
+  // through the resync seam: first load succeeds, then the manual
+  // resync fails while the model stays cached.
+  const shim = makeRerenderableReact()
+  let calls = 0
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    calls += 1
+    if (calls === 1) return { ok: true, status: 200, async json() { return ONE_WS_MODEL } }
+    return { ok: false, status: 503, async json() { return {} } }
+  }
+  try {
+    const exportsB = spec.factory(makeRequire(shim))
+    const panelFn = exportsB.__autoRd.components.AutoRdPanel
+    panelFn()
+    await new Promise((r) => setTimeout(r, 30))
+    await exportsB.__autoRd.resync()
+    await new Promise((r) => setTimeout(r, 30))
+    shim.resetCursor()
+    const tree = expandTree(panelFn())
+
+    check('cached-error: the cached model stays on screen', collectTexts(tree).join(' ').includes('Payment'))
+    check('cached-error: no skeleton with a cache', !someElement(tree, (el) => String(el.props?.className || '').includes('auto-rd-skel')))
+    check('cached-error: no duplicate error banner over cached content', !collectTexts(tree).join(' ').includes('面板数据不可用'))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+{
+  // The skeleton styling lives in the injected stylesheet so it can use
+  // the shell's theme variables (no hardcoded colours).
+  check('skeleton: stylesheet carries the skeleton rules', /\.auto-rd-skel/.test(meta.PANEL_CSS), 'no .auto-rd-skel rule in PANEL_CSS')
+  // And the skeleton must carry no hardcoded colours of its own: its
+  // bars inherit from the stylesheet, which the colour audit already
+  // pins to CSS variables.
 }
 
 // ---- the sync pulse ---------------------------------------------------
