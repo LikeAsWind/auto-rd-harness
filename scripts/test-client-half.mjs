@@ -245,10 +245,101 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
   const el = exports2.__autoRd.components.AutoRdPanel()
 
   check('panel: uses React state', shim.calls.useState >= 1, String(shim.calls.useState))
-  check('panel: uses a React effect', shim.calls.useEffect.length === 1, String(shim.calls.useEffect.length))
-  check('panel: effect has empty deps (mount once)', JSON.stringify(shim.calls.useEffect[0]?.deps) === '[]', JSON.stringify(shim.calls.useEffect[0]?.deps))
+  // Two mount-once effects: the data poll and the stylesheet injection.
+  check('panel: uses exactly two React effects', shim.calls.useEffect.length === 2, String(shim.calls.useEffect.length))
+  for (const eff of shim.calls.useEffect) {
+    check(`panel: effect [${shim.calls.useEffect.indexOf(eff)}] has empty deps (mount once)`, JSON.stringify(eff.deps) === '[]', JSON.stringify(eff.deps))
+  }
   check('panel: renders a root element', el?.__el === true, String(el?.type))
   check('panel: titles the panel', JSON.stringify(shim.calls.createElement).length > 0)
+}
+
+// ---- injected stylesheet --------------------------------------------
+//
+// The panel has no CSS file and no build step, so responsive layout is
+// impossible with inline styles alone (`@media`/`@container` are not
+// expressible there). The bundle injects one stylesheet on mount.
+//
+// These tests pin the contract the host cares about: injected exactly
+// once, every selector namespaced so it cannot reach the shell's own
+// elements, and no hardcoded theme colours (the shell's CSS variables
+// stay in charge of light/dark).
+
+{
+  const shim = makeReact()
+  const exports5 = spec.factory(makeRequire(shim))
+  const meta5 = exports5.__autoRd
+
+  check('style: exposes the stylesheet element id for tests', typeof meta5.STYLE_ELEMENT_ID === 'string' && meta5.STYLE_ELEMENT_ID.length > 0, String(meta5.STYLE_ELEMENT_ID))
+  check('style: exposes an injector', typeof meta5.injectStyles === 'function', typeof meta5.injectStyles)
+  check('style: exposes the stylesheet text', typeof meta5.PANEL_CSS === 'string' && meta5.PANEL_CSS.length > 0, String(meta5.PANEL_CSS).slice(0, 40))
+
+  if (typeof meta5.PANEL_CSS !== 'string' || meta5.PANEL_CSS.length === 0) {
+    process.stdout.write(`\nClientHalf tests: ${pass} pass, ${fail} fail (style tests skipped — no PANEL_CSS yet)\n`)
+    if (fail > 0) process.exitCode = 1
+    // eslint-disable-next-line no-unreachable
+    throw new Error('style contract unimplemented; see failing checks above')
+  }
+
+  const css = meta5.PANEL_CSS
+
+  // Every rule must be namespaced: a bare `div{...}` or `.ws{...}` would
+  // leak into the shell. Collect selectors outside of at-rule preludes.
+  const selectors = []
+  for (const raw of css.replace(/\/\*[\s\S]*?\*\//g, '').split('}')) {
+    const head = raw.split('{')[0].trim()
+    if (!head || head.startsWith('@') || head.startsWith('from') || head.startsWith('to') || /^\d+%/.test(head)) continue
+    for (const part of head.split(',')) {
+      const s = part.trim()
+      if (s) selectors.push(s)
+    }
+  }
+  check('style: stylesheet declares selectors', selectors.length > 0, String(selectors.length))
+  const unscoped = selectors.filter((s) => !s.includes('.auto-rd-'))
+  check('style: every selector is namespaced with .auto-rd-', unscoped.length === 0, JSON.stringify(unscoped.slice(0, 4)))
+
+  // Theme must stay with the shell. Hex/rgb literals in the sheet would
+  // freeze one theme; colours belong in the `--dsw-alias-*` variables.
+  const hexColours = css.match(/#[0-9a-fA-F]{3,8}\b/g) || []
+  check('style: no hardcoded hex colours', hexColours.length === 0, JSON.stringify(hexColours.slice(0, 5)))
+
+  // The point of the sheet: rules that inline styles cannot express.
+  check('style: responds to the host slot width', /@container|@media/.test(css), 'no @container/@media rule')
+  check('style: honours reduced-motion', /prefers-reduced-motion/.test(css), 'no reduced-motion rule')
+
+  // ---- injection is idempotent --------------------------------------
+  const created = []
+  const appended = []
+  const byId = {}
+  const fakeDoc = {
+    getElementById(id) { return byId[id] || null },
+    createElement(tag) {
+      const el = { tagName: tag, textContent: '', id: '', setAttribute(k, v) { this[k] = v } }
+      created.push(el)
+      return el
+    },
+    head: { appendChild(el) { appended.push(el); if (el.id) byId[el.id] = el } },
+  }
+
+  meta5.injectStyles(fakeDoc)
+  check('style: first call appends one <style>', appended.length === 1, String(appended.length))
+  check('style: the appended node is a <style>', appended[0]?.tagName === 'style', String(appended[0]?.tagName))
+  check('style: the node carries the documented id', appended[0]?.id === meta5.STYLE_ELEMENT_ID, String(appended[0]?.id))
+  check('style: the node carries the stylesheet text', appended[0]?.textContent === css, String(appended[0]?.textContent).slice(0, 30))
+
+  meta5.injectStyles(fakeDoc)
+  meta5.injectStyles(fakeDoc)
+  check('style: repeat calls do not append again', appended.length === 1, String(appended.length))
+
+  // A host without a DOM (SSR, tests) must not crash the bundle.
+  let threw = false
+  try {
+    meta5.injectStyles(undefined)
+    meta5.injectStyles({})
+  } catch {
+    threw = true
+  }
+  check('style: tolerates a missing document', threw === false)
 }
 
 // ---- the data path --------------------------------------------------

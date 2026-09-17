@@ -109,6 +109,59 @@ window.__ModuleLoader__.load({
       fontCode: 'var(--ds-font-family-code, ui-monospace, monospace)',
     }
 
+    // ---- injected stylesheet ---------------------------------------------
+    // Inline style objects cannot express @media / @container or
+    // pseudo-classes, and the panel has no CSS file or build step — so
+    // the one thing the bundle ships that needs those rules is a
+    // stylesheet it appends to the host document on mount.
+    //
+    // Contract (pinned by scripts/test-client-half.mjs):
+    //   - every selector mentions `.auto-rd-` — nothing can reach the
+    //     shell's own elements
+    //   - no hex/rgb literals — colours stay with the shell's
+    //     `--dsw-alias-*` variables so light/dark follow the host
+    //   - width adaptation uses @container on the panel root, because
+    //     the shell's main slot width is unknowable at build time
+    //   - motion respects prefers-reduced-motion
+    //   - injection is idempotent and tolerates a missing document
+
+    var STYLE_ELEMENT_ID = 'auto-rd-panel-styles'
+
+    var PANEL_CSS = [
+      // The panel root opts into container sizing. It doubles as the
+      // fallback scope: every rule below is written against
+      // `.auto-rd-panel` descendants.
+      '.auto-rd-panel { container: auto-rd-panel / inline-size; }',
+      // Story rows switch from a side-by-side layout to stacked when
+      // the host slot gets narrow. Inline styles cover the wide case;
+      // this one rule is what inline styles cannot say.
+      '@container auto-rd-panel (max-width: 480px) {',
+      '  .auto-rd-story-line { flex-direction: column; align-items: flex-start; }',
+      '}',
+      '.auto-rd-panel button:focus-visible, .auto-rd-panel a:focus-visible {',
+      '  outline: 2px solid var(--dsw-alias-status-info, rgba(58,111,190,1));',
+      '  outline-offset: 1px;',
+      '}',
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .auto-rd-panel * { transition: none !important; animation: none !important; }',
+      '}',
+    ].join('\n')
+
+    function injectStyles(doc) {
+      try {
+        var d = doc || (typeof document !== 'undefined' ? document : null)
+        if (!d || !d.head) return
+        if (d.getElementById && d.getElementById(STYLE_ELEMENT_ID)) return
+        var el = d.createElement('style')
+        el.id = STYLE_ELEMENT_ID
+        el.textContent = PANEL_CSS
+        d.head.appendChild(el)
+      } catch (e) {
+        // No DOM (SSR, non-browser host): styling degrades to the inline
+        // styles, which already carry the full layout.
+      }
+    }
+
     // ---- panel data hook -------------------------------------------------
 
     function usePanelData() {
@@ -916,12 +969,14 @@ window.__ModuleLoader__.load({
                   'li',
                   {
                     key: s.id,
+                    className: 'auto-rd-story-line',
                     style: {
                       padding: '4px 0',
                       borderBottom: '1px solid ' + styles.borderL3,
                       display: 'flex',
                       gap: 8,
                       alignItems: 'center',
+                      flexWrap: 'wrap',
                     },
                   },
                   h(
@@ -1473,6 +1528,12 @@ window.__ModuleLoader__.load({
       var panel = data.panel
       var applyBody = data.applyBody
 
+      // The responsive/focus rules live in the injected stylesheet
+      // (see PANEL_CSS). Mounted once, kept for the panel's lifetime.
+      React.useEffect(function () {
+        injectStyles(null)
+      }, [])
+
       var model = panel.model
       var modules = (model && model.modules) || []
       var totals = (model && model.totals) || { stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 }
@@ -1826,6 +1887,9 @@ window.__ModuleLoader__.load({
       RECONFIGURE_URL: RECONFIGURE_URL,
       PICK_DIRECTORY_URL: PICK_DIRECTORY_URL,
       POLL_MS: POLL_MS,
+      STYLE_ELEMENT_ID: STYLE_ELEMENT_ID,
+      PANEL_CSS: PANEL_CSS,
+      injectStyles: injectStyles,
       // Test seam: direct component handles so the client-half suite can
       // render the icon and panel without a full shell.
       components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel },
