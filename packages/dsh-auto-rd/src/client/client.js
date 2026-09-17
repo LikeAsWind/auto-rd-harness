@@ -992,6 +992,38 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Public TAPD story URL for a workspace + story id. Null when either
+     * id is missing, so callers skip the link instead of emitting a dead
+     * href. The web origin is fixed (www.tapd.cn) — only the API talks
+     * to the configured `tapdBaseUrl`.
+     */
+    function tapdStoryUrl(workspaceId, storyId) {
+      if (!workspaceId || !storyId) return null
+      return 'https://www.tapd.cn/' + workspaceId + '/prong/stories/view/' + storyId
+    }
+
+    /** "TAPD →" external link for a story, or null when there is no id. */
+    function tapdLink(workspaceId, storyId) {
+      var url = tapdStoryUrl(workspaceId, storyId)
+      if (!url) return null
+      return h(
+        'a',
+        {
+          href: url,
+          target: '_blank',
+          rel: 'noreferrer',
+          style: {
+            fontFamily: styles.fontCode,
+            fontSize: 11,
+            color: styles.accent,
+            textDecoration: 'none',
+          },
+        },
+        'TAPD →',
+      )
+    }
+
+    /**
      * One password-shaped text field for a workspace credential. Plain
      * `<input type="password">` so the browser masks the value in the UI
      * itself; the host then persists whatever string the user typed
@@ -1067,11 +1099,14 @@ window.__ModuleLoader__.load({
 
     // The full "pull panel" header for a workspace detail view: last pull
     // time / error / new-count, a countdown to the next automatic pull,
-    // and a manual "pull now" button.
+    // and a manual "pull now" button. While a manual pull is in flight
+    // (`busy`), an overlay blocks the whole panel and the button is
+    // disabled so a double click cannot fire a second poll.
     function PollPanel(props) {
       var pollStat = props.pollStat
       var now = props.now
       var onPoll = props.onPoll
+      var busy = !!props.busy
 
       var lastSuccessLabel = pollStat && pollStat.lastSuccessAt
         ? clockLabel(Date.parse(pollStat.lastSuccessAt))
@@ -1092,6 +1127,7 @@ window.__ModuleLoader__.load({
         {
           className: 'auto-rd-poll-panel',
           style: {
+            position: 'relative',
             padding: '10px 12px',
             border: '1px solid ' + styles.borderL3,
             borderRadius: 6,
@@ -1113,6 +1149,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'auto-rd-poll-now',
+              disabled: busy,
               onClick: function () { if (typeof onPoll === 'function') onPoll() },
               style: {
                 marginLeft: 'auto',
@@ -1121,16 +1158,39 @@ window.__ModuleLoader__.load({
                 color: styles.labelPrimary,
                 borderRadius: 4,
                 padding: '3px 10px',
-                cursor: 'pointer',
+                cursor: busy ? 'not-allowed' : 'pointer',
+                opacity: busy ? 0.6 : 1,
                 fontFamily: 'inherit',
                 fontSize: 11,
               },
             },
-            '立即拉取',
+            busy ? '拉取中…' : '立即拉取',
           ),
         ),
         error
           ? h('div', { style: { marginTop: 6, color: styles.statusError } }, error)
+          : null,
+        busy
+          ? h(
+              'div',
+              {
+                className: 'auto-rd-poll-overlay',
+                'aria-hidden': 'true',
+                style: {
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'var(--dsw-alias-surface-primary, #ffffff)',
+                  opacity: 0.55,
+                  borderRadius: 6,
+                  fontSize: 11,
+                  color: styles.labelSecondary,
+                },
+              },
+              '拉取中…',
+            )
           : null,
       )
     }
@@ -1444,7 +1504,14 @@ window.__ModuleLoader__.load({
             },
           }),
           fact('所属工作空间', workspace ? workspace.name : '', { placeholder: '—' }),
-          fact('TAPD ID', story.tapdId || story.id, { placeholder: '—' }),
+          fact('TAPD ID', story.tapdId || story.id, {
+            placeholder: '—',
+            render: function (v) {
+              var url = tapdStoryUrl(workspace ? workspace.tapdWorkspaceId : '', v)
+              if (!url) return h('span', null, v)
+              return h('a', { href: url, target: '_blank', rel: 'noreferrer' }, v + ' →')
+            },
+          }),
           fact('重试次数', story.retryCount != null ? String(story.retryCount) : '0', { placeholder: '0' }),
           story.createdAt ? fact('创建时间', String(story.createdAt).slice(0, 16).replace('T', ' '), { placeholder: '—' }) : null,
           story.pushedSha ? fact('推送 SHA', story.pushedSha, { placeholder: '—' }) : null,
@@ -1606,7 +1673,9 @@ window.__ModuleLoader__.load({
       var onBack = props.onBack
       var onPoll = props.onPoll
       var now = props.now
+      var pollBusy = !!props.pollBusy
       var issues = (ws && ws.issues) || []
+      var tapdWorkspaceId = (ws && ws.tapdWorkspaceId) || ''
 
       var open = []
       var done = []
@@ -1615,6 +1684,18 @@ window.__ModuleLoader__.load({
         if (bucket === 'completed' || bucket === 'failed') done.push(stories[i])
         else open.push(stories[i])
       }
+
+      // Paginate the open (in-flight) stories, 10 per page. The done list
+      // stays folded in its <details> — it is usually short and already
+      // collapsed by default, so paging it adds motion without clarity.
+      var OPEN_PAGE_SIZE = 10
+      var openPage = React.useState(0)
+      var openPageValue = openPage[0]
+      var setOpenPage = openPage[1]
+      var openTotalPages = Math.max(1, Math.ceil(open.length / OPEN_PAGE_SIZE))
+      var openCurrentPage = openPageValue >= openTotalPages ? openTotalPages - 1 : openPageValue
+      var openStart = openCurrentPage * OPEN_PAGE_SIZE
+      var openPageItems = open.slice(openStart, openStart + OPEN_PAGE_SIZE)
 
       function storyButton(story, label, titleAttr) {
         return h(
@@ -1712,6 +1793,13 @@ window.__ModuleLoader__.load({
                 'MR →',
               )
             : null,
+          tapdLink(tapdWorkspaceId, story.tapdId)
+            ? h(
+                'div',
+                { style: { gridColumn: '2', marginTop: 2 } },
+                tapdLink(tapdWorkspaceId, story.tapdId),
+              )
+            : null,
         )
       }
 
@@ -1754,6 +1842,7 @@ window.__ModuleLoader__.load({
                 'MR →',
               )
             : null,
+          tapdLink(tapdWorkspaceId, story.tapdId),
         )
       }
 
@@ -1797,7 +1886,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: 14, fontWeight: 600, color: styles.labelPrimary } }, ws.name),
           h(PollStatBadge, { pollStat: ws.pollStat }),
         ),
-        h(PollPanel, { pollStat: ws.pollStat, now: now, onPoll: onPoll }),
+        h(PollPanel, { pollStat: ws.pollStat, now: now, onPoll: onPoll, busy: pollBusy }),
         issues.length
           ? h(
               'div',
@@ -1822,8 +1911,15 @@ window.__ModuleLoader__.load({
           ? h(
               'ul',
               { style: { listStyle: 'none', margin: 0, padding: 0 } },
-              open.map(renderOpenStory),
+              openPageItems.map(renderOpenStory),
             )
+          : null,
+        openTotalPages > 1
+          ? h(Pager, {
+              page: openCurrentPage,
+              totalPages: openTotalPages,
+              onPage: function (p) { setOpenPage(p) },
+            })
           : null,
         done.length
           ? h(
@@ -2651,6 +2747,11 @@ window.__ModuleLoader__.load({
       var setRemoveError = removeError[1]
       var errorModalValue = errorModal[0]
       var setErrorModal = errorModal[1]
+      // Manual per-workspace pull is in flight — drives the PollPanel
+      // overlay so a second click cannot fire a concurrent poll.
+      var pollBusy = React.useState(false)
+      var pollBusyValue = pollBusy[0]
+      var setPollBusy = pollBusy[1]
 
       // Show a modal with the given title and message. Used by every
       // mutating action (add / update / remove / poll) on failure.
@@ -2828,6 +2929,7 @@ window.__ModuleLoader__.load({
               onStoryClick: function (id) { setSelectedStoryId(id); setView('story') },
               onPoll: function () { pollWorkspace(ws.id) },
               now: nowValue,
+              pollBusy: pollBusyValue,
               onUpdate: refresh,
             })
           }
@@ -2849,6 +2951,7 @@ window.__ModuleLoader__.load({
        * apply the refreshed panel model in place.
        */
       function pollWorkspace(id) {
+        setPollBusy(true)
         fetch(RECONFIGURE_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -2858,6 +2961,7 @@ window.__ModuleLoader__.load({
             return res.json().then(function (body) { return { ok: res.ok, body: body } })
           })
           .then(function (result) {
+            setPollBusy(false)
             if (result.ok && result.body && result.body.ok) {
               refresh(result.body)
             } else {
@@ -2866,6 +2970,7 @@ window.__ModuleLoader__.load({
             }
           })
           .catch(function (e) {
+            setPollBusy(false)
             showError('拉取失败', String((e && e.message) || e))
           })
       }
@@ -3197,6 +3302,8 @@ window.__ModuleLoader__.load({
         WorkspaceDetail: WorkspaceDetail,
         useStoryTrajectory: useStoryTrajectory,
       },
+      // Pure helper exposed for tests: TAPD story URL construction.
+      tapdStoryUrl: tapdStoryUrl,
     }
 
     return module

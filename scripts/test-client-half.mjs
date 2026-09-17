@@ -804,6 +804,141 @@ const PULSE_MODEL = {
   if (found) { found.props.onClick(); check('session: button calls sessions.open', opened === 'ses_1', String(opened)) }
 }
 
+// ---- TAPD jump (story → TAPD) ---------------------------------------
+
+{
+  const shim = makeReact()
+  const exportsT = spec.factory(makeRequire(shim))
+  const metaT = exportsT.__autoRd
+
+  check('tapd: exposes tapdStoryUrl for tests', typeof metaT.tapdStoryUrl === 'function', typeof metaT.tapdStoryUrl)
+  check(
+    'tapd: builds the standard web URL',
+    metaT.tapdStoryUrl('12345', 'S1') === 'https://www.tapd.cn/12345/prong/stories/view/S1',
+    metaT.tapdStoryUrl('12345', 'S1'),
+  )
+  check('tapd: returns null without a workspace id', metaT.tapdStoryUrl('', 'S1') === null, String(metaT.tapdStoryUrl('', 'S1')))
+  check('tapd: returns null without a story id', metaT.tapdStoryUrl('12345', '') === null, String(metaT.tapdStoryUrl('12345', '')))
+
+  // Story detail: the TAPD ID fact renders an external link when the
+  // workspace carries a tapdWorkspaceId.
+  const StoryDetail = exportsT.__autoRd.components.StoryDetail
+  const detail = StoryDetail({
+    story: { id: 'S1', title: 'x', state: 'pending', branch: '', worktreePath: '', mainSessionId: '', acceptanceCriteria: '', blockedReason: '', artifacts: [], tapdId: 'TAPD-77', retryCount: 0, createdAt: '', pushedSha: '', mrIid: null },
+    workspace: { name: 'Payment', tapdWorkspaceId: '12345' },
+    sessions: null,
+    onBack: function () {},
+  })
+  const detailTree = expandTree(detail)
+  const tapdLinkFound = someElement(detailTree, (el) =>
+    el.props?.href === 'https://www.tapd.cn/12345/prong/stories/view/TAPD-77',
+  )
+  check('tapd: story detail TAPD ID is a link to the web story', tapdLinkFound, 'no TAPD link in detail tree')
+}
+
+// ---- open-story pagination + TAPD link in workspace detail -----------
+
+{
+  const shim = makeReact()
+  const exportsW = spec.factory(makeRequire(shim))
+  const WorkspaceDetail = exportsW.__autoRd.components.WorkspaceDetail
+
+  // 12 open stories → page size 10 → two pages. Every story has a
+  // tapdId so the TAPD link renders.
+  const openStories = []
+  for (let i = 0; i < 12; i++) {
+    openStories.push({
+      id: 'S' + i,
+      tapdId: 'TAPD-' + i,
+      title: 'Story ' + i,
+      state: 'implementing',
+      badge: '↻',
+      mrUrl: null,
+      blockedReason: '',
+    })
+  }
+  const ws = {
+    id: 'm1',
+    name: 'Payment',
+    tapdWorkspaceId: '12345',
+    pollStat: null,
+    issues: [],
+    stories: openStories,
+    overflow: 0,
+  }
+  const tree = WorkspaceDetail({
+    workspace: ws,
+    onUpdate: function () {},
+    onStoryClick: function () {},
+    onBack: function () {},
+    onPoll: function () {},
+    now: Date.now(),
+    pollBusy: false,
+  })
+  const full = expandTree(tree)
+
+  // Pagination: page 1 shows exactly the first 10 open stories and a
+  // pager with "1 / 2"; story S10 (index 10) is on page 2 and absent.
+  const texts = collectTexts(full)
+  check('workspace-detail: first page shows story 0', texts.includes('Story 0'))
+  check('workspace-detail: first page shows story 9', texts.includes('Story 9'))
+  check('workspace-detail: first page hides story 10', !texts.includes('Story 10'), 'story on page 2 leaked into page 1')
+  check('workspace-detail: pager shows 1 / 2', texts.includes('1 / 2'), texts.slice(0, 200))
+  const tapdHrefs = []
+  walkElements(full, (el) => {
+    if (el.props?.href && /tapd\.cn/.test(el.props.href)) tapdHrefs.push(el.props.href)
+  })
+  check('workspace-detail: page 1 renders 10 TAPD links', tapdHrefs.length === 10, String(tapdHrefs.length))
+  check(
+    'workspace-detail: TAPD link href uses the workspace id + tapdId',
+    tapdHrefs[0] === 'https://www.tapd.cn/12345/prong/stories/view/TAPD-0',
+    String(tapdHrefs[0]),
+  )
+}
+
+// ---- poll panel busy overlay ----------------------------------------
+
+{
+  const shim = makeReact()
+  const exportsP = spec.factory(makeRequire(shim))
+  const WorkspaceDetail = exportsP.__autoRd.components.WorkspaceDetail
+
+  const ws = {
+    id: 'm1',
+    name: 'Payment',
+    tapdWorkspaceId: '',
+    pollStat: null,
+    issues: [],
+    stories: [],
+    overflow: 0,
+  }
+  const busy = WorkspaceDetail({
+    workspace: ws,
+    onUpdate: function () {},
+    onStoryClick: function () {},
+    onBack: function () {},
+    onPoll: function () {},
+    now: Date.now(),
+    pollBusy: true,
+  })
+  const busyTree = expandTree(busy)
+  check('poll-busy: overlay renders while a pull is in flight', someElement(busyTree, (el) => String(el.props?.className || '').includes('auto-rd-poll-overlay')))
+  check('poll-busy: the pull button is disabled', someElement(busyTree, (el) => el.props?.className === 'auto-rd-poll-now' && el.props?.disabled === true))
+
+  const idle = WorkspaceDetail({
+    workspace: ws,
+    onUpdate: function () {},
+    onStoryClick: function () {},
+    onBack: function () {},
+    onPoll: function () {},
+    now: Date.now(),
+    pollBusy: false,
+  })
+  const idleTree = expandTree(idle)
+  check('poll-busy: no overlay when idle', !someElement(idleTree, (el) => String(el.props?.className || '').includes('auto-rd-poll-overlay')))
+  check('poll-busy: pull button enabled when idle', someElement(idleTree, (el) => el.props?.className === 'auto-rd-poll-now' && el.props?.disabled !== true))
+}
+
 // ---- cross-realm consistency ---------------------------------------
 
 {
