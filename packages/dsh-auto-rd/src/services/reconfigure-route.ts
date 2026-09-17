@@ -187,7 +187,7 @@ async function routeGlobalGitlabToken(
  */
 export interface AutoRdServices {
   queue: { start(): void; stop(): void }
-  poller: { start(): void; stop(): void }
+  poller: { start(): void; stop(): void; tick(moduleId?: string): Promise<void> }
   notifier: { start(): void; stop(): void }
   trajectory: unknown
   workspaceManager: unknown
@@ -347,6 +347,11 @@ export function registerReconfigureRoute(
 
     if (action === 'update_workspace') {
       await handleUpdateWorkspace(payload, res, deps, logger)
+      return
+    }
+
+    if (action === 'poll_workspace') {
+      await handlePollWorkspace(payload, res, deps, logger)
       return
     }
 
@@ -1093,6 +1098,68 @@ async function handleUpdateWorkspace(
         ok: true,
         generatedAt: new Date().toISOString(),
         updated: name,
+        model,
+        text: renderPanelText(model),
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+/**
+ * Manually trigger an out-of-band TAPD poll for one workspace.
+ *
+ * Body shape:
+ *   { action: 'poll_workspace', name: string }
+ *
+ * Does NOT restart services or swap config — it just runs one tick for
+ * the named module so the user can force a pull without waiting for the
+ * workspace's own timer. Returns the refreshed panel model.
+ */
+async function handlePollWorkspace(
+  payload: Record<string, unknown>,
+  res: ServerResponse,
+  deps: ReconfigureRouteDeps,
+  logger: Logger,
+): Promise<void> {
+  const name = typeof payload.name === 'string' ? payload.name.trim() : ''
+  if (!name) {
+    res.statusCode = 400
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ ok: false, error: 'invalid_workspace', message: 'name is required' }))
+    return
+  }
+
+  const current = deps.liveConfig.current
+  if (!current.modules.some((m) => m.id === name)) {
+    res.statusCode = 404
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ ok: false, error: 'workspace_not_found', message: `workspace "${name}" does not exist` }))
+    return
+  }
+
+  try {
+    await deps.currentServices.poller.tick(name)
+  } catch (err) {
+    logger.error(`[auto-rd] manual poll for ${name} failed: ${(err as Error).message}`)
+    res.statusCode = 500
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ ok: false, error: 'poll_failed', message: (err as Error).message }))
+    return
+  }
+
+  const tokenState = await resolveTokenStates(deps.credentials, current.modules)
+  const model = buildPanelModel(deps.storage, current, deps.runtime, tokenState)
+  res.statusCode = 200
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(
+    JSON.stringify(
+      {
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        polled: name,
         model,
         text: renderPanelText(model),
       },

@@ -384,7 +384,7 @@ const ATTENTION_MODEL = {
   const afterText = collectText(after)
 
   check('#7: workspace detail shows the back button', afterText.includes('返回'), afterText.slice(0, 300))
-  check('#7: workspace detail shows the settings form ("配置")', afterText.includes('配置'), afterText.slice(0, 300))
+  check('#7: workspace detail is a pull panel (shows 拉取)', afterText.includes('拉取'), afterText.slice(0, 300))
   check('#7: completed stories sit inside a <details> summary',
     someElement(after, (el) => el.props && el.props.className === 'auto-rd-done-summary'),
     'no auto-rd-done-summary element')

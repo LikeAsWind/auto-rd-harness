@@ -1065,6 +1065,76 @@ window.__ModuleLoader__.load({
       return h('span', { style: { fontFamily: styles.fontCode, fontSize: 11, color: styles.labelTertiary } }, '尚未同步')
     }
 
+    // The full "pull panel" header for a workspace detail view: last pull
+    // time / error / new-count, a countdown to the next automatic pull,
+    // and a manual "pull now" button.
+    function PollPanel(props) {
+      var pollStat = props.pollStat
+      var now = props.now
+      var onPoll = props.onPoll
+
+      var lastSuccessLabel = pollStat && pollStat.lastSuccessAt
+        ? clockLabel(Date.parse(pollStat.lastSuccessAt))
+        : '—'
+      var newCount = pollStat ? pollStat.lastNewCount : 0
+      var error = pollStat && pollStat.lastError ? pollStat.lastError : null
+
+      var countdown = null
+      if (pollStat && pollStat.lastAttemptAt && pollStat.intervalMs) {
+        var elapsed = now - Date.parse(pollStat.lastAttemptAt)
+        var remainMs = pollStat.intervalMs - (elapsed % pollStat.intervalMs)
+        var remainSec = Math.max(0, Math.floor(remainMs / 1000))
+        countdown = remainSec + 's'
+      }
+
+      return h(
+        'div',
+        {
+          className: 'auto-rd-poll-panel',
+          style: {
+            padding: '10px 12px',
+            border: '1px solid ' + styles.borderL3,
+            borderRadius: 6,
+            marginBottom: 12,
+            fontFamily: styles.fontCode,
+            fontSize: 11,
+            color: styles.labelSecondary,
+          },
+        },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+          h('span', { style: { color: error ? styles.statusError : styles.statusSuccess } },
+            error ? '⚠ 拉取失败' : '✓ 上次拉取 ' + lastSuccessLabel),
+          newCount > 0 ? h('span', { style: { color: styles.statusInfo } }, '+ ' + newCount + ' 条新需求') : null,
+          countdown != null ? h('span', { style: { color: styles.labelTertiary } }, '距下次 ' + countdown) : null,
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'auto-rd-poll-now',
+              onClick: function () { if (typeof onPoll === 'function') onPoll() },
+              style: {
+                marginLeft: 'auto',
+                border: '1px solid ' + styles.borderL2,
+                background: styles.panelBg,
+                color: styles.labelPrimary,
+                borderRadius: 4,
+                padding: '3px 10px',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                fontSize: 11,
+              },
+            },
+            '立即拉取',
+          ),
+        ),
+        error
+          ? h('div', { style: { marginTop: 6, color: styles.statusError } }, error)
+          : null,
+      )
+    }
+
     function Pager(props) {
       var page = props.page
       var totalPages = props.totalPages
@@ -1081,6 +1151,7 @@ window.__ModuleLoader__.load({
     function WorkspaceRow(props) {
       var ws = props.workspace
       var onOpen = props.onOpen
+      var onSettings = props.onSettings
       var onRemove = props.onRemove
 
       var dotStyle = {
@@ -1139,6 +1210,34 @@ window.__ModuleLoader__.load({
             : h('span', null, ws.status === 'idle' && ws.storyCount === 0 ? '尚未拉取需求' : '—'),
         ),
         h(PollStatBadge, { pollStat: ws.pollStat }),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'auto-rd-ws-settings',
+            title: '配置',
+            'aria-label': '配置工作空间',
+            onClick: function (e) {
+              e.preventDefault()
+              e.stopPropagation()
+              if (typeof onSettings === 'function') onSettings(ws.id)
+            },
+            style: {
+              width: 22,
+              height: 22,
+              padding: 0,
+              background: 'transparent',
+              border: '1px solid ' + styles.borderL3,
+              borderRadius: 4,
+              color: styles.labelTertiary,
+              fontSize: 12,
+              lineHeight: '20px',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            },
+          },
+          '⚙',
+        ),
         h(
           'button',
           {
@@ -1505,6 +1604,8 @@ window.__ModuleLoader__.load({
       var onUpdate = props.onUpdate
       var onStoryClick = props.onStoryClick
       var onBack = props.onBack
+      var onPoll = props.onPoll
+      var now = props.now
       var issues = (ws && ws.issues) || []
 
       var open = []
@@ -1696,6 +1797,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: 14, fontWeight: 600, color: styles.labelPrimary } }, ws.name),
           h(PollStatBadge, { pollStat: ws.pollStat }),
         ),
+        h(PollPanel, { pollStat: ws.pollStat, now: now, onPoll: onPoll }),
         issues.length
           ? h(
               'div',
@@ -1754,6 +1856,45 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
+      )
+    }
+
+    // ---- workspace settings page (full view) ---------------------------
+    //
+    // The settings form used to be inline at the bottom of the workspace
+    // detail. It is now its own page, reached from the gear button on the
+    // workspace row — the detail view stays a read-only "pull panel"
+    // (poll status + task list), and configuration lives apart.
+
+    function WorkspaceSettingsPage(props) {
+      var ws = props.workspace
+      var onBack = props.onBack
+      var onUpdate = props.onUpdate
+
+      function back() {
+        if (typeof onBack === 'function') onBack()
+      }
+
+      return h(
+        'div',
+        { style: { padding: '0 20px 20px', color: styles.labelSecondary, fontSize: 12, lineHeight: 1.7 } },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 } },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'auto-rd-back',
+              onClick: back,
+              'aria-label': '返回工作空间列表',
+              style: { border: 'none', background: 'none', color: styles.accent, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', padding: 0 },
+            },
+            '← 返回',
+          ),
+          h('span', { style: { fontSize: 14, fontWeight: 600, color: styles.labelPrimary } }, ws.name),
+          h('span', { style: { color: styles.labelTertiary, fontSize: 11 } }, '· 配置'),
+        ),
         h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate }),
       )
     }
@@ -2113,6 +2254,7 @@ window.__ModuleLoader__.load({
       var onRemove = props.onRemove
       var onUpdate = props.onUpdate
       var onOpenWorkspace = props.onOpenWorkspace
+      var onSettingsWorkspace = props.onSettingsWorkspace
 
       var PAGE_SIZE = 5
       var page = React.useState(0)
@@ -2155,6 +2297,9 @@ window.__ModuleLoader__.load({
               workspace: ws,
               onOpen: function () {
                 if (typeof onOpenWorkspace === 'function') onOpenWorkspace(ws.id)
+              },
+              onSettings: function (id) {
+                if (typeof onSettingsWorkspace === 'function') onSettingsWorkspace(id)
               },
               onRemove: function (id) {
                 if (typeof onRemove === 'function') onRemove(id)
@@ -2645,6 +2790,21 @@ window.__ModuleLoader__.load({
           setSelectedStoryId(null)
           setView('list')
         }
+        if (viewValue === 'workspace-settings' && activeWorkspaceIdValue) {
+          var wsc = null
+          for (var wj2 = 0; wj2 < workspaces.length; wj2++) {
+            if (workspaces[wj2].id === activeWorkspaceIdValue) { wsc = workspaces[wj2]; break }
+          }
+          if (wsc) {
+            return h(WorkspaceSettingsPage, {
+              workspace: wsc,
+              onBack: function () { setView('list') },
+              onUpdate: refresh,
+            })
+          }
+          setActiveWorkspaceId(null)
+          setView('list')
+        }
         if (viewValue === 'workspace' && activeWorkspaceIdValue) {
           var ws = null
           for (var wj = 0; wj < workspaces.length; wj++) {
@@ -2655,6 +2815,8 @@ window.__ModuleLoader__.load({
               workspace: ws,
               onBack: function () { setActiveWorkspaceId(null); setView('list') },
               onStoryClick: function (id) { setSelectedStoryId(id); setView('story') },
+              onPoll: function () { pollWorkspace(ws.id) },
+              now: nowValue,
               onUpdate: refresh,
             })
           }
@@ -2664,10 +2826,34 @@ window.__ModuleLoader__.load({
         return h(WorkspaceList, {
           workspaces: workspaces,
           onOpenWorkspace: function (id) { setActiveWorkspaceId(id); setView('workspace') },
+          onSettingsWorkspace: function (id) { setActiveWorkspaceId(id); setView('workspace-settings') },
           onRefresh: refresh,
           onRemove: removeWorkspace,
           onUpdate: refresh,
         })
+      }
+
+      /**
+       * Manually trigger an out-of-band poll for one workspace, then
+       * apply the refreshed panel model in place.
+       */
+      function pollWorkspace(id) {
+        fetch(RECONFIGURE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'poll_workspace', name: id }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) { return { ok: res.ok, body: body } })
+          })
+          .then(function (result) {
+            if (result.ok && result.body && result.body.ok) {
+              refresh(result.body)
+            }
+          })
+          .catch(function () {
+            // The 5s panel poll reconciles on the next tick.
+          })
       }
 
       /**

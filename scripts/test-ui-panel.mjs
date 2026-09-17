@@ -441,6 +441,7 @@ await (async () => {
         lastSuccessAt: new Date('2025-01-01T00:01:00.000Z'),
         lastError: null,
         lastNewCount: 2,
+        intervalMs: 60000,
       }],
       ['m2', {
         moduleId: 'm2',
@@ -448,6 +449,7 @@ await (async () => {
         lastSuccessAt: null,
         lastError: '401 Unauthorized',
         lastNewCount: 0,
+        intervalMs: 60000,
       }],
     ]),
   }
@@ -461,6 +463,7 @@ await (async () => {
   const p2 = model.modules.find((x) => x.id === 'm2')
   check('pollStat: success module carries ISO successAt', p1.pollStat.lastSuccessAt === '2025-01-01T00:01:00.000Z', JSON.stringify(p1.pollStat))
   check('pollStat: success module has lastNewCount', p1.pollStat.lastNewCount === 2, String(p1.pollStat.lastNewCount))
+  check('pollStat: carries intervalMs', p1.pollStat.intervalMs === 60000, String(p1.pollStat.intervalMs))
   check('pollStat: failing module carries the error', p2.pollStat.lastError === '401 Unauthorized', String(p2.pollStat.lastError))
   check('pollStat: failing module keeps successAt null', p2.pollStat.lastSuccessAt === null, String(p2.pollStat.lastSuccessAt))
 }

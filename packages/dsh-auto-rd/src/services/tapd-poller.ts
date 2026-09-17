@@ -100,7 +100,7 @@ interface RawTapdListResponse {
 }
 
 export class TapdPoller {
-  private timer: ReturnType<typeof setInterval> | null = null
+  private timers: Map<string, ReturnType<typeof setInterval>> = new Map()
   private readonly httpClient: HttpClient
 
   constructor(private readonly ctx: Context, private readonly deps: TapdPollerDeps) {
@@ -108,27 +108,37 @@ export class TapdPoller {
   }
 
   start(): void {
-    if (this.timer) return
+    if (this.timers.size > 0) return
+    const pollable = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
     this.deps.logger.info(
       `TapdPoller starting (interval ${this.deps.config.tapdPollIntervalMs}ms, ` +
-        `${this.deps.config.modules.length} modules configured)`,
+        `${pollable.length} module(s) with a TAPD workspace id)`,
     )
 
-    // Run once immediately, then on interval.
-    void this.tick()
-    this.timer = setInterval(() => void this.tick(), this.deps.config.tapdPollIntervalMs)
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = null
+    // One independent timer per workspace, so each workspace polls on its
+    // own cadence and the panel can show a per-workspace countdown.
+    for (const m of pollable) {
+      void this.tick(m.id)
+      const timer = setInterval(() => void this.tick(m.id), this.deps.config.tapdPollIntervalMs)
+      this.timers.set(m.id, timer)
     }
   }
 
-  async tick(): Promise<void> {
+  stop(): void {
+    for (const timer of this.timers.values()) {
+      clearInterval(timer)
+    }
+    this.timers.clear()
+  }
+
+  /**
+   * Run one poll. When `moduleId` is given, only that module is fetched;
+   * otherwise every pollable module is fetched (kept for `auto_rd_trigger`'s
+   * `poll_now`, which predates per-workspace timers).
+   */
+  async tick(moduleId?: string): Promise<void> {
     try {
-      const fetched = await this.fetchStories()
+      const fetched = await this.fetchStories(moduleId)
       // Track how many of each module's stories were actually new.
       const newByModule = new Map<string, number>()
       for (const t of fetched.stories) {
@@ -221,12 +231,15 @@ export class TapdPoller {
    * does not prevent the others from advancing. Persistent failures show
    * up as repeated error logs but never crash the plugin.
    */
-  private async fetchStories(): Promise<{ stories: TapdStory[]; results: PollResult[] }> {
-    const modules = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
+  private async fetchStories(moduleId?: string): Promise<{ stories: TapdStory[]; results: PollResult[] }> {
+    const pollable = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
+    const modules = moduleId ? pollable.filter((m) => m.id === moduleId) : pollable
     if (modules.length === 0) {
-      this.deps.logger.warn(
-        'TapdPoller: no module has a tapdWorkspaceId -- nothing to fetch',
-      )
+      if (moduleId) {
+        this.deps.logger.warn(`TapdPoller: module ${moduleId} has no tapdWorkspaceId -- nothing to fetch`)
+      } else {
+        this.deps.logger.warn('TapdPoller: no module has a tapdWorkspaceId -- nothing to fetch')
+      }
       return { stories: [], results: [] }
     }
     const all: TapdStory[] = []

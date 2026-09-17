@@ -132,6 +132,7 @@ export interface PanelModule {
     lastSuccessAt: string | null
     lastError: string | null
     lastNewCount: number
+    intervalMs: number
   }
 }
 
@@ -478,6 +479,7 @@ export function buildPanelModel(
               lastSuccessAt: s.lastSuccessAt?.toISOString() ?? null,
               lastError: s.lastError,
               lastNewCount: s.lastNewCount,
+              intervalMs: s.intervalMs,
             }
           })()
         : undefined,

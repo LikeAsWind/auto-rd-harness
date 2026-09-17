@@ -497,6 +497,7 @@ function startServices(
           lastSuccessAt: r.error ? (prev?.lastSuccessAt ?? null) : at,
           lastError: r.error,
           lastNewCount: r.error ? (prev?.lastNewCount ?? 0) : r.newCount,
+          intervalMs: config.tapdPollIntervalMs,
         })
       }
     },

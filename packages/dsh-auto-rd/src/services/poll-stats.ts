@@ -17,6 +17,9 @@ export interface WorkspacePollStat {
   lastError: string | null
   /** Stories newly enqueued on the last successful tick. */
   lastNewCount: number
+  /** Poll interval in ms for this module; the client uses it to render
+   *  a "next poll in Ns" countdown. */
+  intervalMs: number
 }
 
 /** Per-module outcome for one poller tick, reported to the host runtime. */
