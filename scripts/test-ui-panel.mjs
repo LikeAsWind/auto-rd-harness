@@ -52,6 +52,21 @@ function fakeStorage({ modules = [], stories = [] } = {}) {
   }
 }
 
+// Module identity comes from the live config, not storage: DSH restarts
+// wipe the config but leave storage, so storage can carry orphans the
+// user never expects to see again (see buildPanelModel). Storage still
+// supplies the stories and the richer module record.
+//
+// `panelModel` keeps the two in lock-step the way the host does, so a
+// test states its modules once and gets the same view the UI sees.
+function configFor(modules) {
+  return { modules: modules.map((m) => ({ id: m.id, title: m.title })) }
+}
+
+function panelModel({ modules = [], stories = [] } = {}, runtime) {
+  return buildPanelModel(fakeStorage({ modules, stories }), configFor(modules), runtime)
+}
+
 function story(over = {}) {
   return {
     id: 'S1',
@@ -78,6 +93,8 @@ function mod(over = {}) {
 // ---- empty -----------------------------------------------------------
 
 {
+  // No config at all: the checklist is skipped entirely, so the text
+  // renderer reports the plain empty state rather than a setup warning.
   const model = buildPanelModel(fakeStorage())
   check('empty: no modules', model.modules.length === 0)
   check('empty: totals all zero', model.totals.stories === 0 && model.totals.modules === 0)
@@ -88,16 +105,14 @@ function mod(over = {}) {
 // ---- grouping + ordering --------------------------------------------
 
 {
-  const model = buildPanelModel(
-    fakeStorage({
-      modules: [mod()],
-      stories: [
-        story({ id: 'old', updatedAt: '2025-01-01T00:00:00.000Z' }),
-        story({ id: 'new', updatedAt: '2025-06-01T00:00:00.000Z' }),
-        story({ id: 'mid', updatedAt: '2025-03-01T00:00:00.000Z' }),
-      ],
-    }),
-  )
+  const model = panelModel({
+    modules: [mod()],
+    stories: [
+      story({ id: 'old', updatedAt: '2025-01-01T00:00:00.000Z' }),
+      story({ id: 'new', updatedAt: '2025-06-01T00:00:00.000Z' }),
+      story({ id: 'mid', updatedAt: '2025-03-01T00:00:00.000Z' }),
+    ],
+  })
   check('grouping: one module section', model.modules.length === 1)
   check('ordering: newest first', model.modules[0].stories[0].id === 'new', model.modules[0].stories.map((s) => s.id).join(','))
   check('ordering: oldest last', model.modules[0].stories[2].id === 'old')
@@ -106,14 +121,17 @@ function mod(over = {}) {
 
 {
   // Stories belonging to an unknown module must not leak into a section.
-  const model = buildPanelModel(
-    fakeStorage({
-      modules: [mod({ id: 'm1' })],
-      stories: [story({ id: 'orphan', moduleId: 'm-unknown' })],
-    }),
-  )
+  // The remove_workspace route now deletes a module's stories along
+  // with it, so orphans only arise from pre-cleanup storage — the
+  // filter below is the backstop, and totals count what storage holds
+  // so a growing orphan pile stays visible in the numbers.
+  const model = panelModel({
+    modules: [mod({ id: 'm1' })],
+    stories: [story({ id: 'orphan', moduleId: 'm-unknown' })],
+  })
   check('grouping: orphan story excluded from the module section', model.modules[0].stories.length === 0)
   check('grouping: orphan still counted in totals', model.totals.stories === 1, String(model.totals.stories))
+  check('totals: per-module stories stay exact', model.modules[0].stories.length + model.modules[0].overflow === 0)
 }
 
 // ---- cap + overflow --------------------------------------------------
@@ -122,7 +140,7 @@ function mod(over = {}) {
   const stories = Array.from({ length: PANEL_STORY_LIMIT + 3 }, (_, i) =>
     story({ id: `S${i}`, updatedAt: `2025-01-01T00:00:${String(i).padStart(2, '0')}.000Z` }),
   )
-  const model = buildPanelModel(fakeStorage({ modules: [mod()], stories }))
+  const model = panelModel({ modules: [mod()], stories })
   check('cap: visible stories capped at PANEL_STORY_LIMIT', model.modules[0].stories.length === PANEL_STORY_LIMIT, String(model.modules[0].stories.length))
   check('cap: overflow counts the rest', model.modules[0].overflow === 3, String(model.modules[0].overflow))
   const text = renderPanelText(model)
@@ -132,18 +150,16 @@ function mod(over = {}) {
 // ---- totals ----------------------------------------------------------
 
 {
-  const model = buildPanelModel(
-    fakeStorage({
-      modules: [mod(), mod({ id: 'm2', title: 'Search' })],
-      stories: [
-        story({ id: 'a', moduleId: 'm1', state: 'pending' }),
-        story({ id: 'b', moduleId: 'm1', state: 'implementing' }),
-        story({ id: 'c', moduleId: 'm1', state: 'blocked' }),
-        story({ id: 'd', moduleId: 'm2', state: 'completed' }),
-        story({ id: 'e', moduleId: 'm2', state: 'failed' }),
-      ],
-    }),
-  )
+  const model = panelModel({
+    modules: [mod(), mod({ id: 'm2', title: 'Search' })],
+    stories: [
+      story({ id: 'a', moduleId: 'm1', state: 'pending' }),
+      story({ id: 'b', moduleId: 'm1', state: 'implementing' }),
+      story({ id: 'c', moduleId: 'm1', state: 'blocked' }),
+      story({ id: 'd', moduleId: 'm2', state: 'completed' }),
+      story({ id: 'e', moduleId: 'm2', state: 'failed' }),
+    ],
+  })
   check('totals: modules', model.totals.modules === 2, String(model.totals.modules))
   check('totals: stories', model.totals.stories === 5, String(model.totals.stories))
   check('totals: in-flight excludes completed/failed', model.totals.inFlight === 3, String(model.totals.inFlight))
@@ -184,14 +200,12 @@ function mod(over = {}) {
 // ---- renderPanelText -------------------------------------------------
 
 {
-  const model = buildPanelModel(
-    fakeStorage({
-      modules: [mod()],
-      stories: [
-        story({ id: 'S1', title: 'Refund endpoint', state: 'implementing', mrUrl: 'https://gitlab/mr/1' }),
-      ],
-    }),
-  )
+  const model = panelModel({
+    modules: [mod()],
+    stories: [
+      story({ id: 'S1', title: 'Refund endpoint', state: 'implementing', mrUrl: 'https://gitlab/mr/1' }),
+    ],
+  })
   const text = renderPanelText(model)
   check('text: header carries the modules/stories totals', text.includes('Modules: 1') && text.includes('stories: 1'))
   check('text: header carries the uptime + last poll', text.includes('mounted for') && text.includes('last TAPD poll'))
@@ -201,7 +215,7 @@ function mod(over = {}) {
 }
 
 {
-  const model = buildPanelModel(fakeStorage({ modules: [mod()], stories: [] }))
+  const model = panelModel({ modules: [mod()], stories: [] })
   const text = renderPanelText(model)
   check('text: empty module says "no stories"', text.includes('no stories'))
 }

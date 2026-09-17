@@ -129,7 +129,18 @@ function ctxWith(key, service) {
   check('inject: is exported as an array', Array.isArray(inject), typeof inject)
 
   // Verified-present host services the plugin actually uses.
-  const required = ['storageDomain', 'subagents', 'tools', 'systemPrompt', 'sessions']
+  // `sessionTitle` and `workspaceController` are optional at runtime —
+  // apply() degrades when the shell withholds them — but they must still
+  // be declared here, or the shell never offers them at all.
+  const required = [
+    'storageDomain',
+    'subagents',
+    'tools',
+    'systemPrompt',
+    'sessions',
+    'sessionTitle',
+    'workspaceController',
+  ]
   for (const k of required) {
     check(`inject: declares the used service '${k}'`, inject.includes(k))
   }
@@ -144,7 +155,11 @@ function ctxWith(key, service) {
   }
 
   check('inject: has no duplicates', new Set(inject).size === inject.length, JSON.stringify(inject))
-  check('inject: is exactly the five verified services', inject.length === 5, JSON.stringify(inject))
+  check(
+    'inject: declares exactly the services it reads',
+    inject.length === required.length,
+    JSON.stringify(inject),
+  )
 }
 
 // ---- apply shape ----------------------------------------------------

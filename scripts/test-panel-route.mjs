@@ -108,6 +108,15 @@ const STORIES = [
   { id: 'S2', moduleId: 'm1', tapdId: '2', title: 'Blocked thing', description: 'd', state: 'blocked', branch: 'auto-rd/S2', updatedAt: '2025-06-02T00:00:00Z', artifacts: {}, retryCount: 0, blockedReason: 'x', createdAt: '2025-01-01T00:00:00Z' },
 ]
 
+// Module identity comes from the live config, not storage, so a route
+// that should see MODULES has to be given the matching config too.
+const CONFIG = {
+  tapdApiToken: '',
+  gitlabApiToken: '',
+  workspaceRoot: '',
+  modules: MODULES.map((m) => ({ id: m.id, title: m.title })),
+}
+
 // ---- registration ---------------------------------------------------
 
 {
@@ -175,6 +184,7 @@ const STORIES = [
   registerPanelRoute(ctxWith(ws), {
     storage: fakeStorage({ stories: STORIES, modules: MODULES }),
     logger: silentLogger(),
+    getConfig: () => CONFIG,
   })
   const handler = ws.routes[0].handler
 
@@ -204,6 +214,7 @@ const STORIES = [
   registerPanelRoute(ctxWith(ws), {
     storage: fakeStorage({ stories: STORIES, modules: MODULES }),
     logger: silentLogger(),
+    getConfig: () => CONFIG,
   })
   const res = fakeRes()
   await ws.routes[0].handler({ method: 'HEAD' }, res)
@@ -263,15 +274,20 @@ for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
 // ---- no secrets leak ------------------------------------------------
 
 {
+  // The payload's health section deliberately names missing tokens in
+  // its issue messages ("TAPD token is empty — …"), so the word appears
+  // by design. What must never appear is a token VALUE: the needles are
+  // the real secret-material keys, and any hit means a field leaked.
   const ws = fakeWebServer()
   registerPanelRoute(ctxWith(ws), {
     storage: fakeStorage({ stories: STORIES, modules: MODULES }),
     logger: silentLogger(),
+    getConfig: () => CONFIG,
   })
   const res = fakeRes()
   await ws.routes[0].handler({ method: 'GET' }, res)
   const raw = String(res.body)
-  for (const needle of ['token', 'Token', 'password', 'secret', 'workspacePath', 'repoUrl']) {
+  for (const needle of ['tapdApiToken', 'gitlabApiToken', 'password', 'secret', 'workspacePath', 'repoUrl']) {
     check(`payload omits '${needle}'`, !raw.includes(needle), needle)
   }
 }

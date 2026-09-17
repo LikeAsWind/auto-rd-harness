@@ -999,9 +999,14 @@ window.__ModuleLoader__.load({
     function WorkspaceSettingsForm(props) {
       var ws = props.workspace
       var onUpdate = props.onUpdate
+      // Tokens never travel back from the host — only whether one is
+      // configured. The inputs therefore start empty; leaving them
+      // empty on save means "keep the stored token" (update_workspace
+      // treats '' as no-change), same convention as the shell's own
+      // model-key settings.
       var tapdWorkspaceId = React.useState(ws.tapdWorkspaceId || '')
-      var tapdToken = React.useState(ws.tapdApiToken || '')
-      var gitlabToken = React.useState(ws.gitlabApiToken || '')
+      var tapdToken = React.useState('')
+      var gitlabToken = React.useState('')
       var busy = React.useState(false)
       var status = React.useState(null)
 
@@ -1095,14 +1100,14 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { marginBottom: 10 } },
-          h('label', { style: labelStyle }, 'TAPD API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 继承全局')),
-          h('input', { type: 'password', value: tapdTokenValue, onChange: function (e) { setTapdToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: '(继承全局)', style: fieldStyle }),
+          h('label', { style: labelStyle }, 'TAPD API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 保持不变')),
+          h('input', { type: 'password', value: tapdTokenValue, onChange: function (e) { setTapdToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: ws.tapdTokenConfigured ? '已配置——输入新值可替换' : '(继承全局)', style: fieldStyle }),
         ),
         h(
           'div',
           { style: { marginBottom: 10 } },
-          h('label', { style: labelStyle }, 'GitLab API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 继承全局')),
-          h('input', { type: 'password', value: gitlabTokenValue, onChange: function (e) { setGitlabToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: '(继承全局)', style: fieldStyle }),
+          h('label', { style: labelStyle }, 'GitLab API token', h('span', { style: { color: styles.labelTertiary, fontWeight: 400, marginLeft: 6 } }, '留空 = 保持不变')),
+          h('input', { type: 'password', value: gitlabTokenValue, onChange: function (e) { setGitlabToken(e.target.value) }, disabled: busyValue, autoComplete: 'off', placeholder: ws.gitlabTokenConfigured ? '已配置——输入新值可替换' : '(继承全局)', style: fieldStyle }),
         ),
         statusValue
           ? h(
@@ -1529,10 +1534,11 @@ window.__ModuleLoader__.load({
           status: status,
           error: null,
           remedy: null,
-          // Per-workspace settings (empty = inherit global).
+          // Per-workspace settings (empty = inherit global). Token
+          // values never arrive; only their configured flags do.
           tapdWorkspaceId: m.tapdWorkspaceId || '',
-          tapdApiToken: m.tapdApiToken || '',
-          gitlabApiToken: m.gitlabApiToken || '',
+          tapdTokenConfigured: !!m.tapdTokenConfigured,
+          gitlabTokenConfigured: !!m.gitlabTokenConfigured,
           modelSelection: m.modelSelection || {},
         }
       })
@@ -1818,7 +1824,11 @@ window.__ModuleLoader__.load({
       PANEL_LABEL: PANEL_LABEL,
       DATA_URL: DATA_URL,
       RECONFIGURE_URL: RECONFIGURE_URL,
+      PICK_DIRECTORY_URL: PICK_DIRECTORY_URL,
       POLL_MS: POLL_MS,
+      // Test seam: direct component handles so the client-half suite can
+      // render the icon and panel without a full shell.
+      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel },
     }
 
     return module

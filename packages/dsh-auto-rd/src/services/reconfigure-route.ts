@@ -599,13 +599,26 @@ async function handleRemoveWorkspace(
 
   deps.liveConfig.current = next
 
-  // Drop the storage record so the panel route's workspace count
-  // reflects the new state on the very next fetch.
+  // Drop the storage records so the panel route's workspace and story
+  // counts reflect the new state on the very next fetch. Stories are
+  // keyed by moduleId; leaving them behind turns them into orphans the
+  // panel silently filters out while storage keeps growing.
   try {
     deps.storage.modules().delete(name)
   } catch (err) {
     logger.error(
       `[auto-rd] failed to delete module ${name} from storage: ${(err as Error).message}`,
+    )
+  }
+  try {
+    for (const story of deps.storage.stories().values()) {
+      if (story.moduleId === name) {
+        deps.storage.stories().delete(story.id)
+      }
+    }
+  } catch (err) {
+    logger.error(
+      `[auto-rd] failed to delete stories of module ${name} from storage: ${(err as Error).message}`,
     )
   }
 

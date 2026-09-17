@@ -306,14 +306,19 @@ function teardown(ctx) {
   check('mount: registered exactly 1 prompt section', prompt.sections.length === 1, String(prompt.sections.length))
   check('mount: prompt section name is auto-rd-overview', prompt.sections[0]?.name === 'auto-rd-overview', String(prompt.sections[0]?.name))
 
-  // The webServer HTTP routes — both the panel data route AND the
-  // reconfigure route (POST /auto-rd/reconfigure) are bound when
-  // webServer is present. The reconfigure route is the second one
-  // added in M5+ to let users apply new config without restarting
-  // DSH; the panel route is still the primary transport for the UI.
-  check('mount: registered 2 webServer routes (panel + reconfigure)', web.routes.length === 2, String(web.routes.length))
+  // The webServer HTTP routes, all bound when webServer is present:
+  //   - panel: the primary read transport for the UI
+  //   - reconfigure: applies new config without restarting DSH
+  //   - pick-directory: backs the add-workspace form's Browse button
+  check(
+    'mount: registered 3 webServer routes (panel + reconfigure + pick-directory)',
+    web.routes.length === 3,
+    JSON.stringify(web.routes.map((r) => r.path)),
+  )
   const panelRoute = web.routes.find((r) => r.path === '/auto-rd/panel')
   const reconfigureRoute = web.routes.find((r) => r.path === '/auto-rd/reconfigure')
+  const pickDirectoryRoute = web.routes.find((r) => r.path === '/auto-rd/pick-directory')
+  check('mount: pick-directory route is registered', !!pickDirectoryRoute, JSON.stringify(web.routes.map((r) => r.path)))
   check('mount: panel route is registered', !!panelRoute, JSON.stringify(web.routes.map((r) => r.path)))
   check('mount: panel route path', panelRoute?.path === '/auto-rd/panel', String(panelRoute?.path))
   check('mount: panel route is exact', panelRoute?.kind === 'exact')

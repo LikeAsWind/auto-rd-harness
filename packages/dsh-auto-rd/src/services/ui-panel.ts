@@ -75,12 +75,15 @@ export interface PanelModule {
   inFlight: number
   /**
    * Per-workspace settings, surfaced to the client so the expanded
-   * workspace panel can offer an edit form. Empty values mean "inherit
-   * the global config" (see services/story-runner.ts + tapd-poller.ts).
+   * workspace panel can offer an edit form. Tokens are never sent to
+   * the browser — only whether one is configured, mirroring how the
+   * shell's own settings UI treats model API keys (describe(ref) says
+   * `configured`, never the value). Empty booleans mean "inherit the
+   * global config" (see services/story-runner.ts + tapd-poller.ts).
    */
   tapdWorkspaceId?: string
-  tapdApiToken?: string
-  gitlabApiToken?: string
+  tapdTokenConfigured?: boolean
+  gitlabTokenConfigured?: boolean
   modelSelection?: Record<string, string>
 }
 
@@ -156,7 +159,7 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
       message: 'TAPD token is empty — the poller is running against a local mock fixture.',
       remedy:
         'Set the DSH_TAPD_API_TOKEN env var in the shell that launches DSH, ' +
-        'or paste a real token into cordis.patch.yml under config.tapdApiToken.',
+        'or paste a real token into cordis.patch.yml under the TAPD token field.',
     })
   }
 
@@ -166,7 +169,7 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
       message: 'GitLab token is empty — MR creation will fail per story.',
       remedy:
         'Set the DSH_GITLAB_API_TOKEN env var, or paste a real token with `api` scope into ' +
-        'cordis.patch.yml under config.gitlabApiToken.',
+        'cordis.patch.yml under the GitLab token field.',
     })
   }
 
@@ -180,7 +183,7 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
     })
   }
 
-  if (config.modules.length === 0) {
+  if ((config.modules ?? []).length === 0) {
     issues.push({
       key: 'modules',
       message: 'modules is empty — TAPD stories cannot be routed to a repo.',
@@ -195,10 +198,13 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
     })
   }
 
+  // Read through defaults rather than the declared types: these fields
+  // only acquire their Zod defaults when the config was parsed, and the
+  // panel is also handed configs assembled by hand.
   if (
     !config.useTapdMock &&
-    config.tapdApiToken.length > 0 &&
-    config.tapdWorkspaceIds.length === 0
+    (config.tapdApiToken ?? '').length > 0 &&
+    (config.tapdWorkspaceIds ?? []).length === 0
   ) {
     issues.push({
       key: 'tapd_workspaces',
@@ -260,11 +266,15 @@ export function buildPanelModel(
       createdAt: '',
     } as ModuleRecord
   })
-  const stories: StoryRecord[] = [...storage.stories().values()]
-    // Filter orphan stories whose moduleId is not in the live config.
-    // They would otherwise show up under a module id the UI does not
-    // know about, breaking the per-module grouping.
-    .filter((s) => configModuleIds.has(s.moduleId))
+  // Filter orphan stories whose moduleId is not in the live config.
+  // They would otherwise show up under a module id the UI does not
+  // know about, breaking the per-module grouping. `remove_workspace`
+  // now deletes a module's stories with it, so orphans only come from
+  // pre-cleanup storage — totals count them so a leftover pile stays
+  // visible instead of silently vanishing from every number.
+  const stories: StoryRecord[] = [...storage.stories().values()].filter((s) =>
+    configModuleIds.has(s.moduleId),
+  )
 
   const byModule = new Map<string, StoryRecord[]>()
   for (const s of stories) {
@@ -303,10 +313,11 @@ export function buildPanelModel(
       })),
       overflow: Math.max(0, all.length - visible.length),
       inFlight,
-      // Per-workspace settings (empty = inherit global).
+      // Per-workspace settings (empty = inherit global). Token values
+      // stay in the host; the client only learns whether one exists.
       tapdWorkspaceId: m.tapdWorkspaceId ?? '',
-      tapdApiToken: m.tapdApiToken ?? '',
-      gitlabApiToken: m.gitlabApiToken ?? '',
+      tapdTokenConfigured: (m.tapdApiToken ?? '').length > 0,
+      gitlabTokenConfigured: (m.gitlabApiToken ?? '').length > 0,
       modelSelection: m.modelSelection ?? {},
     }
   })
@@ -315,11 +326,18 @@ export function buildPanelModel(
   const mountedAt = runtime?.mountedAt ?? new Date()
   const mountedForSec = Math.max(0, Math.floor((Date.now() - mountedAt.getTime()) / 1000))
 
+  // Stories total counts everything in storage — grouped and orphan —
+  // so the number never silently drops what the module sections cannot
+  // place. (Orphans come from storage written before remove_workspace
+  // learned to delete a module's stories; the count keeps that pile
+  // visible.)
+  const totalStories = [...storage.stories().values()].length
+
   return {
     modules: panelModules,
     totals: {
       modules: modules.length,
-      stories: stories.length,
+      stories: totalStories,
       inFlight: inFlightTotal,
       blocked: blockedTotal,
       completed: completedTotal,
