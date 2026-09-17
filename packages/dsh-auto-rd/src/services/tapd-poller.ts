@@ -216,10 +216,12 @@ export class TapdPoller {
    *
    * Branches on `useTapdMock`:
    *   - true:  returns the local fixture (offline dev / unit tests).
-   *   - false: hits the real API for every workspace_id in
-   *            `config.tapdWorkspaceIds`. Empty workspace list -> no fetch.
+   *   - false: iterates every configured module and fetches the module's
+   *            own TAPD workspace (1:1 mapping). A module without a
+   *            `tapdWorkspaceId` is skipped. Each module uses its own
+   *            `tapdApiToken` when set, otherwise the global token.
    *
-   * Per-workspace errors are caught and logged; one workspace being 401/500
+   * Per-module errors are caught and logged; one workspace being 401/500
    * does not prevent the others from advancing. Persistent failures show
    * up as repeated error logs but never crash the plugin.
    */
@@ -227,25 +229,29 @@ export class TapdPoller {
     if (this.deps.config.useTapdMock) {
       return MOCK_TAPD_FIXTURE
     }
-    if (this.deps.config.tapdWorkspaceIds.length === 0) {
+    const modules = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
+    if (modules.length === 0) {
       this.deps.logger.warn(
-        'TapdPoller: useTapdMock=false but tapdWorkspaceIds is empty -- nothing to fetch',
+        'TapdPoller: useTapdMock=false but no module has a tapdWorkspaceId -- nothing to fetch',
       )
       return []
     }
     const all: TapdStory[] = []
-    for (const workspaceId of this.deps.config.tapdWorkspaceIds) {
+    for (const m of modules) {
+      const tapdWorkspaceId = m.tapdWorkspaceId as string
+      // Effective token: per-workspace override first, else global.
+      const token = m.tapdApiToken || this.deps.config.tapdApiToken
       try {
-        const stories = await this.fetchStoriesFromApi(workspaceId)
+        const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, token)
         all.push(...stories)
       } catch (err) {
         if (err instanceof HttpError && !err.transient) {
           this.deps.logger.error(
-            `TapdPoller: workspace ${workspaceId} returned ${err.status} -- will not retry until config changes`,
+            `TapdPoller: module ${m.id} (TAPD ${tapdWorkspaceId}) returned ${err.status} -- will not retry until config changes`,
           )
         } else {
           this.deps.logger.warn(
-            `TapdPoller: workspace ${workspaceId} fetch failed transiently: ${(err as Error).message} -- will retry next tick`,
+            `TapdPoller: module ${m.id} (TAPD ${tapdWorkspaceId}) fetch failed transiently: ${(err as Error).message} -- will retry next tick`,
           )
         }
       }
@@ -253,17 +259,17 @@ export class TapdPoller {
     return all
   }
 
-  private async fetchStoriesFromApi(workspaceId: string): Promise<TapdStory[]> {
+  private async fetchStoriesFromApi(tapdWorkspaceId: string, token: string): Promise<TapdStory[]> {
     const url = new URL(this.deps.config.tapdBaseUrl)
     url.pathname = join(url.pathname, 'stories')
-    url.searchParams.set('workspace_id', workspaceId)
+    url.searchParams.set('workspace_id', tapdWorkspaceId)
     url.searchParams.set('status', 'open')
 
     const resp = await this.httpClient.request<RawTapdListResponse>({
       url: url.toString(),
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${this.deps.config.tapdApiToken}`,
+        Authorization: `Bearer ${token}`,
         Accept: 'application/json',
       },
       timeoutMs: 20_000,

@@ -51,6 +51,18 @@ export interface StoryRunnerDeps {
    * appended so the trajectory is the canonical execution log.
    */
   trajectory?: TrajectoryRecorder
+  /**
+   * Optional DSH sessions service. When present, the runner creates one
+   * DSH session per story (titled after the story) and persists its id
+   * into `story.mainSessionId`. Absent in headless profiles — the
+   * pipeline still runs, just without a live DSH session.
+   */
+  sessions?: import('../types/dsh-services.js').SessionsService
+  /**
+   * Optional DSH session-title service, used to set the session's
+   * display title to the story title after creation.
+   */
+  sessionTitle?: import('../types/dsh-services.js').SessionTitleService
 }
 
 interface StageHandler {
@@ -121,6 +133,11 @@ export class StoryRunner {
       return
     }
 
+    // Ensure the story is bound to a DSH session before running. This is
+    // idempotent: if `story.mainSessionId` is already set we skip; if the
+    // sessions service is absent (headless) we skip silently.
+    await this.ensureSession(story)
+
     this.deps.logger.info(
       `StoryRunner starting ${storyId} from state=${story.state} retry=${story.retryCount}`,
     )
@@ -179,6 +196,51 @@ export class StoryRunner {
     }
 
     this.deps.logger.info(`StoryRunner done ${storyId} final state=${story!.state}`)
+  }
+
+  /**
+   * Bind a story to a DSH session, idempotently. If the story already
+   * carries a `mainSessionId`, or the sessions service is absent
+   * (headless profile), this is a no-op. Otherwise it creates a new
+   * session whose working directory is the story's worktree, sets the
+   * session title to the story title, and persists the id back onto
+   * `story.mainSessionId`.
+   */
+  private async ensureSession(story: StoryRecord): Promise<void> {
+    if (story.mainSessionId) return
+    const sessions = this.deps.sessions
+    if (!sessions || typeof sessions.create !== 'function') return
+
+    try {
+      const handle = sessions.create(undefined, {
+        meta: { cwd: story.worktreePath, origin: 'subagent' },
+      })
+      story.mainSessionId = handle.id
+      story.updatedAt = new Date().toISOString()
+      await this.deps.storage.stories().put(story.id, story)
+
+      // Set the session's display title to the story title so the DSH
+      // session list reads naturally. Non-fatal if the title service is
+      // absent.
+      if (this.deps.sessionTitle && typeof this.deps.sessionTitle.rename === 'function') {
+        try {
+          this.deps.sessionTitle.rename(handle, story.title)
+        } catch (titleErr) {
+          this.deps.logger.warn(
+            `StoryRunner: created session ${handle.id} but failed to title it: ${(titleErr as Error).message}`,
+          )
+        }
+      }
+
+      this.deps.logger.info(
+        `StoryRunner: bound story ${story.id} to DSH session ${handle.id}`,
+      )
+    } catch (err) {
+      // Non-fatal — the pipeline proceeds without a live session.
+      this.deps.logger.warn(
+        `StoryRunner: failed to create session for story ${story.id}: ${(err as Error).message}`,
+      )
+    }
   }
 }
 
@@ -979,9 +1041,11 @@ async function runMrCreatingStage(
       ].join('\n'),
     )
     try {
+      // Effective GitLab token: per-workspace override first, else global.
+      const gitlabApiToken = module.gitlabApiToken || deps.config.gitlabApiToken
       const mr = await createOrReuseMR(mergerDeps, {
         gitlabBaseUrl: deps.config.gitlabBaseUrl,
-        gitlabApiToken: deps.config.gitlabApiToken,
+        gitlabApiToken,
         projectId,
         sourceBranch: story.branch,
         targetBranch: module.defaultBranch,
@@ -1083,9 +1147,12 @@ async function runTapdSyncingStage(
     }
 
     try {
+      // Effective TAPD token: per-workspace override first, else global.
+      const module = deps.storage.modules().get(story.moduleId)
+      const tapdApiToken = (module?.tapdApiToken as string | undefined) || deps.config.tapdApiToken
       await syncTapd({
         tapdBaseUrl: deps.config.tapdBaseUrl,
-        tapdApiToken: deps.config.tapdApiToken,
+        tapdApiToken,
         tapdId: story.tapdId,
         mrUrl: story.mrUrl,
         gitBranch: story.branch,
