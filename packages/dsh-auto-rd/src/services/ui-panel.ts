@@ -173,6 +173,22 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
   if (!config) return []
   const issues: PanelSetupIssue[] = []
 
+  // Mock mode is auto-enabled by normalizeConfig when tapdApiToken is
+  // empty and useTapdMock is not explicitly false. We replicate that
+  // decision here because tests (and any host path that skips
+  // normalizeConfig) hand us the raw config, and the user-facing rule
+  // is: "if the plugin will end up reading the mock fixture, do not
+  // warn about missing modules / workspace ids — those are not how
+  // the fixture is routed".
+  //
+  // The mock fixture (see tapd-poller.ts MOCK_TAPD_FIXTURE) carries
+  // its own `category` labels, so a missing modules list and a
+  // missing tapdWorkspaceIds list are the expected dev state, not a
+  // misconfiguration. Telling the user to fix them while mock mode is
+  // active is noise.
+  const tapdTokenMissing = !config.tapdApiToken || config.tapdApiToken.trim() === ''
+  const isMock = !!config.useTapdMock || tapdTokenMissing
+
   if (!config.tapdApiToken || config.tapdApiToken.trim() === '') {
     issues.push({
       key: 'tapd_token',
@@ -203,7 +219,10 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
     })
   }
 
-  if ((config.modules ?? []).length === 0) {
+  // Skip the "modules is empty" warning in mock mode — the local
+  // fixture carries its own category labels, so a missing modules list
+  // is the expected dev state, not a misconfiguration.
+  if (!isMock && (config.modules ?? []).length === 0) {
     issues.push({
       key: 'modules',
       message: 'modules is empty — TAPD stories cannot be routed to a repo.',
@@ -220,9 +239,11 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
 
   // Read through defaults rather than the declared types: these fields
   // only acquire their Zod defaults when the config was parsed, and the
-  // panel is also handed configs assembled by hand.
+  // panel is also handed configs assembled by hand. Same mock-mode
+  // skip as above — the tapd_workspaces list is meaningless while
+  // TapdPoller is reading from the local fixture.
   if (
-    !config.useTapdMock &&
+    !isMock &&
     (config.tapdApiToken ?? '').length > 0 &&
     (config.tapdWorkspaceIds ?? []).length === 0
   ) {

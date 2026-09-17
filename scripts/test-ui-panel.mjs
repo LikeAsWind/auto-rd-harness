@@ -297,7 +297,33 @@ function mod(over = {}) {
   check('health: emits a tapd_token issue', model.health.issues.some((i) => i.key === 'tapd_token'))
   check('health: emits a gitlab_token issue', model.health.issues.some((i) => i.key === 'gitlab_token'))
   check('health: emits a workspace_root issue', model.health.issues.some((i) => i.key === 'workspace_root'))
-  check('health: emits a modules issue', model.health.issues.some((i) => i.key === 'modules'))
+  // Mock mode kicks in automatically when tapdApiToken is empty
+  // (normalizeConfig). In mock mode the local fixture carries its own
+  // category labels, so the "modules is empty" warning is noise —
+  // the user is intentionally developing offline. Issue #10 (mock
+  // suppresses modules-emptiness warning).
+  check(
+    'health: empty config is treated as mock mode, so modules issue is suppressed',
+    !model.health.issues.some((i) => i.key === 'modules'),
+  )
+  check(
+    'health: token set + useTapdMock=false + empty modules emits a modules issue',
+    (() => {
+      const cfg2 = ConfigSchema.parse({
+        tapdApiToken: 'x',
+        tapdWorkspaceIds: ['1'],
+        useTapdMock: false,
+        workspaceRoot: '/w',
+        modules: [],
+      })
+      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
+        mountedAt: new Date(),
+        lastTapdPollAt: null,
+        lastTapdError: null,
+      })
+      return m2.health.issues.some((i) => i.key === 'modules')
+    })(),
+  )
   check('health: mountedForSec reflects the runtime gap', model.health.mountedForSec >= 30)
   check(
     'health: tapd_workspaces issue appears when token is set but workspace ids empty',
