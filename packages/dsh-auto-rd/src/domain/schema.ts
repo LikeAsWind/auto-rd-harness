@@ -39,6 +39,12 @@ export const ModuleRecordSchema = z.object({
    * top-level modelSelection when absent.
    */
   modelSelection: z.record(z.string(), z.string()).default({}).optional(),
+  /**
+   * Incremental TAPD poll cursor — the latest `modified` timestamp the
+   * poller has seen for this module. Persisted so a restart resumes
+   * incrementally instead of re-fetching the whole planning backlog.
+   */
+  tapdPollCursor: z.string().optional(),
 })
 
 export type ModuleRecord = z.infer<typeof ModuleRecordSchema>
@@ -266,7 +272,7 @@ export const AUTORD_DOMAIN_NAME = 'auto_rd'
  * (§10) re-runs after the rebuild so any in-flight stories get a
  * clean slate to start over.
  */
-export const AUTORD_DOMAIN_VERSION = 4
+export const AUTORD_DOMAIN_VERSION = 5
 
 export function buildAutoRdDomainTables() {
   return {

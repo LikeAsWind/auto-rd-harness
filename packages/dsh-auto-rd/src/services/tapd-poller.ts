@@ -7,7 +7,7 @@
  * `category` field matches a configured module.id, route to that module.
  *
  * Real endpoint (TAPD public API):
- *   GET {tapdBaseUrl}/stories?workspace_id=<id>&status=open
+ *   GET {tapdBaseUrl}/stories?workspace_id=<id>&page=1&limit=200&order=created+asc&status=planning&module=<moduleId>&modified=>{since}
  *   Authorization: Bearer <tapdApiToken>
  *
  * The response body is `{ data: [ { id, name, description, ... } ] }` in
@@ -17,7 +17,7 @@
  */
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Config } from '../config.js'
+import type { Config, ModuleConfig } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import type { CredentialsService } from '../types/dsh-services.js'
@@ -61,6 +61,8 @@ export interface TapdStory {
   description: string
   acceptanceCriteria?: string
   category?: string
+  created?: string
+  modified?: string
 }
 
 /**
@@ -84,6 +86,8 @@ interface RawTapdApiStory {
   category?: string
   module?: string | { id?: string; name?: string }
   status?: string
+  created?: string
+  modified?: string
 }
 
 /**
@@ -98,6 +102,8 @@ interface RawTapdListResponse {
   stories?: Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
   items?: Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
 }
+
+const TAPD_PAGE_LIMIT = 200
 
 export class TapdPoller {
   private timers: Map<string, ReturnType<typeof setInterval>> = new Map()
@@ -273,7 +279,7 @@ export class TapdPoller {
         }),
       )
       try {
-        const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, tapdResolution.value)
+        const { stories, cursor } = await this.fetchStoriesFromApi(m, tapdResolution.value)
         // Tag every story with the module we fetched it under. The real
         // TAPD API carries no `category`/`module` routing hint, so
         // enqueueIfNew needs this explicit tag to know where to route.
@@ -281,6 +287,7 @@ export class TapdPoller {
           s.category = m.id
         }
         all.push(...stories)
+        if (cursor) await this.persistPollCursor(m.id, cursor)
         results.push({ moduleId: m.id, error: null, newCount: 0 })
       } catch (err) {
         const message = (err as Error).message
@@ -299,39 +306,67 @@ export class TapdPoller {
     return { stories: all, results }
   }
 
-  private async fetchStoriesFromApi(tapdWorkspaceId: string, token: string): Promise<TapdStory[]> {
-    const url = new URL(this.deps.config.tapdBaseUrl)
-    url.pathname = join(url.pathname, 'stories')
-    url.searchParams.set('workspace_id', tapdWorkspaceId)
-    // Do NOT filter by `status=open`: TAPD workspaces define their own
-    // workflow states (e.g. "planning", "developing"), and `open` is
-    // not one of them for many workspaces — it returned an empty list
-    // even when stories existed. We fetch all stories and let
-    // enqueueIfNew's `stories.get(id)` dedupe against storage.
+  private async fetchStoriesFromApi(
+    m: ModuleConfig,
+    token: string,
+  ): Promise<{ stories: TapdStory[]; cursor: string | null }> {
+    const base = new URL(this.deps.config.tapdBaseUrl)
+    base.pathname = join(base.pathname, 'stories')
+    const since = this.deps.storage.modules().get(m.id)?.tapdPollCursor ?? null
 
-    const resp = await this.httpClient.request<RawTapdListResponse>({
-      url: url.toString(),
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
-      },
-      timeoutMs: 20_000,
-    })
+    const all: TapdStory[] = []
+    let maxModified: string | null = null
+    let page = 1
+    for (;;) {
+      const url = new URL(base.toString())
+      url.searchParams.set('workspace_id', m.tapdWorkspaceId as string)
+      url.searchParams.set('page', String(page))
+      url.searchParams.set('limit', String(TAPD_PAGE_LIMIT))
+      url.searchParams.set('order', 'created asc')
+      url.searchParams.set('status', 'planning')
+      url.searchParams.set('module', m.id)
+      if (since) url.searchParams.set('modified', `>${since}`)
 
-    // TAPD returns { data: [ { Story: {...} } ] } (real), or flat
-    // `{ data: [ { id, name } ] }`, or `{ stories }` / `{ items }` /
-    // a top-level array (older versions). Unwrap each variant.
-    const body = resp.json() as
-      | RawTapdListResponse
-      | Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
-    const rows = Array.isArray(body)
-      ? body
-      : (body.data ?? body.stories ?? body.items ?? [])
-    const raw: RawTapdApiStory[] = rows
-      .map((row) => (row && (row as { Story?: RawTapdApiStory }).Story ? (row as { Story: RawTapdApiStory }).Story : (row as RawTapdApiStory)))
-      .filter((s): s is RawTapdApiStory => s != null)
-    return raw.map(normalizeRawStory).filter((s): s is TapdStory => s !== null)
+      const resp = await this.httpClient.request<RawTapdListResponse>({
+        url: url.toString(),
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+        timeoutMs: 20_000,
+      })
+
+      // TAPD returns { data: [ { Story: {...} } ] } (real), or flat
+      // `{ data: [ { id, name } ] }`, or `{ stories }` / `{ items }` /
+      // a top-level array (older versions). Unwrap each variant.
+      const body = resp.json() as
+        | RawTapdListResponse
+        | Array<{ Story?: RawTapdApiStory } | RawTapdApiStory>
+      const rows = Array.isArray(body)
+        ? body
+        : (body.data ?? body.stories ?? body.items ?? [])
+      const raw: RawTapdApiStory[] = rows
+        .map((row) => (row && (row as { Story?: RawTapdApiStory }).Story ? (row as { Story: RawTapdApiStory }).Story : (row as RawTapdApiStory)))
+        .filter((s): s is RawTapdApiStory => s != null)
+      const stories = raw.map(normalizeRawStory).filter((s): s is TapdStory => s !== null)
+      for (const s of stories) {
+        all.push(s)
+        if (s.modified && (maxModified === null || s.modified > maxModified)) {
+          maxModified = s.modified
+        }
+      }
+      if (stories.length < TAPD_PAGE_LIMIT) break
+      page += 1
+    }
+    return { stories: all, cursor: maxModified }
+  }
+
+  /** Persist the latest `modified` cursor so the next tick fetches only newer stories. */
+  private async persistPollCursor(moduleId: string, cursor: string): Promise<void> {
+    const table = this.deps.storage.modules()
+    if (!table.get(moduleId)) return
+    await table.update(moduleId, (m) => ({ ...m, tapdPollCursor: cursor }))
   }
 }
 
@@ -359,6 +394,8 @@ function normalizeRawStory(raw: RawTapdApiStory): TapdStory | null {
     description: String(description),
     acceptanceCriteria: acceptanceCriteria ? String(acceptanceCriteria) : undefined,
     category,
+    created: raw.created ? String(raw.created) : undefined,
+    modified: raw.modified ? String(raw.modified) : undefined,
   }
 }
 
