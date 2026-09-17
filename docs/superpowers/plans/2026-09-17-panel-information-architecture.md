@@ -35,7 +35,7 @@
 **Files:**
 - Create: `packages/dsh-auto-rd/src/services/poll-stats.ts`
 
-- [ ] **Step 1: 写文件**
+- [x] **Step 1: 写文件**
 
 ```ts
 /**
@@ -72,7 +72,7 @@ export interface RuntimeStats {
 }
 ```
 
-- [ ] **Step 2: 确认无 lint 错误**
+- [x] **Step 2: 确认无 lint 错误**
 
 Run: `npm run lint`
 Expected: PASS(新文件不引入错误)
@@ -84,7 +84,7 @@ Expected: PASS(新文件不引入错误)
 **Files:**
 - Modify: `packages/dsh-auto-rd/src/services/tapd-poller.ts`
 
-- [ ] **Step 1: 改 `TapdPollerDeps.onTickEnd` 签名**
+- [x] **Step 1: 改 `TapdPollerDeps.onTickEnd` 签名**
 
 把现有(HEAD 版约 44-45 行):
 
@@ -114,7 +114,7 @@ Expected: PASS(新文件不引入错误)
   }) => void
 ```
 
-- [ ] **Step 2: 在文件顶部 import + 新增 `PollResult`**
+- [x] **Step 2: 在文件顶部 import + 新增 `PollResult`**
 
 在 `import type { Config } from '../config.js'` 之后加:
 
@@ -148,7 +148,7 @@ export interface PollResult {
 }
 ```
 
-- [ ] **Step 3: 改 `tick()` 与 `notifyTickEnd()` 和 `fetchStories()`**
+- [x] **Step 3: 改 `tick()` 与 `notifyTickEnd()` 和 `fetchStories()`**
 
 把 `tick()`(约 141-151 行)替换为:
 
@@ -253,7 +253,7 @@ export interface PollResult {
   }
 ```
 
-- [ ] **Step 4: lint**
+- [x] **Step 4: lint**
 
 Run: `npm run lint`
 Expected: PASS。若报 `PollResult` 未导出/循环引用,确认 `PollResult` 定义在 `poll-stats.ts` 且 tapd-poller.ts `import type { PollResult } from './poll-stats.js'`。
@@ -265,7 +265,7 @@ Expected: PASS。若报 `PollResult` 未导出/循环引用,确认 `PollResult` 
 **Files:**
 - Modify: `packages/dsh-auto-rd/src/index.ts`
 
-- [ ] **Step 1: 改 runtime 类型引用**
+- [x] **Step 1: 改 runtime 类型引用**
 
 文件顶部 import 区加:
 
@@ -286,7 +286,7 @@ import type { RuntimeStats, WorkspacePollStat } from './services/poll-stats.js'
 
 把 `startServices` 的 runtime 参数类型(约 383 行)`runtime: { lastTapdPollAt: Date | null; lastTapdError: string | null }` 改为 `runtime: RuntimeStats`。
 
-- [ ] **Step 2: 改 onTickEnd 写入 pollStats**
+- [x] **Step 2: 改 onTickEnd 写入 pollStats**
 
 把 `startServices` 里的 `onTickEnd`(约 418-421 行)替换为:
 
@@ -312,7 +312,7 @@ import type { RuntimeStats, WorkspacePollStat } from './services/poll-stats.js'
     },
 ```
 
-- [ ] **Step 3: 注册 trajectory route**
+- [x] **Step 3: 注册 trajectory route**
 
 (本步骤依赖 Task 4 的 `registerStoryTrajectoryRoute`。先写 Task 4 再回来,或按顺序执行到此处时 Task 4 已完成。)
 
@@ -338,7 +338,7 @@ import type { RuntimeStats, WorkspacePollStat } from './services/poll-stats.js'
 import { registerStoryTrajectoryRouteWithRetry } from './services/story-trajectory-route.js'
 ```
 
-- [ ] **Step 4: lint + build**
+- [x] **Step 4: lint + build**
 
 Run: `npm run lint && npm run build`
 Expected: PASS
@@ -350,7 +350,7 @@ Expected: PASS
 **Files:**
 - Create: `packages/dsh-auto-rd/src/services/story-trajectory-route.ts`
 
-- [ ] **Step 1: 写文件**
+- [x] **Step 1: 写文件**
 
 ```ts
 /**
@@ -494,11 +494,11 @@ export function registerStoryTrajectoryRouteWithRetry(
 
 注意:handler 用 `req.url` 解析 storyId —— 测试里的 fake request 需带 `url`。现有 `test-panel-route.mjs` 的 handler 调用传的是 `{ method: 'GET' }`(无 url),trajectory 测试需要传 `{ method: 'GET', url: '/auto-rd/story/S1' }`。
 
-- [ ] **Step 2: 注册到 index.ts**
+- [x] **Step 2: 注册到 index.ts**
 
 按 Task 3 Step 3 完成注册。
 
-- [ ] **Step 3: lint**
+- [x] **Step 3: lint**
 
 Run: `npm run lint`
 Expected: PASS
@@ -510,7 +510,7 @@ Expected: PASS
 **Files:**
 - Modify: `packages/dsh-auto-rd/src/services/ui-panel.ts`
 
-- [ ] **Step 1: import + PanelModule 加字段**
+- [x] **Step 1: import + PanelModule 加字段**
 
 顶部 import 区加:
 
@@ -534,7 +534,7 @@ import type { RuntimeStats } from './poll-stats.js'
   }
 ```
 
-- [ ] **Step 2: 改 buildPanelModel 签名与返回**
+- [x] **Step 2: 改 buildPanelModel 签名与返回**
 
 把签名(约 283-287 行)的 runtime 类型改为:
 
@@ -562,7 +562,7 @@ export function buildPanelModel(
         : undefined,
 ```
 
-- [ ] **Step 3: lint + build + test:ui**
+- [x] **Step 3: lint + build + test:ui**
 
 Run: `npm run lint && npm run build && npm run test:ui`
 Expected: lint PASS;test:ui 全绿(现有断言不涉及 pollStat,新增字段不应破坏)
@@ -574,7 +574,7 @@ Expected: lint PASS;test:ui 全绿(现有断言不涉及 pollStat,新增字段�
 **Files:**
 - Test: `scripts/test-ui-panel.mjs`
 
-- [ ] **Step 1: 加一个独立测试块**
+- [x] **Step 1: 加一个独立测试块**
 
 在文件末尾 Summary 之前加:
 
@@ -628,7 +628,7 @@ Expected: lint PASS;test:ui 全绿(现有断言不涉及 pollStat,新增字段�
 }
 ```
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 Run: `npm run build && npm run test:ui`
 Expected: 新增断言全绿(总数从 66 涨到 66 + 新增条数)
@@ -640,7 +640,7 @@ Expected: 新增断言全绿(总数从 66 涨到 66 + 新增条数)
 **Files:**
 - Test: `scripts/test-panel-route.mjs`
 
-- [ ] **Step 1: 在文件末尾 Summary 前加测试块**
+- [x] **Step 1: 在文件末尾 Summary 前加测试块**
 
 先 import 新模块。在文件顶部 `const { registerPanelRoute, PANEL_ROUTE_PATH } = ...` 之后加:
 
@@ -697,7 +697,7 @@ const { registerStoryTrajectoryRoute, STORY_TRAJECTORY_ROUTE_PREFIX } = await im
 
 注意:`fakeStorage` 辅助(78-85 行)只接受 `stories/modules/tasks` 三个 key,trajectory 测试里直接构造带 `trajectories` 的对象即可(如上,不用改辅助)。
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 Run: `npm run build && npm run test:route`
 Expected: 新增断言全绿
@@ -709,7 +709,7 @@ Expected: 新增断言全绿
 **Files:**
 - Modify: `packages/dsh-auto-rd/src/client/client.js`
 
-- [ ] **Step 1: apply() 读 sessions 并缓存**
+- [x] **Step 1: apply() 读 sessions 并缓存**
 
 把 `function apply(ctx) {`(约 2906 行)改为:
 
@@ -737,7 +737,7 @@ Expected: 新增断言全绿
 
 把 `module.__autoRd = {`(约 2943 行)加一个字段 `sessions: null,`(apply 里会覆盖)。
 
-- [ ] **Step 2: 同步更新 client-half 的 inject 断言**
+- [x] **Step 2: 同步更新 client-half 的 inject 断言**
 
 (在 Task 11 里一并处理测试,此处只改实现。跑 build 会失败?不会 —— client.js 是 copy 不改 lib,但测试 test-client-half 的 `inject.length === 1` 断言会失败,放到 Task 11 一起改。)
 
@@ -751,7 +751,7 @@ Expected: PASS(copy 成功,测试暂不跑)
 **Files:**
 - Modify: `packages/dsh-auto-rd/src/client/client.js`
 
-- [ ] **Step 1: 加常量**
+- [x] **Step 1: 加常量**
 
 在 `var POLL_MS = 5000`(约 38 行)之后加:
 
@@ -759,7 +759,7 @@ Expected: PASS(copy 成功,测试暂不跑)
     var TRAJECTORY_URL_PREFIX = '/auto-rd/story/'
 ```
 
-- [ ] **Step 2: 加 `useStoryTrajectory` hook**
+- [x] **Step 2: 加 `useStoryTrajectory` hook**
 
 在 `usePanelData` 函数之后加:
 
@@ -796,11 +796,11 @@ Expected: PASS(copy 成功,测试暂不跑)
     }
 ```
 
-- [ ] **Step 3: 把 `useStoryTrajectory` 暴露到 `module.__autoRd.components`**
+- [x] **Step 3: 把 `useStoryTrajectory` 暴露到 `module.__autoRd.components`**
 
 在 `module.__autoRd = {` 的 `components: { ... }` 里加 `useStoryTrajectory: useStoryTrajectory,`。
 
-- [ ] **Step 4: build**
+- [x] **Step 4: build**
 
 Run: `npm run build`
 Expected: PASS
@@ -814,7 +814,7 @@ Expected: PASS
 
 这是最大的一个任务。按下面顺序,每步 build 一次确认无语法错。
 
-- [ ] **Step 1: `AutoRdPanel` 增加视图导航 state**
+- [x] **Step 1: `AutoRdPanel` 增加视图导航 state**
 
 在 `AutoRdPanel` 里,`var selectedStoryId = React.useState(null)` 附近,把导航模型改为「当前视图 + 当前工作空间 + 当前故事」三件套。新增:
 
@@ -838,7 +838,7 @@ Expected: PASS
       var setSelectedStoryId = selectedStoryId[1]
 ```
 
-- [ ] **Step 2: 改写 `renderMain()` 分派三层**
+- [x] **Step 2: 改写 `renderMain()` 分派三层**
 
 把现有 `renderMain()`(约 2602 行起)改为:
 
@@ -907,7 +907,7 @@ Expected: PASS
 
 注意:现有 `WorkspaceDetail` 组件签名(约 1468 行)是 `props.workspace / props.onUpdate / props.onStoryClick`,并且它是「行内展开的 stories 列表」。**它要改造成「整页视图」**:保留其 stories 列表渲染逻辑,去掉对 `<details>` 展开的依赖,并加 `onBack`。改造方式见 Step 4。
 
-- [ ] **Step 3: `WorkspaceList` 分页 + 行点击进详情**
+- [x] **Step 3: `WorkspaceList` 分页 + 行点击进详情**
 
 把 `WorkspaceList`(约 2045 行)改为分页,行点击进 workspace 详情,移除 `<details>` 展开:
 
@@ -975,7 +975,7 @@ Expected: PASS
     }
 ```
 
-- [ ] **Step 4: 改 `WorkspaceRow` 为「点击进详情」卡片**
+- [x] **Step 4: 改 `WorkspaceRow` 为「点击进详情」卡片**
 
 现有 `WorkspaceRow`(约 1023 行)用 `<details>/<summary>` 展开 + gear 按钮 + × 按钮。改造为**整行可点进详情**,保留 × 删除和 gear 设置(gear 改在详情页里出现,行上只留 × 和一个进详情的整行点击)。
 
@@ -1044,7 +1044,7 @@ Expected: PASS
 
 注意:`ws.pollStat` 来自 Task 5 的 panel model 输出,client 端 `workspaces.map`(约 2525 行)要把 `pollStat: m.pollStat` 透传。改 Step 5。
 
-- [ ] **Step 5: `workspaces.map` 透传 pollStat**
+- [x] **Step 5: `workspaces.map` 透传 pollStat**
 
 在 `var workspaces = modules.map(function (m) {` 的返回对象里(约 2578 行 `modelSelection: m.modelSelection || {},` 之后)加:
 
@@ -1052,7 +1052,7 @@ Expected: PASS
           pollStat: m.pollStat || null,
 ```
 
-- [ ] **Step 6: 新增 `PollStatBadge` 和 `Pager` 组件**
+- [x] **Step 6: 新增 `PollStatBadge` 和 `Pager` 组件**
 
 在 `WorkspaceRow` 之前加两个小组件:
 
@@ -1084,7 +1084,7 @@ Expected: PASS
     }
 ```
 
-- [ ] **Step 7: 改造 `WorkspaceDetail` 为整页视图**
+- [x] **Step 7: 改造 `WorkspaceDetail` 为整页视图**
 
 现有 `WorkspaceDetail`(约 1468 行)是 `<details>` 展开后的内容(带 `padding: '0 20px 14px 30px'` 且没有返回按钮)。把它改造成带返回按钮的整页视图。核心改动:
 
@@ -1125,7 +1125,7 @@ Expected: PASS
 
 **实现提示(给 subagent):** 这一步要把旧 `WorkspaceDetail` 的两个职责(「展开内容」vs「整页视图」)收敛为整页视图,并保留 `renderOpenStory`/`renderDoneRow` 的内部函数。执行时先 `git show HEAD:.../client.js | sed -n '1468,1702p'` 通读旧实现再改,别丢 `StageGauge` 缩略图、MR 链接、done 折叠、overflow 标签。
 
-- [ ] **Step 8: 简化 `SyncPulse`(正常态不渲染)+ `StatusBar` 显示「上次采集 HH:MM」**
+- [x] **Step 8: 简化 `SyncPulse`(正常态不渲染)+ `StatusBar` 显示「上次采集 HH:MM」**
 
 `SyncPulse`(约 2235 行)改为只在 error/stale 时返回内容,正常态返回 null:
 
@@ -1176,7 +1176,7 @@ Expected: PASS
 
 保留 StatusBar 后面的 `N 个工作空间 · N 个需求 · …` 汇总行。
 
-- [ ] **Step 9: 更新 `StoryDetail` 接收 sessions + 会话按钮 + 轨迹**
+- [x] **Step 9: 更新 `StoryDetail` 接收 sessions + 会话按钮 + 轨迹**
 
 `StoryDetail`(约 1259 行)改动:
 
@@ -1279,7 +1279,7 @@ Expected: PASS
     }
 ```
 
-- [ ] **Step 10: build + 全量 client/watch 测试**
+- [x] **Step 10: build + 全量 client/watch 测试**
 
 Run: `npm run build && npm run test:client && npm run test:watch`
 Expected: 若 watch/client 有断言依赖旧结构(inject 数量、`<details>` 展开、SyncPulse 正常态文本),会失败 —— 这些在 Task 11 更新。此处先保证 build 通过、无语法错。
@@ -1292,7 +1292,7 @@ Expected: 若 watch/client 有断言依赖旧结构(inject 数量、`<details>` 
 - Modify: `scripts/test-client-half.mjs`
 - Modify: `scripts/test-watch-panel.mjs`
 
-- [ ] **Step 1: 改 client-half 的 inject 断言**
+- [x] **Step 1: 改 client-half 的 inject 断言**
 
 `scripts/test-client-half.mjs` 约 227-234 行,把:
 
@@ -1322,7 +1322,7 @@ check('inject: exactly two services', exportsObj.inject.length === 2, JSON.strin
       sessions: { open: function () {} },
 ```
 
-- [ ] **Step 2: 加会话按钮测试**
+- [x] **Step 2: 加会话按钮测试**
 
 在 `test-client-half.mjs` 的 story 相关块附近,加一个直接测 StoryDetail 会话按钮的块(参照 test-watch-panel 里 #8 直接调 StoryDetail 的方式):
 
@@ -1356,7 +1356,7 @@ check('inject: exactly two services', exportsObj.inject.length === 2, JSON.strin
 }
 ```
 
-- [ ] **Step 3: 改 watch-panel 里依赖旧交互的断言**
+- [x] **Step 3: 改 watch-panel 里依赖旧交互的断言**
 
 以下断言在 Task 10 后失效,逐一调整:
 
@@ -1395,7 +1395,7 @@ check('inject: exactly two services', exportsObj.inject.length === 2, JSON.strin
 
 5. `#7: clicking the gear button opens the settings form`(约 358-387 行)—— gear 按钮移到了详情页。这个块要么删除,要么改成「进入详情页后 settings form 可见」。**改为:删除 gear 按钮断言块**,因为 settings 现在在 workspace 详情页内联,由「workspace 详情页」测试覆盖(见 Step 4 新增)。
 
-- [ ] **Step 4: 新增「三层视图 + 分页 + 采集状态」测试块**
+- [x] **Step 4: 新增「三层视图 + 分页 + 采集状态」测试块**
 
 在 `test-watch-panel.mjs` 末尾 Summary 前加:
 
@@ -1433,7 +1433,7 @@ const PAGED_MODEL = {
 
 **Step 4 的实现提示:** 分页 state 在组件内部,advance 后要 re-render 读最新 slots。参照 test-watch-panel 现有「gear 按钮」测试的写法(375-387 行:onClick 后 `shim.resetCursor()` + 重新 `panel()` + `expandTree`)。上面简化写法不可用,请照那个既有模式写,断言 page 2 显示 2 行、pager 说 `2 / 2`。
 
-- [ ] **Step 5: 全量跑受影响的 suite**
+- [x] **Step 5: 全量跑受影响的 suite**
 
 Run: `npm run build && npm run test:client && npm run test:watch && npm run test:ui && npm run test:route`
 Expected: 全绿。若 test-stage / test-recover 也读 client 结构,一并跑:`npm run test:stage && npm run test:recover`。
@@ -1442,12 +1442,12 @@ Expected: 全绿。若 test-stage / test-recover 也读 client 结构,一并跑:
 
 ## Task 12: 收尾验证 + 提交
 
-- [ ] **Step 1: 全量相关 suite**
+- [x] **Step 1: 全量相关 suite**
 
 Run: `npm run lint && npm run build && npm run test:ui && npm run test:route && npm run test:client && npm run test:watch && npm run test:stage && npm run test:recover`
 Expected: 全绿。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add packages/dsh-auto-rd/src/services/poll-stats.ts \
