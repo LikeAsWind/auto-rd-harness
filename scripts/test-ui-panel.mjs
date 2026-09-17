@@ -122,16 +122,20 @@ function mod(over = {}) {
 
 {
   // Stories belonging to an unknown module must not leak into a section.
-  // The remove_workspace route now deletes a module's stories along
-  // with it, so orphans only arise from pre-cleanup storage — the
-  // filter below is the backstop, and totals count what storage holds
-  // so a growing orphan pile stays visible in the numbers.
+  // The remove_workspace route deletes a module's stories along
+  // with it; recover.ts drops any orphans that escape that path.
+  // Totals therefore align with what the module sections can place —
+  // orphans do NOT inflate the count.
   const model = panelModel({
     modules: [mod({ id: 'm1' })],
     stories: [story({ id: 'orphan', moduleId: 'm-unknown' })],
   })
   check('grouping: orphan story excluded from the module section', model.modules[0].stories.length === 0)
-  check('grouping: orphan still counted in totals', model.totals.stories === 1, String(model.totals.stories))
+  check(
+    'grouping: orphan not counted in totals (aligns with sections)',
+    model.totals.stories === 0,
+    String(model.totals.stories),
+  )
   check('totals: per-module stories stay exact', model.modules[0].stories.length + model.modules[0].overflow === 0)
 }
 

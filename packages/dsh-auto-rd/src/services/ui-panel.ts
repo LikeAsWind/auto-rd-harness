@@ -392,12 +392,23 @@ export function buildPanelModel(
   const mountedAt = runtime?.mountedAt ?? new Date()
   const mountedForSec = Math.max(0, Math.floor((Date.now() - mountedAt.getTime()) / 1000))
 
-  // Stories total counts everything in storage — grouped and orphan —
-  // so the number never silently drops what the module sections cannot
-  // place. (Orphans come from storage written before remove_workspace
-  // learned to delete a module's stories; the count keeps that pile
-  // visible.)
-  const totalStories = [...storage.stories().values()].length
+  // Stories total counts only stories belonging to the live modules,
+  // so the number always matches what the module sections can place.
+  //
+  // We previously counted every story in storage, including orphans
+  // (moduleId pointing at a module that no longer exists in config).
+  // The intent was to keep that pile "visible" so a cleanup miss
+  // would not go unnoticed, but the panel surfaces it as
+  // "1 个需求" against an empty list — which the user reads as a
+  // misconfiguration. The host's recover service now drops orphans on
+  // mount; we further defend this number here so a stale storage
+  // record (e.g. mid-flight, before recover runs) cannot inflate it.
+  // The module sections above also filter orphans out via
+  // configModuleIds, so the totals have to use the same filter for
+  // the two numbers to line up.
+  const totalStories = [...storage.stories().values()].filter((s) =>
+    configModuleIds.has(s.moduleId),
+  ).length
 
   return {
     modules: panelModules,

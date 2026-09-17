@@ -7,13 +7,20 @@
  * with no runner.
  *
  * Strategy:
- *   - Read every story from storage.
- *   - For each story in an ACTIVE state (context, clarification, ..., etc.):
- *       set state back to 'pending' and bump updatedAt. StoryQueue's next
- *       tick will pick it up and dispatch from the new "current" stage via
- *       StoryRunner.runStory(id).
- *   - Stories in terminal states (completed, failed, blocked) are left alone.
- *   - The transition is logged so operators can audit what was recovered.
+ *   1. **Orphan cleanup** — drop every story whose `moduleId` is not in
+ *      the live config. These come from `remove_workspace` paths before
+ *      the deletion logic learned to clean up stories (issue #9), from
+ *      modules removed by editing cordis.patch.yml directly, or from a
+ *      module record that was wiped from storage without its stories.
+ *      Without this step, `totals.stories` in the panel model lies —
+ *      it counts storage-wide but the user only sees the live ones, so
+ *      "1 个需求" appears against an empty module list.
+ *   2. **State recovery** — for every story still in an ACTIVE state
+ *      (context, clarification, ..., etc.): set state back to 'pending'
+ *      and bump updatedAt. StoryQueue's next tick picks it up and
+ *      dispatches from the new "current" stage via StoryRunner.runStory.
+ *   3. Stories in terminal states (completed, failed, blocked) are left
+ *      alone.
  *
  * Notes:
  *   - We do NOT attempt to cold-resume an existing mainSessionId in M1,
@@ -36,8 +43,37 @@ const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
 export async function recoverStories(
   storage: AutoRdStorage,
   logger: Logger,
+  liveModuleIds: ReadonlySet<string>,
   trajectory?: TrajectoryRecorder,
-): Promise<{ recovered: string[] }> {
+): Promise<{ recovered: string[]; orphansDropped: string[] }> {
+  // ---- 1. Orphan cleanup ------------------------------------------------
+  //
+  // Stories whose owning module is no longer in the live config are
+  // unreachable from the poller / queue / runner — they would never be
+  // picked up again. Keeping them around inflates totals, leaks
+  // artifacts / trajectories, and confuses the user (they see "1 个
+  // 需求" against an empty workspace list). Drop them here, while we
+  // are already iterating storage as part of recovery.
+  const orphansDropped: string[] = []
+  const storiesTable = storage.stories()
+  for (const story of [...storiesTable.values()]) {
+    if (liveModuleIds.has(story.moduleId)) continue
+    orphansDropped.push(story.id)
+    storiesTable.delete(story.id)
+    logger.warn(
+      `[recover] dropping orphan story ${story.id} (moduleId="${story.moduleId}" not in live config)`,
+    )
+    if (trajectory) {
+      void trajectory.append({
+        storyId: story.id,
+        kind: 'recovery',
+        label: `orphan dropped (moduleId=${story.moduleId})`,
+        payload: { reason: 'module not in live config' },
+      })
+    }
+  }
+
+  // ---- 2. State recovery ------------------------------------------------
   const recovered: string[] = []
   const stories = [...storage.stories().values()]
 
@@ -65,11 +101,14 @@ export async function recoverStories(
     }
   }
 
-  if (recovered.length === 0) {
-    logger.info('[recover] no in-flight stories to recover')
+  if (orphansDropped.length === 0 && recovered.length === 0) {
+    logger.info('[recover] nothing to recover (no orphans, no in-flight stories)')
   } else {
-    logger.info(`[recover] ${recovered.length} stories reset to pending`)
+    const parts: string[] = []
+    if (orphansDropped.length > 0) parts.push(`dropped ${orphansDropped.length} orphan(s)`)
+    if (recovered.length > 0) parts.push(`reset ${recovered.length} in-flight story/stories`)
+    logger.info(`[recover] ${parts.join(', ')}`)
   }
 
-  return { recovered }
+  return { recovered, orphansDropped }
 }

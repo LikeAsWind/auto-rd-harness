@@ -23,6 +23,7 @@ const SUITES = [
   ['client half', 'scripts/test-client-half.mjs'],
   ['stage mapping', 'scripts/test-stage.mjs'],
   ['watch panel', 'scripts/test-watch-panel.mjs'],
+  ['recover', 'scripts/test-recover.mjs'],
 ]
 
 const results = []

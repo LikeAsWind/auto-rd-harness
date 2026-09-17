@@ -191,7 +191,13 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   // 4. Recover any in-flight stories from a previous run. We do this BEFORE
   // starting timers so StoryQueue picks them up cleanly on its first tick.
   // Fire-and-log; failure here must not block plugin mount.
-  void recoverStories(storage, logger, services.trajectory).catch((err) => {
+  //
+  // The orphan-cleanup pass needs the live module id set so it knows
+  // which stories are unreachable. We pass `liveConfig.current.modules`
+  // (the authoritative set the poller / queue / runner use); any story
+  // whose moduleId is not in this set is dropped.
+  const liveModuleIds = new Set(liveConfig.current.modules.map((m) => m.id))
+  void recoverStories(storage, logger, liveModuleIds, services.trajectory).catch((err) => {
     logger.error(`[auto-rd] recoverStories failed: ${(err as Error).message}`)
   })
 
