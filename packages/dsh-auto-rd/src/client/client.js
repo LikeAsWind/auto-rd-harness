@@ -1292,7 +1292,15 @@ window.__ModuleLoader__.load({
      * workspace id.
      */
     function splitSetupIssues(issues, workspace) {
-      var globalKeys = { workspace_root: 1, modules: 1 }
+      // Truly global issues — no single workspace owns them. The host
+      // only emits these when no module has overridden the missing
+      // setting, so showing them at the top banner is the right place.
+      var globalKeys = {
+        workspace_root: 1,
+        modules: 1,
+        tapd_token: 1,
+        gitlab_token: 1,
+      }
       var globalIssues = []
       var wsIssues = []
       for (var i = 0; i < (issues || []).length; i++) {
@@ -1310,6 +1318,19 @@ window.__ModuleLoader__.load({
           key: 'tapd_workspace_id',
           message: '未设置 TAPD 工作空间 ID',
           remedy: '留空 = 不会拉取需求。在该工作空间的设置里填入 TAPD 项目 ID。',
+        })
+      }
+      // Only flag a per-workspace TAPD token absence when the host has
+      // NOT already emitted a global tapd_token issue (we just filtered
+      // those out into `globalIssues` above). When the global is
+      // already showing it, listing it again under every row is just
+      // noise.
+      var hasGlobalTapdIssue = globalIssues.some(function (g) { return g.key === 'tapd_token' })
+      if (workspace && !hasTapdTokenConfigured && !hasGlobalTapdIssue) {
+        wsIssues.push({
+          key: 'tapd_token',
+          message: '未配置 TAPD token',
+          remedy: '填入后才能从 TAPD 拉取需求。在该工作空间的设置里粘贴 TAPD token,留空则继承全局。',
         })
       }
       if (workspace && workspace.gitlabTokenConfigured === false) {
@@ -1988,7 +2009,19 @@ window.__ModuleLoader__.load({
       if (!ws) return false
       if ((ws.blocked || 0) > 0) return true
       if ((ws.failed || 0) > 0) return true
-      if (Array.isArray(ws.issues) && ws.issues.length > 0) return true
+      // Per-workspace setup hints (e.g. missing TAPD workspace id, missing
+      // GitLab token) are informational — they do NOT auto-expand the
+      // row. Only issues that block pipeline progress should pop the
+      // row open without user action. tapd_workspace_id in particular
+      // fires for any new workspace the user has not configured yet,
+      // and we don't want every freshly-added row to be expanded.
+      if (Array.isArray(ws.issues)) {
+        for (var i = 0; i < ws.issues.length; i++) {
+          var k = ws.issues[i] && ws.issues[i].key
+          if (k === 'tapd_token' || k === 'gitlab_token' || k === 'tapd_workspace_id') continue
+          return true
+        }
+      }
       return false
     }
 

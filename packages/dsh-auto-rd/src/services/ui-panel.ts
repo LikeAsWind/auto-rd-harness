@@ -189,23 +189,38 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
   const tapdTokenMissing = !config.tapdApiToken || config.tapdApiToken.trim() === ''
   const isMock = !!config.useTapdMock || tapdTokenMissing
 
-  if (!config.tapdApiToken || config.tapdApiToken.trim() === '') {
+  // tapd_token / gitlab_token are per-workspace concerns, not global:
+  // the panel UI has a "workspace settings" form where the user pastes
+  // per-module tokens. A user who has not set DSH_TAPD_API_TOKEN but
+  // did paste a token into a workspace is not "globally misconfigured";
+  // they're running with module-level overrides, which the poller /
+  // runner resolve at use time (see services/tapd-poller.ts +
+  // story-runner.ts). Emitting these globally duplicates the
+  // per-workspace issue and confuses the user. The client-side
+  // `splitSetupIssues` already attaches per-workspace token issues to
+  // the row that lacks them; the host only flags a token when NONE of
+  // the workspaces has one — that's the genuinely-global case.
+  const modules = config.modules ?? []
+  const anyModuleHasTapdToken = modules.some((m) => (m.tapdApiToken ?? '').length > 0)
+  const anyModuleHasGitlabToken = modules.some((m) => (m.gitlabApiToken ?? '').length > 0)
+
+  if (tapdTokenMissing && !anyModuleHasTapdToken) {
     issues.push({
       key: 'tapd_token',
       message: 'TAPD token is empty — the poller is running against a local mock fixture.',
       remedy:
         'Set the DSH_TAPD_API_TOKEN env var in the shell that launches DSH, ' +
-        'or paste a real token into cordis.patch.yml under the TAPD token field.',
+        'or paste a real token into a workspace under cordis.patch.yml.',
     })
   }
 
-  if (!config.gitlabApiToken || config.gitlabApiToken.trim() === '') {
+  if ((config.gitlabApiToken ?? '').length === 0 && !anyModuleHasGitlabToken) {
     issues.push({
       key: 'gitlab_token',
       message: 'GitLab token is empty — MR creation will fail per story.',
       remedy:
         'Set the DSH_GITLAB_API_TOKEN env var, or paste a real token with `api` scope into ' +
-        'cordis.patch.yml under the GitLab token field.',
+        'a workspace under cordis.patch.yml.',
     })
   }
 
@@ -222,7 +237,7 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
   // Skip the "modules is empty" warning in mock mode — the local
   // fixture carries its own category labels, so a missing modules list
   // is the expected dev state, not a misconfiguration.
-  if (!isMock && (config.modules ?? []).length === 0) {
+  if (!isMock && modules.length === 0) {
     issues.push({
       key: 'modules',
       message: 'modules is empty — TAPD stories cannot be routed to a repo.',

@@ -326,6 +326,42 @@ function mod(over = {}) {
   )
   check('health: mountedForSec reflects the runtime gap', model.health.mountedForSec >= 30)
   check(
+    'health: any module with tapdApiToken suppresses the global tapd_token issue',
+    (() => {
+      const cfg2 = ConfigSchema.parse({
+        tapdApiToken: '',
+        tapdWorkspaceIds: [],
+        useTapdMock: true,
+        workspaceRoot: '/w',
+        modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', tapdApiToken: 'tk' }],
+      })
+      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
+        mountedAt: new Date(),
+        lastTapdPollAt: null,
+        lastTapdError: null,
+      })
+      return !m2.health.issues.some((i) => i.key === 'tapd_token')
+    })(),
+  )
+  check(
+    'health: any module with gitlabApiToken suppresses the global gitlab_token issue',
+    (() => {
+      const cfg2 = ConfigSchema.parse({
+        tapdApiToken: '',
+        tapdWorkspaceIds: [],
+        useTapdMock: true,
+        workspaceRoot: '/w',
+        modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', gitlabApiToken: 'tk' }],
+      })
+      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
+        mountedAt: new Date(),
+        lastTapdPollAt: null,
+        lastTapdError: null,
+      })
+      return !m2.health.issues.some((i) => i.key === 'gitlab_token')
+    })(),
+  )
+  check(
     'health: tapd_workspaces issue appears when token is set but workspace ids empty',
     (() => {
       const cfg2 = ConfigSchema.parse({
