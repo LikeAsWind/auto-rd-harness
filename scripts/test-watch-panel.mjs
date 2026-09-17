@@ -535,6 +535,65 @@ const STORY_MODEL = {
     !someElement(tree, (el) => el.props && typeof el.props.onClick === 'function' && el.props.children && String(el.props.children).includes('保存')))
 }
 
+// ---- #5/#6/#7 follow-up: empty workspace does not duplicate state ----
+//
+// The row summary already says "尚未拉取需求" or "<n> 个需求". Showing
+// the same fact again under the "任务" heading inside an expanded
+// empty workspace was pure noise — the user sees the count in the
+// header, the placeholder underneath just repeated it.
+const EMPTY_WORKSPACE_MODEL = {
+  ok: true,
+  model: {
+    modules: [
+      {
+        id: 'empty',
+        title: 'yc-sale-control-server',
+        defaultBranch: 'main',
+        stories: [],
+        tapdWorkspaceId: '69280376',
+        tapdTokenConfigured: true,
+        gitlabTokenConfigured: true,
+      },
+    ],
+    totals: { modules: 1, stories: 0, inFlight: 0, blocked: 0, completed: 0, failed: 0 },
+    health: { setupRequired: false, issues: [], mountedForSec: 1, lastTapdPollAt: null, lastTapdError: null },
+  },
+  text: '',
+}
+
+{
+  const { tree, panel: panelFn, shim: shimFn } = await renderAndReread(EMPTY_WORKSPACE_MODEL)
+  // The empty workspace must render — find its row.
+  const wsRow = findElement(tree, (el) => el.props && (el.props.className || '').startsWith('auto-rd-ws-row'))
+  check('empty: workspace row present', !!wsRow)
+
+  // Force the row open so the "任务" branch would render if it could.
+  // The WorkspaceList computes defaultOpen from workspaceNeedsAttention
+  // — for an empty / non-blocked / non-failed workspace that returns
+  // false. We toggle via the row's caret onClick handler.
+  const caret = findElement(tree, (el) => el.props && el.props.className === 'auto-rd-ws-caret')
+  // Caret itself is not a button — toggle goes through the summary's
+  // onClick. We grab the summary instead.
+  const summary = findElement(tree, (el) => el.props && el.props.onClick && Array.isArray(el.children))
+  if (summary && typeof summary.props.onClick === 'function') {
+    summary.props.onClick({ preventDefault() {}, stopPropagation() {} })
+    shimFn.resetCursor()
+  }
+  const after = expandTree(panelFn())
+  const text = collectText(after)
+
+  check(
+    'empty: expanded empty workspace does NOT show "还没有需求" placeholder',
+    !text.includes('还没有需求'),
+    text.slice(0, 200),
+  )
+  check(
+    'empty: expanded empty workspace does NOT show the "任务" heading',
+    !text.match(/\b任务\b/),
+    text.slice(0, 200),
+  )
+}
+
 // ---- Summary --------------------------------------------------------
 
 process.stdout.write(`\nWatchPanel tests: ${pass} pass, ${fail} fail\n`)

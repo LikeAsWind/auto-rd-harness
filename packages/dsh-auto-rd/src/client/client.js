@@ -1647,18 +1647,19 @@ window.__ModuleLoader__.load({
               issues.map(issueLine),
             )
           : null,
-        h(
-          'div',
-          { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, margin: '6px 0 4px' } },
-          '任务',
-        ),
-        open.length === 0 && done.length === 0
+        open.length + done.length > 0
           ? h(
               'div',
-              { style: { opacity: 0.75 } },
-              ws.name + ' 还没有需求。',
+              { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, margin: '6px 0 4px' } },
+              '任务',
             )
           : null,
+        // No "还没有需求" placeholder here — the row summary already
+        // says "尚未拉取需求" and "<n> 个需求" at the top, so showing
+        // the same message again under the "任务" header is just
+        // duplication when the user expands an empty workspace.
+        // Per-workspace setup issues (issue #6) are still surfaced
+        // independently when they exist (see the issues block above).
         open.length
           ? h(
               'ul',
