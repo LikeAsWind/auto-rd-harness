@@ -32,6 +32,8 @@
     "test:client": "node scripts/test-client-half.mjs",
     "test:reasons": "node scripts/test-reason-codes.mjs",
     "test:install-to-dsh": "node scripts/test-install-to-dsh.mjs",
+    "test:stage": "node scripts/test-stage.mjs",
+    "test:watch": "node scripts/test-watch-panel.mjs",
     "test:all": "node scripts/test-all.mjs",
     "add-js-extensions": "node scripts/add-js-import-extensions.mjs",
     "install:dsh": "node scripts/install-to-dsh.mjs",

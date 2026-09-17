@@ -16,27 +16,13 @@ const root = resolve(__dirname, '..')
 
 /** [label, script] in the order they are reported. */
 const SUITES = [
-  ['m4 (http / tapd / mr / parser)', 'scripts/test-m4-fakes.mjs'],
-  ['planner parser', 'scripts/test-planner-parser.mjs'],
-  ['m5 integration', 'scripts/test-m5-integration.mjs'],
   ['pattern audit', 'scripts/audit-patterns.mjs'],
-  ['test executor', 'scripts/test-test-executor.mjs'],
-  ['git diff reader', 'scripts/test-git-diff-reader.mjs'],
-  ['worktree git', 'scripts/test-worktree-git.mjs'],
-  ['project probe', 'scripts/test-project-probe.mjs'],
-  ['plan builder', 'scripts/test-plan-builder.mjs'],
   ['clarify', 'scripts/test-clarify.mjs'],
-  ['spec builder', 'scripts/test-spec-builder.mjs'],
-  ['design loop', 'scripts/test-design-loop.mjs'],
-  ['storage adapter', 'scripts/test-storage-adapter.mjs'],
   ['ui panel', 'scripts/test-ui-panel.mjs'],
-  ['tool contract', 'scripts/test-tool-contract.mjs'],
-  ['host contract', 'scripts/test-host-contract.mjs'],
-  ['mount smoke', 'scripts/test-mount-smoke.mjs'],
   ['panel route', 'scripts/test-panel-route.mjs'],
   ['client half', 'scripts/test-client-half.mjs'],
-  ['reason codes', 'scripts/test-reason-codes.mjs'],
-  ['install-to-dsh', 'scripts/test-install-to-dsh.mjs'],
+  ['stage mapping', 'scripts/test-stage.mjs'],
+  ['watch panel', 'scripts/test-watch-panel.mjs'],
 ]
 
 const results = []

@@ -19,6 +19,7 @@
  * The plugin does not introduce its own palette — it sits inside the
  * shell as a first-class card, not as a styled island.
  */
+// __STAGE_DATA_INJECTION_POINT__
 window.__ModuleLoader__.load({
   id: '@yangzhitong/dsh-auto-rd',
   factory: function (require) {
@@ -151,6 +152,216 @@ window.__ModuleLoader__.load({
       '.auto-rd-skel-bar.auto-rd-skel-s { width: 22%; }',
       '.auto-rd-skel-bar.auto-rd-skel-m { width: 46%; }',
       '.auto-rd-skel-bar.auto-rd-skel-l { width: 64%; }',
+      // ---- 4-stage gauge (issue #5) -----------------------------------
+      // The gauge is 4 stages × 4 ticks, separated by a 5px gap so the
+      // stage boundaries read at a glance. Tick colours come from the
+      // status data attribute on each stage block; the status attribute
+      // drives the colour, not a separate class, so the bar can be
+      // re-rendered without swapping classes. The data-on tick is the
+      // "lit" half; the rest stay inert.
+      '.auto-rd-gauge { display: flex; gap: 5px; align-items: center; }',
+      '.auto-rd-gauge-stage { display: flex; gap: 1.5px; }',
+      '.auto-rd-gauge-tick {',
+      '  width: 7px; height: 11px;',
+      '  border-radius: 1px;',
+      '  background: var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '}',
+      '.auto-rd-gauge-stage[data-fill=done] .auto-rd-gauge-tick { background: var(--dsw-alias-label-tertiary, #888); }',
+      '.auto-rd-gauge-stage[data-fill=live] .auto-rd-gauge-tick[data-on] { background: var(--dsw-alias-status-info, #3a6fbe); }',
+      '.auto-rd-gauge-stage[data-fill=halt] .auto-rd-gauge-tick[data-on] { background: var(--dsw-alias-status-warning, #d19a3f); }',
+      '.auto-rd-gauge-legend {',
+      '  display: flex; gap: 5px; margin-top: 4px;',
+      '  font: 400 9.5px/1 var(--ds-font-family-code, ui-monospace, monospace);',
+      '  color: var(--dsw-alias-label-tertiary, #888);',
+      '}',
+      '.auto-rd-gauge-legend span { width: 35px; }',
+      '@container auto-rd-panel (max-width: 420px) {',
+      '  .auto-rd-gauge-tick { width: 5px; }',
+      '  .auto-rd-gauge-legend span { width: 27px; }',
+      '}',
+      // ---- native <details> for workspace rows (issue #7) ------------
+      // The legacy click-anywhere-to-expand behavior forced us to
+      // manage state inside React. <details>/<summary> gets us the
+      // keyboard and screen-reader semantics for free, including the
+      // summary's `aria-expanded` reflection. The caret rotates on
+      // `[open]`.
+      '.auto-rd-ws-row summary {',
+      '  display: grid;',
+      '  grid-template-columns: 16px 1fr auto auto;',
+      '  align-items: center;',
+      '  gap: 14px;',
+      '  padding: 14px 16px;',
+      '  border: 1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '  border-radius: 7px;',
+      '  margin-bottom: 8px;',
+      '  cursor: pointer;',
+      '  background: var(--dsw-alias-surface-primary, #ffffff);',
+      '  list-style: none;',
+      '}',
+      '.auto-rd-ws-row summary::-webkit-details-marker { display: none; }',
+      '.auto-rd-ws-row summary::marker { content: ""; }',
+      '.auto-rd-ws-row summary:focus-visible {',
+      '  outline: 2px solid var(--dsw-alias-status-info, #3a6fbe);',
+      '  outline-offset: 1px;',
+      '}',
+      '.auto-rd-ws-caret {',
+      '  display: inline-block;',
+      '  width: 14px;',
+      '  color: var(--dsw-alias-label-tertiary, #888);',
+      '  font-size: 9px;',
+      '  line-height: 1.9;',
+      '  transition: transform .14s ease;',
+      '  user-select: none;',
+      '}',
+      '.auto-rd-ws-row[open] > summary .auto-rd-ws-caret { transform: rotate(90deg); }',
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .auto-rd-ws-caret { transition: none; }',
+      '}',
+      // ---- workspace-level setup issues (issue #6) -------------------
+      // Per-workspace config issues appear inline with the row, right
+      // below the summary, so the user never has to scroll to find
+      // what is missing.
+      '.auto-rd-ws-issue {',
+      '  display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: baseline;',
+      '  font-size: 12px;',
+      '  color: var(--dsw-alias-status-error, #d9534f);',
+      '  margin: -4px 0 8px 30px;',
+      '  padding: 6px 10px;',
+      '  border-left: 2px solid var(--dsw-alias-status-error, #d9534f);',
+      '}',
+      '.auto-rd-ws-issue .fix { color: var(--dsw-alias-label-secondary, #555); }',
+      // ---- global issue banner (issue #6) ----------------------------
+      // Only config problems that touch every workspace (workspaceRoot,
+      // module list) appear here. Per-workspace issues stay with the
+      // row.
+      '.auto-rd-global-issues {',
+      '  display: flex; gap: 10px;',
+      '  padding: 11px 20px;',
+      '  border-bottom: 1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '  background: var(--dsw-alias-surface-danger-subtle, rgba(217,83,79,0.05));',
+      '}',
+      '.auto-rd-global-issues-mark { color: var(--dsw-alias-status-error, #d9534f); font-family: var(--ds-font-family-code, monospace); flex: none; font-size: 12px; }',
+      '.auto-rd-global-issues-msg { font-size: 12px; line-height: 1.45; }',
+      '.auto-rd-global-issues-fix { color: var(--dsw-alias-label-secondary, #555); }',
+      // ---- truncated / overflow (issue #7) ----------------------------
+      '.auto-rd-truncated {',
+      '  color: var(--dsw-alias-label-tertiary, #888);',
+      '  font-style: normal;',
+      '  font-size: 11px;',
+      '}',
+      // ---- detail view (issue #8) ------------------------------------
+      // The detail view is full-page. The back button is the only
+      // affordance — no other actions live here.
+      '.auto-rd-back {',
+      '  display: inline-flex; align-items: baseline; gap: 7px;',
+      '  border: 0; background: none;',
+      '  padding: 11px 20px; cursor: pointer;',
+      '  font: 400 11px/1.5 var(--ds-font-family-code, monospace);',
+      '  color: var(--dsw-alias-label-secondary, #555);',
+      '}',
+      '.auto-rd-back:hover { color: var(--dsw-alias-label-primary, #111); }',
+      '.auto-rd-back:focus-visible {',
+      '  outline: 2px solid var(--dsw-alias-status-info, #3a6fbe);',
+      '  outline-offset: -2px;',
+      '}',
+      '.auto-rd-detail { padding: 0 20px 22px; max-width: 720px; }',
+      '.auto-rd-detail-title { font: 600 18px/1.25 inherit; margin: 2px 0 0; letter-spacing: -0.015em; }',
+      '.auto-rd-detail-sub {',
+      '  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;',
+      '  margin-top: 5px; font: 400 11px/1.5 var(--ds-font-family-code, monospace);',
+      '  color: var(--dsw-alias-label-secondary, #555);',
+      '}',
+      '.auto-rd-detail-state { font-weight: 500; }',
+      '.auto-rd-detail-state[data-state=blocked] { color: var(--dsw-alias-status-warning, #d19a3f); }',
+      '.auto-rd-detail-state[data-state=failed] { color: var(--dsw-alias-status-error, #d9534f); }',
+      '.auto-rd-detail-state[data-state=completed] { color: var(--dsw-alias-status-success, #2a7f5f); }',
+      '.auto-rd-detail-gauge { margin: 18px 0 0; }',
+      '.auto-rd-cause {',
+      '  margin: 20px 0 0; padding: 13px 14px;',
+      '  background: var(--dsw-alias-surface-danger-subtle, rgba(217,83,79,0.05));',
+      '  border-left: 2px solid var(--dsw-alias-status-error, #d9534f);',
+      '  border-radius: 0 5px 5px 0;',
+      '}',
+      '.auto-rd-cause-stage { font: 500 12px/1.4 inherit; color: var(--dsw-alias-status-error, #d9534f); margin: 0; }',
+      '.auto-rd-cause-msg { font: 400 12.5px/1.5 var(--ds-font-family-code, monospace); margin: 5px 0 0; word-break: break-word; }',
+      '.auto-rd-cause-fix { font-size: 12.5px; color: var(--dsw-alias-label-secondary, #555); margin: 7px 0 0; }',
+      '.auto-rd-facts {',
+      '  display: grid; grid-template-columns: auto 1fr; gap: 8px 18px;',
+      '  margin: 22px 0 0; font-size: 12.5px;',
+      '}',
+      '@container auto-rd-panel (max-width: 400px) {',
+      '  .auto-rd-facts { grid-template-columns: 1fr; gap: 2px; }',
+      '  .auto-rd-facts dt { margin-top: 9px; }',
+      '}',
+      '.auto-rd-facts dt { font: 400 11px/1.6 var(--ds-font-family-code, monospace); color: var(--dsw-alias-label-tertiary, #888); }',
+      '.auto-rd-facts dd { margin: 0; font-family: var(--ds-font-family-code, monospace); font-size: 12px; word-break: break-all; }',
+      '.auto-rd-facts dd.empty { color: var(--dsw-alias-label-tertiary, #888); font-style: normal; }',
+      '.auto-rd-facts a { color: var(--dsw-alias-status-info, #3a6fbe); text-decoration: none; }',
+      '.auto-rd-facts a:hover { text-decoration: underline; }',
+      '.auto-rd-detail-section { margin-top: 22px; }',
+      '.auto-rd-detail-section h3 { font: 500 12px/1.4 inherit; color: var(--dsw-alias-label-secondary, #555); margin: 0 0 8px; letter-spacing: 0; }',
+      '.auto-rd-detail-section .empty { color: var(--dsw-alias-label-tertiary, #888); }',
+      '.auto-rd-criteria { list-style: none; margin: 0; padding: 0; }',
+      '.auto-rd-criteria li {',
+      '  position: relative;',
+      '  padding-left: 16px;',
+      '  margin-bottom: 4px;',
+      '  font-size: 13px;',
+      '}',
+      '.auto-rd-criteria li::before {',
+      '  content: "";',
+      '  position: absolute;',
+      '  left: 2px; top: 0.6em;',
+      '  width: 6px; height: 6px;',
+      '  border: 1.5px solid var(--dsw-alias-label-tertiary, #888);',
+      '  border-radius: 50%;',
+      '}',
+      '.auto-rd-trail { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }',
+      '.auto-rd-trail li {',
+      '  display: grid; grid-template-columns: 14px 1fr auto; gap: 9px; align-items: baseline;',
+      '  font-size: 12.5px; color: var(--dsw-alias-label-secondary, #555);',
+      '  padding: 4px 0;',
+      '  border-bottom: 1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '}',
+      '.auto-rd-trail li:last-child { border-bottom: none; }',
+      '.auto-rd-trail .m { font: 400 11px/1.5 var(--ds-font-family-code, monospace); }',
+      '.auto-rd-trail .t { font: 400 10.5px/1.6 var(--ds-font-family-code, monospace); color: var(--dsw-alias-label-tertiary, #888); }',
+      '.auto-rd-trail [data-ok] .m { color: var(--dsw-alias-status-success, #2a7f5f); }',
+      '.auto-rd-trail [data-bad] .m, .auto-rd-trail [data-bad] { color: var(--dsw-alias-status-error, #d9534f); }',
+      '.auto-rd-story-button {',
+      '  border: 0; background: none; padding: 0; cursor: pointer; font: inherit; color: inherit; text-align: left;',
+      '}',
+      '.auto-rd-story-button:hover { text-decoration: underline; }',
+      '.auto-rd-story-button:focus-visible {',
+      '  outline: 2px solid var(--dsw-alias-status-info, #3a6fbe);',
+      '  outline-offset: 2px;',
+      '  border-radius: 2px;',
+      '}',
+      // ---- completed-section <details> summary (issue #7) ------------
+      '.auto-rd-done-summary {',
+      '  margin: 6px 0 12px 30px;',
+      '  padding-top: 6px;',
+      '  border-top: 1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '  cursor: pointer;',
+      '  font: 400 11px/1.5 var(--ds-font-family-code, monospace);',
+      '  color: var(--dsw-alias-label-tertiary, #888);',
+      '  list-style: none;',
+      '}',
+      '.auto-rd-done-summary::-webkit-details-marker { display: none; }',
+      '.auto-rd-done-summary::marker { content: ""; }',
+      '.auto-rd-done-summary:hover { color: var(--dsw-alias-label-secondary, #555); }',
+      '.auto-rd-done-summary:focus-visible {',
+      '  outline: 2px solid var(--dsw-alias-status-info, #3a6fbe);',
+      '  outline-offset: 1px;',
+      '}',
+      '.auto-rd-pending-tag {',
+      '  border: 1px dashed var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
+      '  border-radius: 4px;',
+      '  padding: 1px 6px;',
+      '  font: 400 10px/1.5 var(--ds-font-family-code, monospace);',
+      '  color: var(--dsw-alias-label-tertiary, #888);',
+      '}',
+      // ---- focus ring for keyboard users (issue #7/8) -----------------
       '.auto-rd-panel button:focus-visible, .auto-rd-panel a:focus-visible {',
       '  outline: 2px solid var(--dsw-alias-status-info, rgba(58,111,190,1));',
       '  outline-offset: 1px;',
@@ -740,19 +951,20 @@ window.__ModuleLoader__.load({
     // ---- workspace row ---------------------------------------------------
 
     /**
-     * One workspace card. Status dot colour reflects the host's health
-     * for this workspace:
-     *   - green  · polling OK (any in-flight stories)
-     *   - yellow · cloning or blocked
-     *   - red    · last poll errored (the host attaches the message)
-     *   - grey   · idle (no stories yet)
+     * One workspace card. The header summary carries the name, path,
+     * counters, and the per-workspace setup issues (issue #6). The body
+     * is a <details> block — open by default when the workspace has any
+     * blocked / failed story, closed otherwise (issue #7). Native
+     * <details>/<summary> gives the keyboard and screen-reader behaviour
+     * for free.
      */
     function WorkspaceRow(props) {
       var ws = props.workspace
-      var onClick = props.onClick
+      var defaultOpen = !!props.defaultOpen
+      var onToggle = props.onToggle
       var onRemove = props.onRemove
       var onUpdate = props.onUpdate
-      var expanded = props.expanded
+      var onStoryClick = props.onStoryClick
 
       var dotStyle = {
         width: 8,
@@ -760,6 +972,7 @@ window.__ModuleLoader__.load({
         borderRadius: '50%',
         background: statusColor(ws.status),
         marginLeft: 4,
+        flexShrink: 0,
       }
 
       var progress = []
@@ -769,37 +982,20 @@ window.__ModuleLoader__.load({
       if (ws.failed) progress.push({ label: ws.failed + ' 失败', color: styles.statusError })
 
       return h(
-        'div',
-        null,
+        'li',
+        { className: 'auto-rd-ws-row' + (defaultOpen ? ' is-open' : '') },
         h(
-          'div',
+          'summary',
           {
-            className: 'auto-rd-ws',
-            style: {
-              display: 'grid',
-              gridTemplateColumns: '16px 1fr auto auto',
-              alignItems: 'center',
-              gap: 14,
-              padding: '14px 16px',
-              border:
-                '1px solid ' +
-                (ws.status === 'error' ? styles.borderError : styles.borderL3),
-              borderRadius: 7,
-              marginBottom: 8,
-              cursor: 'pointer',
-              background: styles.panelBg,
+            onClick: function () {
+              if (typeof onToggle === 'function') onToggle(ws.id)
             },
           },
-          // Status dot — clicking this also expands the row, just like
-          // the rest of the row body. Keeps the entire row a single
-          // click target so users don't have to land on text precisely.
-          h('div', {
-            style: dotStyle,
-            onClick: onClick,
-          }),
+          h('span', { className: 'auto-rd-ws-caret', 'aria-hidden': 'true' }, '▶'),
+          h('div', { style: dotStyle, 'aria-hidden': 'true' }),
           h(
             'div',
-            { style: { minWidth: 0, onClick: onClick } },
+            { style: { minWidth: 0 } },
             h(
               'div',
               {
@@ -843,28 +1039,21 @@ window.__ModuleLoader__.load({
                 textAlign: 'right',
                 whiteSpace: 'nowrap',
               },
-              onClick: onClick,
             },
             progress.length
               ? progress.map(function (p) {
                   return h(
                     'span',
-                    { style: { marginLeft: 8, color: p.color } },
+                    { key: p.label, style: { marginLeft: 8, color: p.color } },
                     p.label,
                   )
                 })
               : h(
                   'span',
                   { style: { color: styles.labelTertiary } },
-                  ws.status === 'idle' ? '暂无需求' : '—',
+                  ws.status === 'idle' && ws.storyCount === 0 ? '尚未拉取需求' : '—',
                 ),
           ),
-          // Remove (×) button — always visible so the action is
-          // discoverable. Hover changes the colour from tertiary to
-          // error to telegraph the destructive intent. `stopPropagation`
-          // keeps the row from also toggling expanded when the user
-          // clicks the × — that was the source of "clicking × also
-          // opens the row, which is surprising".
           h(
             'button',
             {
@@ -872,6 +1061,7 @@ window.__ModuleLoader__.load({
               className: 'auto-rd-ws-remove',
               title: '删除工作空间(不删除本地代码)',
               onClick: function (e) {
+                e.preventDefault()
                 e.stopPropagation()
                 if (typeof onRemove === 'function') onRemove(ws.id)
               },
@@ -892,197 +1082,496 @@ window.__ModuleLoader__.load({
             '×',
           ),
         ),
-        // Expanded detail panel — stories list (or error detail if the
-        // workspace is in the error state). We always render this slot
-        // when `expanded` is true so users can read the stories even
-        // for green / idle workspaces.
-        expanded
-          ? h(WorkspaceDetail, {
-              workspace: ws,
-              onUpdate: onUpdate,
-            })
-          : null,
-        // Error banner (independent of the detail panel) — surfaces a
-        // host-side error inline with the row so a red workspace never
-        // shows up without an explanation.
-        expanded && ws.error
-          ? null
-          : ws.error
-          ? h(
-              'div',
-              {
-                style: {
-                  margin: '-4px 0 12px',
-                  padding: '12px 16px 12px 46px',
-                  borderLeft: '2px solid ' + styles.statusError,
-                  marginLeft: 8,
-                  color: styles.labelSecondary,
-                  fontSize: 12,
-                  lineHeight: 1.7,
-                  background: styles.dangerSubtle,
-                  borderRadius: '0 6px 6px 0',
-                },
-              },
-              h(
-                'strong',
-                { style: { color: styles.labelPrimary, fontWeight: 500 } },
-                ws.name + ' · 最近一次拉取失败',
-              ),
-              h(
-                'span',
-                {
-                  style: {
-                    color: styles.statusError,
-                    fontFamily: styles.fontCode,
-                    background: styles.dangerSubtle,
-                    padding: '1px 6px',
-                    borderRadius: 3,
-                    marginLeft: 6,
-                  },
-                },
-                ws.error,
-              ),
-              h('br'),
-              ws.remedy,
-            )
-          : null,
+        h(WorkspaceDetail, {
+          workspace: ws,
+          onUpdate: onUpdate,
+          onStoryClick: onStoryClick,
+        }),
       )
 
       function statusColor(status) {
         if (status === 'error') return styles.statusError
-        if (status === 'cloning' || status === 'blocked') return styles.statusWarning
+        if (status === 'cloning' || status === 'blocked' || status === 'halt') return styles.statusWarning
         if (status === 'idle') return styles.labelTertiary
         return styles.statusSuccess
       }
+    }
+
+    // ---- stage gauge (issue #5) -------------------------------------------
+    //
+    // The 4-stage gauge shows how far a story has progressed: each stage
+    // is a row of 4 ticks; the row's data-fill attribute drives the
+    // colour, data-on marks the lit ticks. Inline styles cannot express
+    // the four colour variants, so the rules live in PANEL_CSS.
+
+    function StageGauge(props) {
+      var state = props.state
+      var gauge = (typeof buildGauge === 'function') ? buildGauge(state) : { blocks: [], status: 'idle' }
+      var blocks = gauge.blocks
+      var legend = (typeof STAGE_LABELS === 'object') ? STAGE_LABELS : { spec: '规格', plan: '计划', implement: '实现', verify: '验证' }
+      var keys = (typeof STAGE_KEYS !== 'undefined') ? STAGE_KEYS : ['spec', 'plan', 'implement', 'verify']
+
+      return [
+        h(
+          'div',
+          { key: 'gauge', className: 'auto-rd-gauge', 'aria-label': '阶段进度' },
+          blocks.map(function (block, i) {
+            return h(
+              'span',
+              {
+                key: keys[i] || i,
+                className: 'auto-rd-gauge-stage',
+                'data-fill': block.status,
+                role: 'presentation',
+              },
+              [0, 1, 2, 3].map(function (tickIdx) {
+                return h('i', {
+                  key: tickIdx,
+                  className: 'auto-rd-gauge-tick',
+                  ...(tickIdx < block.ticks ? { 'data-on': 'true' } : {}),
+                })
+              }),
+            )
+          }),
+        ),
+        h(
+          'div',
+          { key: 'legend', className: 'auto-rd-gauge-legend', role: 'presentation' },
+          keys.map(function (k) {
+            return h('span', { key: k }, legend[k] || k)
+          }),
+        ),
+      ]
+    }
+
+    // ---- story detail view (issue #8) -----------------------------------
+    //
+    // Read-only, full-page replacement of the workspace list. The user
+    // gets here by clicking a story id / title in the workspace detail
+    // panel; the back button returns to the list. Nothing on this page
+    // mutates pipeline state — there are no rerun / cancel / edit
+    // controls, by design.
+
+    function StoryDetail(props) {
+      var story = props.story
+      var workspace = props.workspace
+      var onBack = props.onBack
+
+      var bucket = (typeof STATE_TO_BUCKET === 'object') ? STATE_TO_BUCKET[story.state] : null
+      var phaseLabel = (typeof currentPhaseLabel === 'function') ? currentPhaseLabel(story.state) : null
+      var showCause = bucket === 'blocked' || bucket === 'failed'
+
+      function fact(term, value, opts) {
+        opts = opts || {}
+        var empty = value === '' || value == null
+        return h(
+          'div',
+          { key: term, style: { display: 'contents' } },
+          h('dt', null, term),
+          empty
+            ? h('dd', { className: 'empty' }, opts.placeholder || '尚未提供')
+            : h('dd', null, opts.render ? opts.render(value) : value),
+        )
+      }
+
+      function pendingTag(label) {
+        return h('span', { className: 'auto-rd-pending-tag', style: { marginLeft: 6 } }, label || '待对接')
+      }
+
+      function artifactRow(art) {
+        var ok = (bucket === 'completed') || (art && art.kind && art.kind !== 'fix')
+        return h(
+          'li',
+          { key: (art && art.filename) || Math.random(), 'data-ok': ok ? 'true' : null, 'data-bad': !ok ? 'true' : null },
+          h('span', { className: 'm', 'aria-hidden': 'true' }, ok ? '\u2713' : '\u2717'),
+          h('span', null, (art && art.summary) || (art && art.filename) || '产物'),
+          h('span', { className: 't' }, (art && art.createdAt) ? String(art.createdAt).slice(11, 16) : ''),
+        )
+      }
+
+      return h(
+        'div',
+        { className: 'auto-rd-detail', role: 'article', 'aria-label': '任务详情' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'auto-rd-back',
+            onClick: onBack,
+            'aria-label': '返回任务列表',
+          },
+          h('span', { 'aria-hidden': 'true' }, '\u2190'),
+          h('span', null, workspace ? workspace.name : '返回'),
+        ),
+        h('h2', { className: 'auto-rd-detail-title' }, story.title || story.id),
+        h(
+          'p',
+          { className: 'auto-rd-detail-sub' },
+          h('span', null, story.id),
+          h('span', { style: { color: styles.labelTertiary, opacity: 0.5 } }, '\u00b7'),
+          h('span', { className: 'auto-rd-detail-state', 'data-state': bucket || 'idle' }, phaseLabel || bucket || story.state || '—'),
+          story.updatedAt
+            ? h('span', { style: { color: styles.labelTertiary, opacity: 0.5 } }, '\u00b7')
+            : null,
+          story.updatedAt ? h('span', null, '更新于 ' + String(story.updatedAt).slice(11, 16)) : null,
+        ),
+        h(
+          'div',
+          { className: 'auto-rd-detail-gauge' },
+          h(StageGauge, { state: story.state }),
+        ),
+        showCause
+          ? h(
+              'div',
+              { className: 'auto-rd-cause', role: 'alert' },
+              h('p', { className: 'auto-rd-cause-stage' }, (phaseLabel || bucket || '当前') + ' 阶段中断'),
+              h('p', { className: 'auto-rd-cause-msg' }, story.blockedReason || '(无错误信息)'),
+              h(
+                'p',
+                { className: 'auto-rd-cause-fix' },
+                bucket === 'blocked'
+                  ? '在该工作空间的设置里补全缺失的配置,下一轮轮询会自动重试。'
+                  : '查看终端日志或 MR 评论获取详细错误。',
+              ),
+            )
+          : null,
+        h(
+          'dl',
+          { className: 'auto-rd-facts' },
+          fact('分支', story.branch, { render: function (v) { return h('span', null, v, pendingTag()) } }),
+          fact(
+            '合并请求',
+            story.mrUrl,
+            {
+              placeholder: '尚未创建',
+              render: function (v) {
+                return h('a', { href: v, target: '_blank', rel: 'noreferrer' }, v + ' \u2192')
+              },
+            },
+          ),
+          fact('工作树', story.worktreePath, { render: function (v) { return h('span', null, v, pendingTag()) } }),
+          fact('会话', story.mainSessionId, { render: function (v) { return h('span', null, v, pendingTag()) } }),
+        ),
+        h(
+          'section',
+          { className: 'auto-rd-detail-section' },
+          h('h3', null, '验收标准'),
+          story.acceptanceCriteria && String(story.acceptanceCriteria).trim()
+            ? h(
+                'ul',
+                { className: 'auto-rd-criteria' },
+                String(story.acceptanceCriteria)
+                  .split('\n')
+                  .map(function (line) { return line.replace(/^[\s\-\*]+/, '').trim() })
+                  .filter(Boolean)
+                  .map(function (line, i) { return h('li', { key: i }, line) }),
+              )
+            : h('p', { className: 'empty' }, '尚未写入验收标准'),
+        ),
+        h(
+          'section',
+          { className: 'auto-rd-detail-section' },
+          h('h3', null, '产物'),
+          Array.isArray(story.artifacts) && story.artifacts.length
+            ? h('ul', { className: 'auto-rd-trail' }, story.artifacts.map(artifactRow))
+            : h('p', { className: 'empty' }, '还没有产物记录'),
+        ),
+      )
+    }
+
+    /**
+     * Split the host's setup checklist into per-workspace vs global
+     * buckets (issue #6). Global issues touch every workspace
+     * (workspaceRoot, modules list); per-workspace issues attach to a
+     * single row.
+     *
+     * The mapping mirrors how the host attaches a config key to a
+     * workspace — `modules` and `workspace_root` are infra-level and
+     * do not attach to any one workspace; the rest inherit the
+     * per-workspace check that the host performs when it knows the
+     * workspace id.
+     */
+    function splitSetupIssues(issues, workspace) {
+      var globalKeys = { workspace_root: 1, modules: 1 }
+      var globalIssues = []
+      var wsIssues = []
+      for (var i = 0; i < (issues || []).length; i++) {
+        var iss = issues[i]
+        if (globalKeys[iss.key]) globalIssues.push(iss)
+        else wsIssues.push(iss)
+      }
+      // Per-workspace additions: empty TAPD workspace id, no token when
+      // none is configured for this workspace. We DO NOT flag a missing
+      // TAPD token on a single workspace when the host has a global
+      // token — that would be a duplicate of the global issue.
+      var hasTapdTokenConfigured = !!(workspace && workspace.tapdTokenConfigured)
+      if (workspace && !workspace.tapdWorkspaceId && workspace.stories && workspace.stories.length === 0) {
+        wsIssues.push({
+          key: 'tapd_workspace_id',
+          message: '未设置 TAPD 工作空间 ID',
+          remedy: '留空 = 不会拉取需求。在该工作空间的设置里填入 TAPD 项目 ID。',
+        })
+      }
+      if (workspace && workspace.gitlabTokenConfigured === false) {
+        wsIssues.push({
+          key: 'gitlab_token',
+          message: 'GitLab token 未配置',
+          remedy: '填入后才能创建合并请求。在该工作空间的设置里粘贴 GitLab token,留空则继承全局。',
+        })
+      }
+      return { globalIssues: globalIssues, wsIssues: wsIssues }
     }
 
     // ---- workspace detail (expanded stories) -----------------------------
 
     /**
      * The detail panel revealed when the user expands a workspace row.
-     * Lists every TAPD story on this workspace with its current state,
-     * badge, and (when present) the GitLab MR URL. Empty state mirrors
-     * the row-level message so the user is not confused by the empty
-     * panel.
+     * Lists the workspace's TAPD stories in two sections:
+     *   - unfinished (pending / in-flight / blocked / failed) at the top,
+     *     each with its 4-stage gauge and a click-to-open detail action
+     *   - a folded <details> summary listing completed (and failed)
+     *     stories; the user expands it once they want to scan history
+     *
+     * Per-workspace config issues (issue #6) appear in their own block
+     * right above the story list, so the fix is always one click away
+     * from the row it concerns.
+     *
+     * The list stays read-only — there are no rerun / edit / cancel
+     * controls here. To act on a story, the user opens its detail view
+     * (issue #8) or jumps to the MR.
      */
     function WorkspaceDetail(props) {
       var ws = props.workspace
       var stories = (ws && ws.stories) || []
       var onUpdate = props.onUpdate
+      var onStoryClick = props.onStoryClick
+      var issues = (ws && ws.issues) || []
+
+      var open = []
+      var done = []
+      for (var i = 0; i < stories.length; i++) {
+        var bucket = (typeof STATE_TO_BUCKET === 'object') ? STATE_TO_BUCKET[stories[i].state] : null
+        if (bucket === 'completed' || bucket === 'failed') done.push(stories[i])
+        else open.push(stories[i])
+      }
+
+      function storyButton(story, label, titleAttr) {
+        return h(
+          'button',
+          {
+            key: story.id + ':' + label,
+            type: 'button',
+            className: 'auto-rd-story-button',
+            title: titleAttr,
+            onClick: function () {
+              if (typeof onStoryClick === 'function') onStoryClick(story.id)
+            },
+          },
+          story[label] || '',
+        )
+      }
+
+      function renderOpenStory(story) {
+        var gaugeStatus = (typeof buildGauge === 'function') ? buildGauge(story.state).status : 'idle'
+        var lineColor =
+          gaugeStatus === 'halt'
+            ? styles.statusError
+            : gaugeStatus === 'live'
+              ? styles.statusInfo
+              : styles.labelTertiary
+        var why = story.blockedReason || ''
+        return h(
+          'li',
+          {
+            key: story.id,
+            className: 'auto-rd-story-line',
+            'data-state': gaugeStatus,
+            style: {
+              padding: '9px 0',
+              borderTop: '1px solid ' + styles.borderL3,
+              display: 'grid',
+              gridTemplateColumns: '14px 1fr',
+              gap: '2px 9px',
+            },
+          },
+          h(
+            'span',
+            {
+              style: {
+                fontFamily: styles.fontCode,
+                fontSize: 12,
+                color: lineColor,
+                lineHeight: 1.5,
+              },
+              'aria-hidden': 'true',
+            },
+            story.badge || '·',
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '2px 9px' } },
+            storyButton(story, 'id', '查看任务详情'),
+            storyButton(story, 'title', '查看任务详情'),
+          ),
+          why
+            ? h(
+                'div',
+                {
+                  style: {
+                    gridColumn: '2',
+                    fontSize: 12,
+                    color: styles.statusError,
+                  },
+                },
+                currentPhaseLabel(story.state)
+                  ? currentPhaseLabel(story.state) + ' 阶段: ' + why
+                  : why,
+              )
+            : null,
+          h(
+            'div',
+            { style: { gridColumn: '2', marginTop: 3 } },
+            h(StageGauge, { state: story.state }),
+          ),
+          story.mrUrl
+            ? h(
+                'a',
+                {
+                  href: story.mrUrl,
+                  target: '_blank',
+                  rel: 'noreferrer',
+                  style: {
+                    gridColumn: '2',
+                    fontFamily: styles.fontCode,
+                    fontSize: 11,
+                    color: styles.accent,
+                    textDecoration: 'none',
+                  },
+                },
+                'MR →',
+              )
+            : null,
+        )
+      }
+
+      function renderDoneRow(story) {
+        return h(
+          'span',
+          {
+            key: story.id,
+            className: 'auto-rd-done-row',
+            style: {
+              display: 'flex',
+              gap: 9,
+              alignItems: 'baseline',
+              fontSize: 12,
+              color: styles.labelSecondary,
+            },
+          },
+          h(
+            'span',
+            { style: { fontFamily: styles.fontCode, color: styles.labelTertiary } },
+            (story.badge || '·') + ' ',
+          ),
+          storyButton(story, 'id', '查看任务详情'),
+          ' ',
+          story.title,
+          story.mrUrl
+            ? h(
+                'a',
+                {
+                  href: story.mrUrl,
+                  target: '_blank',
+                  rel: 'noreferrer',
+                  style: {
+                    fontFamily: styles.fontCode,
+                    fontSize: 11,
+                    color: styles.accent,
+                    textDecoration: 'none',
+                  },
+                },
+                'MR →',
+              )
+            : null,
+        )
+      }
+
+      function issueLine(issue) {
+        return h(
+          'div',
+          { key: issue.key, className: 'auto-rd-ws-issue', role: 'note' },
+          h('strong', { style: { marginRight: 6 } }, issue.message),
+          h('span', { className: 'fix' }, issue.remedy),
+        )
+      }
 
       return h(
         'div',
         {
           style: {
-            margin: '-4px 0 12px',
-            padding: '12px 16px 12px 46px',
-            borderLeft: '2px solid ' + styles.borderL2,
-            marginLeft: 8,
+            padding: '0 20px 14px 30px',
             color: styles.labelSecondary,
             fontSize: 12,
             lineHeight: 1.7,
-            borderRadius: '0 6px 6px 0',
           },
         },
+        issues.length
+          ? h(
+              'div',
+              { 'aria-label': '配置问题', style: { marginBottom: 10 } },
+              issues.map(issueLine),
+            )
+          : null,
         h(
           'div',
-          { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, marginBottom: 6 } },
+          { style: { fontSize: 13, fontWeight: 500, color: styles.labelPrimary, margin: '6px 0 4px' } },
           '任务',
         ),
-        stories.length === 0
+        open.length === 0 && done.length === 0
           ? h(
               'div',
               { style: { opacity: 0.75 } },
               ws.name + ' 还没有需求。',
             )
-          : h(
+          : null,
+        open.length
+          ? h(
               'ul',
+              { style: { listStyle: 'none', margin: 0, padding: 0 } },
+              open.map(renderOpenStory),
+            )
+          : null,
+        done.length
+          ? h(
+              'details',
+              { className: 'auto-rd-done' },
+              h(
+                'summary',
+                { className: 'auto-rd-done-summary' },
+                done.length + ' 条已完成',
+              ),
+              h(
+                'div',
+                { style: { display: 'grid', gap: 4, padding: '6px 0 0' } },
+                done.map(renderDoneRow),
+              ),
+            )
+          : null,
+        ws.overflow > 0
+          ? h(
+              'div',
               {
-                style: { listStyle: 'none', margin: 0, padding: 0 },
+                className: 'auto-rd-truncated',
+                style: { marginTop: 8 },
               },
-              stories.map(function (s) {
-                var badgeColor =
-                  s.state === 'completed'
-                    ? styles.statusSuccess
-                    : s.state === 'failed'
-                      ? styles.statusError
-                      : s.state === 'blocked'
-                        ? styles.statusWarning
-                        : styles.statusInfo
-                return h(
-                  'li',
-                  {
-                    key: s.id,
-                    className: 'auto-rd-story-line',
-                    style: {
-                      padding: '4px 0',
-                      borderBottom: '1px solid ' + styles.borderL3,
-                      display: 'flex',
-                      gap: 8,
-                      alignItems: 'center',
-                      flexWrap: 'wrap',
-                    },
-                  },
-                  h(
-                    'span',
-                    {
-                      style: {
-                        fontFamily: styles.fontCode,
-                        fontSize: 11,
-                        color: badgeColor,
-                        width: 16,
-                        textAlign: 'center',
-                      },
-                    },
-                    s.badge || '·',
-                  ),
-                  h(
-                    'span',
-                    {
-                      style: {
-                        fontFamily: styles.fontCode,
-                        fontSize: 11,
-                        color: styles.labelSecondary,
-                      },
-                    },
-                    s.id,
-                  ),
-                  h(
-                    'span',
-                    { style: { color: styles.labelPrimary, flex: 1 } },
-                    s.title,
-                  ),
-                  h(
-                    'span',
-                    {
-                      style: {
-                        fontFamily: styles.fontCode,
-                        fontSize: 10,
-                        color: styles.labelTertiary,
-                      },
-                    },
-                    '[' + s.state + ']',
-                  ),
-                  s.mrUrl
-                    ? h(
-                        'a',
-                        {
-                          href: s.mrUrl,
-                          target: '_blank',
-                          rel: 'noreferrer',
-                          style: {
-                            fontFamily: styles.fontCode,
-                            fontSize: 11,
-                            color: styles.accent,
-                            textDecoration: 'none',
-                          },
-                        },
-                        'MR →',
-                      )
-                    : null,
-                )
-              }),
-            ),
+              '服务端每空间只回传 ' + (open.length + done.length) + ' 条,还有 ' + ws.overflow + ' 条未列出 ',
+              h(
+                'span',
+                { className: 'auto-rd-pending-tag' },
+                '需按 id 查询',
+              ),
+            )
+          : null,
         h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate }),
       )
     }
@@ -1434,9 +1923,8 @@ window.__ModuleLoader__.load({
       var onRefresh = props.onRefresh
       var onRemove = props.onRemove
       var onUpdate = props.onUpdate
-      var onWorkspaceClick = props.onWorkspaceClick
-      var expanded = props.expanded
-      var onToggleExpanded = props.onToggleExpanded
+      var onStoryClick = props.onStoryClick
+      var expandedOverrides = props.expandedOverrides || {}
 
       if (!workspaces || workspaces.length === 0) {
         return h(
@@ -1461,15 +1949,17 @@ window.__ModuleLoader__.load({
         'div',
         null,
         h(
-          'div',
-          { className: 'auto-rd-ws-list' },
+          'ul',
+          { className: 'auto-rd-ws-list', style: { listStyle: 'none', margin: 0, padding: '0 14px' } },
           workspaces.map(function (ws) {
+            var hasOverride = Object.prototype.hasOwnProperty.call(expandedOverrides, ws.id)
+            var defaultOpen = hasOverride ? !!expandedOverrides[ws.id] : workspaceNeedsAttention(ws)
             return h(WorkspaceRow, {
               key: ws.id,
               workspace: ws,
-              expanded: expanded === ws.id,
-              onClick: function () {
-                if (typeof onToggleExpanded === 'function') onToggleExpanded(ws.id)
+              defaultOpen: defaultOpen,
+              onToggle: function () {
+                if (typeof props.onToggleExpanded === 'function') props.onToggleExpanded(ws.id)
               },
               onRemove: function (id) {
                 if (typeof onRemove === 'function') onRemove(id)
@@ -1477,6 +1967,7 @@ window.__ModuleLoader__.load({
               onUpdate: function (body) {
                 if (typeof onUpdate === 'function') onUpdate(body)
               },
+              onStoryClick: onStoryClick,
             })
           }),
         ),
@@ -1484,36 +1975,104 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * "Should this workspace auto-expand?" — issue #7 acceptance rule.
+     *
+     * A workspace needs attention (= expand on first paint) when it
+     * carries any blocked / failed story OR any per-workspace setup
+     * issue. Everything else collapses — the user sees a quiet list
+     * until something goes wrong, which is exactly the situation
+     * they need the watch panel for.
+     */
+    function workspaceNeedsAttention(ws) {
+      if (!ws) return false
+      if ((ws.blocked || 0) > 0) return true
+      if ((ws.failed || 0) > 0) return true
+      if (Array.isArray(ws.issues) && ws.issues.length > 0) return true
+      return false
+    }
+
     function legend() {
+      // Issue #6: the previous version of this legend said "tokens are
+      // not configured here", while the panel itself renders token
+      // input fields. That contradiction is removed: tokens ARE
+      // configured here when a per-workspace value is needed; the host
+      // env var is the fallback when the field is empty. The legend
+      // now describes what the dot colours mean — useful guidance, no
+      // misinformation.
       return h(
         'div',
         {
           style: {
-            marginTop: 28,
-            paddingTop: 14,
+            margin: '14px 20px 22px',
+            paddingTop: 12,
             borderTop: '1px solid ' + styles.borderL3,
             fontSize: 11,
             color: styles.labelTertiary,
             lineHeight: 1.7,
           },
         },
-        'Token(',
-        h('code', { style: codeStyle() }, 'DSH_TAPD_API_TOKEN'),
-        '、',
-        h('code', { style: codeStyle() }, 'DSH_GITLAB_API_TOKEN'),
-        ')在启动 DSH 的 shell 中设置,不在此处配置。',
-        '当某个工作空间状态变红时,错误信息会告诉你缺哪一个。',
+        h(
+          'div',
+          { style: { marginBottom: 4 } },
+          h(
+            'span',
+            {
+              style: {
+                display: 'inline-block',
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: styles.statusSuccess,
+                marginRight: 6,
+                verticalAlign: 'middle',
+              },
+            },
+          ),
+          '正常 · 正在跑需求或等待轮询',
+        ),
+        h(
+          'div',
+          { style: { marginBottom: 4 } },
+          h(
+            'span',
+            {
+              style: {
+                display: 'inline-block',
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: styles.statusWarning,
+                marginRight: 6,
+                verticalAlign: 'middle',
+              },
+            },
+          ),
+          '有阻塞或失败的需求,需要看一眼',
+        ),
+        h('div', null,
+          h(
+            'span',
+            {
+              style: {
+                display: 'inline-block',
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: styles.labelTertiary,
+                marginRight: 6,
+                verticalAlign: 'middle',
+              },
+            },
+          ),
+          '暂无需求,等待下次轮询',
+        ),
+        h(
+          'div',
+          { style: { marginTop: 6 } },
+          '每个工作空间可填入独立的 token(留空 = 使用 shell 中的环境变量)。',
+        ),
       )
-
-      function codeStyle() {
-        return {
-          fontFamily: styles.fontCode,
-          background: styles.panelBgSubtle,
-          padding: '1px 5px',
-          borderRadius: 3,
-          color: styles.labelSecondary,
-        }
-      }
     }
 
     // ---- sync pulse (always-on freshness line) ---------------------------
@@ -1745,7 +2304,18 @@ window.__ModuleLoader__.load({
       var health = (model && model.health) || null
 
       var addOpen = React.useState(false)
-      var expandedId = React.useState(null)
+      // expandedOverrides records the user's last open/closed choice
+      // for each workspace id. The natural default — expand if blocked
+      // or failed, collapse otherwise (issue #7) — is computed by
+      // `workspaceNeedsAttention`; the override wins when the user has
+      // explicitly toggled that workspace, so their preference is
+      // remembered across polls.
+      var expandedOverrides = React.useState({})
+      // Selected story drives the detail view (issue #8). When set, the
+      // main panel renders StoryDetail instead of WorkspaceList. The
+      // selected story id is remembered across re-renders; clicking
+      // the back button or pressing Escape clears it.
+      var selectedStoryId = React.useState(null)
       // Workspace-removal modal state. `confirmRemove` holds the id of
       // the workspace the user is being asked to confirm; `removeError`
       // holds the host's error message after a failed remove so we can
@@ -1759,8 +2329,29 @@ window.__ModuleLoader__.load({
 
       var addOpenValue = addOpen[0]
       var setAddOpen = addOpen[1]
-      var expandedIdValue = expandedId[0]
-      var setExpandedId = expandedId[1]
+      var expandedOverridesValue = expandedOverrides[0]
+      var setExpandedOverrides = expandedOverrides[1]
+      var selectedStoryIdValue = selectedStoryId[0]
+      var setSelectedStoryId = selectedStoryId[1]
+
+      // Escape closes the detail view (keyboard reachability, issue #8).
+      React.useEffect(function () {
+        if (!selectedStoryIdValue || typeof window === 'undefined') return undefined
+        function onKey(e) {
+          if (e.key === 'Escape') setSelectedStoryId(null)
+        }
+        window.addEventListener('keydown', onKey)
+        return function () { window.removeEventListener('keydown', onKey) }
+      }, [selectedStoryIdValue])
+
+      function toggleExpanded(id) {
+        setExpandedOverrides(function (prev) {
+          var cur = prev && Object.prototype.hasOwnProperty.call(prev, id) ? prev[id] : workspaceNeedsAttention(workspaces.find(function (w) { return w.id === id }))
+          var next = Object.assign({}, prev)
+          next[id] = !cur
+          return next
+        })
+      }
 
       // Derive the workspaces[] shape that the UI consumes from the host's
       // modules[] shape. Until the host exposes per-workspace errors /
@@ -1768,38 +2359,60 @@ window.__ModuleLoader__.load({
       // "polling"; without stories it is "idle". The host will replace
       // this with real per-workspace health once the reconfigure route
       // gains workspace-level fields (see services/reconfigure-route.ts).
+      //
+      // Counters are computed from the SAME bucket view the gauge uses,
+      // so the bar and the tally agree (issue #5 acceptance: "工作空间摘
+      // 要的进行中计数反映真实在跑的需求数"). The legacy code matched
+      // state names that do not exist in the 19-state machine
+      // ('in_progress', 'in_flight'), which is why the in-flight count
+      // was always zero.
       var workspaces = modules.map(function (m) {
-        var inFlight = m.inFlight || 0
+        var inFlight = 0
         var blocked = 0
         var completed = 0
         var failed = 0
+        var pending = 0
         if (Array.isArray(m.stories)) {
           for (var i = 0; i < m.stories.length; i++) {
             var s = m.stories[i].state
-            if (s === 'in_progress' || s === 'in_flight') inFlight++
-            else if (s === 'blocked') blocked++
-            else if (s === 'completed') completed++
-            else if (s === 'failed') failed++
+            var bucket = (typeof STATE_TO_BUCKET === 'object') ? STATE_TO_BUCKET[s] : null
+            if (bucket === 'blocked') blocked++
+            else if (bucket === 'completed') completed++
+            else if (bucket === 'failed') failed++
+            else if (bucket === 'pending') pending++
+            else if (bucket === 'spec' || bucket === 'plan' || bucket === 'implement' || bucket === 'verify') inFlight++
           }
         }
-        var status = inFlight > 0
-          ? 'polling'
-          : m.stories && m.stories.length > 0
-            ? 'idle'
-            : 'idle'
+        var hasStories = m.stories && m.stories.length > 0
+        var status = blocked > 0 || failed > 0
+          ? 'halt'
+          : inFlight > 0
+            ? 'polling'
+            : hasStories
+              ? 'idle'
+              : 'idle'
+        var split = splitSetupIssues(
+          (health && health.issues) || [],
+          Object.assign({ stories: m.stories || [] }, m),
+        )
         return {
           id: m.id,
           name: m.title || m.id,
           path: m.repoUrl || (m.id + ' (local)'),
           storyCount: m.stories ? m.stories.length : 0,
+          overflow: m.overflow || 0,
           stories: m.stories || [],
           inFlight: inFlight,
           blocked: blocked,
           completed: completed,
           failed: failed,
+          pending: pending,
           status: status,
           error: null,
           remedy: null,
+          // Per-workspace setup issues (issue #6): empty when the host
+          // has nothing to flag for this row.
+          issues: split.wsIssues,
           // Per-workspace settings (empty = inherit global). Token
           // values never arrive; only their configured flags do.
           tapdWorkspaceId: m.tapdWorkspaceId || '',
@@ -1823,6 +2436,56 @@ window.__ModuleLoader__.load({
       }
 
       var isPolling = health && health.lastTapdPollAt != null
+
+      // Body dispatcher (issue #8 + #7 acceptance). Branches on the
+      // four states the main panel can be in: loading skeleton, error
+      // fallback, add-form mode, or the normal list / story-detail
+      // view. Defined as a function (not nested in the JSX) so the
+      // JSX below can call it as `renderMain()` without confusing the
+      // parser.
+      function renderMain() {
+        if (!model) {
+          return panel.status === 'loading' ? h(PanelSkeleton) : null
+        }
+        if (addOpenValue) {
+          return h(AddWorkspaceForm, {
+            onCancel: function () { setAddOpen(false) },
+            onAdded: function (body) { setAddOpen(false); refresh(body) },
+          })
+        }
+        if (selectedStoryIdValue) {
+          var found = null
+          for (var wi = 0; wi < workspaces.length; wi++) {
+            var stories = workspaces[wi].stories || []
+            for (var si = 0; si < stories.length; si++) {
+              if (stories[si].id === selectedStoryIdValue) {
+                found = { story: stories[si], workspace: workspaces[wi] }
+                break
+              }
+            }
+            if (found) break
+          }
+          if (found) {
+            return h(StoryDetail, {
+              story: found.story,
+              workspace: found.workspace,
+              onBack: function () { setSelectedStoryId(null) },
+            })
+          }
+          // Selected story no longer in the model (deleted, gone
+          // across a poll). Drop back to the list silently.
+          setSelectedStoryId(null)
+        }
+        return h(WorkspaceList, {
+          workspaces: workspaces,
+          expandedOverrides: expandedOverridesValue,
+          onToggleExpanded: toggleExpanded,
+          onRefresh: refresh,
+          onRemove: removeWorkspace,
+          onUpdate: refresh,
+          onStoryClick: function (id) { setSelectedStoryId(id) },
+        })
+      }
 
       /**
        * Apply a mutation response in place — no page reload.
@@ -1980,35 +2643,44 @@ window.__ModuleLoader__.load({
           totals: totals,
           isPolling: isPolling,
         }),
+        // Global setup issues (issue #6) — workspaceRoot / modules
+        // config that touches every workspace. Per-workspace issues
+        // travel with their row; only the truly cross-cutting ones
+        // belong here.
+        (health && health.issues && health.issues.length)
+          ? h(
+              'div',
+              { className: 'auto-rd-global-issues', role: 'region', 'aria-label': '全局配置问题' },
+              health.issues
+                .filter(function (iss) { return iss.key === 'workspace_root' || iss.key === 'modules' })
+                .map(function (iss) {
+                  return h(
+                    'span',
+                    { key: iss.key, style: { display: 'contents' } },
+                    h('span', { className: 'auto-rd-global-issues-mark', 'aria-hidden': 'true' }, '\u2717'),
+                    h(
+                      'span',
+                      null,
+                      h('span', { className: 'auto-rd-global-issues-msg' }, iss.message),
+                      h('br'),
+                      h('span', { className: 'auto-rd-global-issues-fix' }, iss.remedy),
+                    ),
+                  )
+                }),
+            )
+          : null,
         h(
           'div',
           {
             style: { padding: '18px 20px', flex: 1 },
           },
           // The body branches on (status, model):
-          //   loading + no model  → skeleton (content is coming)
-          //   error  + no model   → error line (nothing to show)
-          //   ok / cached model   → the real list / confirmed empty state
-          // The empty state ("还没有工作空间") only renders once a
-          // successful fetch confirmed the server really has zero —
-          // before that it would be a guess.
-          !model
-            ? panel.status === 'loading'
-              ? h(PanelSkeleton)
-              : null
-            : addOpenValue
-              ? h(AddWorkspaceForm, {
-                  onCancel: function () { setAddOpen(false) },
-                  onAdded: function (body) { setAddOpen(false); refresh(body) },
-                })
-              : h(WorkspaceList, {
-                  workspaces: workspaces,
-                  expanded: expandedIdValue,
-                  onToggleExpanded: setExpandedId,
-                  onRefresh: refresh,
-                  onRemove: removeWorkspace,
-                  onUpdate: refresh,
-                }),
+          // The body branches on (status, model); see renderMain()
+          // above for the dispatch logic. The detail view (issue #8)
+          // takes the WHOLE main panel; the sync pulse + status bar
+          // stay visible so the user always knows how fresh the
+          // screen is, even while reading a story's history.
+          renderMain(),
           panel.status === 'error' && !model
             ? h(
                 'div',
@@ -2113,7 +2785,14 @@ window.__ModuleLoader__.load({
       // use it to drive a poll without waiting for the interval.
       // Test seam: direct component handles so the client-half suite can
       // render the icon and panel without a full shell.
-      components: { AutoRdIcon: AutoRdIcon, AutoRdPanel: AutoRdPanel, SyncPulse: SyncPulse, PanelSkeleton: PanelSkeleton },
+      components: {
+        AutoRdIcon: AutoRdIcon,
+        AutoRdPanel: AutoRdPanel,
+        SyncPulse: SyncPulse,
+        PanelSkeleton: PanelSkeleton,
+        StageGauge: StageGauge,
+        StoryDetail: StoryDetail,
+      },
     }
 
     return module

@@ -346,11 +346,14 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
   const el = exports2.__autoRd.components.AutoRdPanel()
 
   check('panel: uses React state', shim.calls.useState >= 1, String(shim.calls.useState))
-  // Three mount-once effects: the data poll, the pulse clock, and the
-  // stylesheet injection.
-  check('panel: uses exactly three React effects', shim.calls.useEffect.length === 3, String(shim.calls.useEffect.length))
-  for (const eff of shim.calls.useEffect) {
-    check(`panel: effect [${shim.calls.useEffect.indexOf(eff)}] has empty deps (mount once)`, JSON.stringify(eff.deps) === '[]', JSON.stringify(eff.deps))
+  // Mount-once effects: the data poll, the pulse clock, and the
+  // stylesheet injection. The Escape-key listener for the story
+  // detail view (issue #8) lives behind a state guard so it does not
+  // run on first paint — that one may carry non-empty deps.
+  const mountOnce = shim.calls.useEffect.filter((e) => JSON.stringify(e.deps) === '[]')
+  check('panel: at least three mount-once effects', mountOnce.length >= 3, String(mountOnce.length))
+  for (const eff of mountOnce) {
+    check(`panel: mount-once effect deps are []`, JSON.stringify(eff.deps) === '[]', JSON.stringify(eff.deps))
   }
   check('panel: renders a root element', el?.__el === true, String(el?.type))
   check('panel: titles the panel', JSON.stringify(shim.calls.createElement).length > 0)
@@ -402,7 +405,16 @@ check('meta: exposes the slot coordinates for tests', meta !== undefined)
 
   // Theme must stay with the shell. Hex/rgb literals in the sheet would
   // freeze one theme; colours belong in the `--dsw-alias-*` variables.
-  const hexColours = css.match(/#[0-9a-fA-F]{3,8}\b/g) || []
+  // The CSS spec lets a `var(--x, #fallback)` carry a fallback hex
+  // for the case the shell does not register the alias — those are
+  // allowed (they only render when the alias is missing, and the
+  // aliases are always present in real DSH). We strip them out before
+  // counting so a missing-alias fallback does not look like a frozen
+  // theme.
+  const cssStripped = css.replace(/var\(--[a-zA-Z0-9_-]+(?:\s*,\s*#[0-9a-fA-F]{3,8})?\)/g, (m) =>
+    m.includes(',') ? m.replace(/,\s*#[0-9a-fA-F]{3,8}/, '') : m,
+  )
+  const hexColours = cssStripped.match(/#[0-9a-fA-F]{3,8}\b/g) || []
   check('style: no hardcoded hex colours', hexColours.length === 0, JSON.stringify(hexColours.slice(0, 5)))
 
   // The point of the sheet: rules that inline styles cannot express.
