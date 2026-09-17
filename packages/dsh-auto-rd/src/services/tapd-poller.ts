@@ -28,6 +28,7 @@ import type { Logger } from '../utils/logger.js'
 import type { CredentialsService } from '../types/dsh-services.js'
 import { resolveTapdToken, formatTokenResolution } from '../domain/credentials.js'
 import { HttpClient, HttpError } from '../utils/http-client.js'
+import type { PollResult } from './poll-stats.js'
 
 export interface TapdPollerDeps {
   storage: AutoRdStorage
@@ -48,9 +49,15 @@ export interface TapdPollerDeps {
   /**
    * Optional callback fired at the end of every tick (success or error).
    * Used by the host plugin to publish live runtime stats to the panel
-   * route. Errors thrown by this callback do NOT propagate.
+   * route. `results` carries one entry per configured module, success or
+   * failure, so the panel can show per-workspace freshness. Errors thrown
+   * by this callback do NOT propagate.
    */
-  onTickEnd?: (info: { at: Date; error: Error | null }) => void
+  onTickEnd?: (info: {
+    at: Date
+    error: Error | null
+    results: PollResult[]
+  }) => void
 }
 
 export interface TapdStory {
@@ -148,14 +155,22 @@ export class TapdPoller {
 
   async tick(): Promise<void> {
     try {
-      const stories = await this.fetchStories()
-      for (const t of stories) {
-        await this.enqueueIfNew(t)
+      const fetched = await this.fetchStories()
+      // Track how many of each module's stories were actually new.
+      const newByModule = new Map<string, number>()
+      for (const t of fetched.stories) {
+        const added = await this.enqueueIfNew(t)
+        if (added && t.category) {
+          newByModule.set(t.category, (newByModule.get(t.category) ?? 0) + 1)
+        }
       }
-      this.notifyTickEnd(null)
+      for (const r of fetched.results) {
+        r.newCount = newByModule.get(r.moduleId) ?? 0
+      }
+      this.notifyTickEnd(null, fetched.results)
     } catch (err) {
       this.deps.logger.error(`TapdPoller tick failed: ${(err as Error).message}`)
-      this.notifyTickEnd(err as Error)
+      this.notifyTickEnd(err as Error, [])
     }
   }
 
@@ -163,31 +178,31 @@ export class TapdPoller {
    * Fire the `onTickEnd` callback if provided. Swallow any callback error
    * so a broken stats sink can never take the poller down.
    */
-  private notifyTickEnd(err: Error | null): void {
+  private notifyTickEnd(err: Error | null, results: PollResult[]): void {
     const cb = this.deps.onTickEnd
     if (!cb) return
     try {
-      cb({ at: new Date(), error: err })
+      cb({ at: new Date(), error: err, results })
     } catch (cbErr) {
       this.deps.logger.warn(`TapdPoller onTickEnd callback threw: ${(cbErr as Error).message}`)
     }
   }
 
-  private async enqueueIfNew(t: TapdStory): Promise<void> {
+  private async enqueueIfNew(t: TapdStory): Promise<boolean> {
     const stories = this.deps.storage.stories()
-    if (stories.get(t.id)) return // already enqueued
+    if (stories.get(t.id)) return false // already enqueued
 
     const moduleId = t.category
     if (!moduleId) {
       this.deps.logger.warn(`Story ${t.id} has no category; skipping`)
-      return
+      return false
     }
     const moduleRecord = this.deps.storage.modules().get(moduleId)
     if (!moduleRecord) {
       this.deps.logger.warn(
         `Story ${t.id} category="${moduleId}" does not match any configured module; skipping`,
       )
-      return
+      return false
     }
 
     const now = new Date().toISOString()
@@ -218,6 +233,7 @@ export class TapdPoller {
       updatedAt: now,
     })
     this.deps.logger.info(`Enqueued story ${t.id} for module ${moduleId} (worktree=${worktreePath})`)
+    return true
   }
 
   /**
@@ -234,18 +250,28 @@ export class TapdPoller {
    * does not prevent the others from advancing. Persistent failures show
    * up as repeated error logs but never crash the plugin.
    */
-  private async fetchStories(): Promise<TapdStory[]> {
+  private async fetchStories(): Promise<{ stories: TapdStory[]; results: PollResult[] }> {
     if (this.deps.config.useTapdMock) {
-      return MOCK_TAPD_FIXTURE
+      // Mock fixture: every story's category doubles as its moduleId.
+      const results: PollResult[] = this.deps.config.modules.map((m) => ({
+        moduleId: m.id,
+        error: null,
+        newCount: 0,
+      }))
+      const stories = MOCK_TAPD_FIXTURE.filter((t) =>
+        this.deps.config.modules.some((m) => m.id === t.category),
+      )
+      return { stories, results }
     }
     const modules = this.deps.config.modules.filter((m) => (m.tapdWorkspaceId ?? '').length > 0)
     if (modules.length === 0) {
       this.deps.logger.warn(
         'TapdPoller: useTapdMock=false but no module has a tapdWorkspaceId -- nothing to fetch',
       )
-      return []
+      return { stories: [], results: [] }
     }
     const all: TapdStory[] = []
+    const results: PollResult[] = []
     for (const m of modules) {
       const tapdWorkspaceId = m.tapdWorkspaceId as string
       // Resolve the token through the credentials seam. The value in
@@ -274,19 +300,22 @@ export class TapdPoller {
       try {
         const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, tapdResolution.value)
         all.push(...stories)
+        results.push({ moduleId: m.id, error: null, newCount: 0 })
       } catch (err) {
+        const message = (err as Error).message
         if (err instanceof HttpError && !err.transient) {
           this.deps.logger.error(
             `TapdPoller: module ${m.id} (TAPD ${tapdWorkspaceId}) returned ${err.status} -- will not retry until config changes`,
           )
         } else {
           this.deps.logger.warn(
-            `TapdPoller: module ${m.id} (TAPD ${tapdWorkspaceId}) fetch failed transiently: ${(err as Error).message} -- will retry next tick`,
+            `TapdPoller: module ${m.id} (TAPD ${tapdWorkspaceId}) fetch failed transiently: ${message} -- will retry next tick`,
           )
         }
+        results.push({ moduleId: m.id, error: message, newCount: 0 })
       }
     }
-    return all
+    return { stories: all, results }
   }
 
   private async fetchStoriesFromApi(tapdWorkspaceId: string, token: string): Promise<TapdStory[]> {

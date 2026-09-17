@@ -38,6 +38,8 @@ import { StoryNotifierService } from './services/story-notifier.js'
 import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
 import { registerPanelRoute, registerPanelRouteWithRetry } from './services/panel-route.js'
+import { registerStoryTrajectoryRouteWithRetry } from './services/story-trajectory-route.js'
+import type { RuntimeStats, WorkspacePollStat } from './services/poll-stats.js'
 import { registerReconfigureRoute } from './services/reconfigure-route.js'
 import { registerPickDirectoryRoute } from './services/pick-directory-route.js'
 import { registerAutoRdPromptSection } from './services/system-prompt-section.js'
@@ -182,10 +184,11 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
   // reconfigure route read from. It starts as the parsed-once config
   // and gets replaced whenever the user re-runs setup.
   const liveConfig: { current: Config } = { current: config }
-  const runtime = {
+  const runtime: RuntimeStats = {
     mountedAt: new Date(),
-    lastTapdPollAt: null as Date | null,
-    lastTapdError: null as string | null,
+    lastTapdPollAt: null,
+    lastTapdError: null,
+    pollStats: new Map<string, WorkspacePollStat>(),
   }
 
   // Resolve the DSH credentials service ONCE at mount time. The
@@ -338,6 +341,22 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
       }
     }, 'auto-rd:web-server-route')
 
+    // Story trajectory route — GET /auto-rd/story/<id>. Serves one
+    // story's execution log on demand (the detail view fetches it when
+    // opened, so the hot 5s panel poll stays lean). Same optional-webServer
+    // pattern as the panel route.
+    ctx.effect(() => {
+      const disposeTrajectory = registerStoryTrajectoryRouteWithRetry(ctx, {
+        storage,
+        logger,
+        retryMs: WEBSERVER_RETRY_MS,
+        maxAttempts: WEBSERVER_RETRY_CAP,
+      })
+      return () => {
+        disposeTrajectory()
+      }
+    }, 'auto-rd:story-trajectory-route')
+
     // Reconfigure route — POST /auto-rd/reconfigure with a JSON
     // { config: { ... } } body. The handler validates + swaps the live
     // config, rebuilds the timer-driven services, re-seeds modules, and
@@ -425,7 +444,7 @@ function startServices(
   storage: AutoRdStorage,
   logger: Logger,
   config: Config,
-  runtime: { lastTapdPollAt: Date | null; lastTapdError: string | null },
+  runtime: RuntimeStats,
   credentials: import('./types/dsh-services.js').CredentialsService | undefined,
 ): {
   trajectory: TrajectoryRecorder
@@ -463,9 +482,24 @@ function startServices(
     logger,
     config,
     credentials,
-    onTickEnd: ({ at, error }) => {
+    onTickEnd: ({ at, error, results }) => {
       runtime.lastTapdPollAt = at
       runtime.lastTapdError = error ? error.message : null
+      const stats = runtime.pollStats ?? new Map<string, WorkspacePollStat>()
+      runtime.pollStats = stats
+      for (const r of results) {
+        const prev = stats.get(r.moduleId)
+        stats.set(r.moduleId, {
+          moduleId: r.moduleId,
+          lastAttemptAt: at,
+          // On error keep the previous success timestamp so the panel
+          // can say "last synced at X" even while the latest attempt
+          // failed.
+          lastSuccessAt: r.error ? (prev?.lastSuccessAt ?? null) : at,
+          lastError: r.error,
+          lastNewCount: r.error ? (prev?.lastNewCount ?? 0) : r.newCount,
+        })
+      }
     },
   })
   const notifier = new StoryNotifierService(ctx, { storage, logger })

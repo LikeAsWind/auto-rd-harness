@@ -50,6 +50,7 @@ import {
   describeTapdToken,
   describeGitlabToken,
 } from '../domain/credentials.js'
+import type { RuntimeStats } from './poll-stats.js'
 
 export interface AutoRdPanelDeps {
   storage: AutoRdStorage
@@ -85,6 +86,12 @@ export interface PanelStory {
   blockedReason: string
   /** Newest-last artifact refs, ready for a timeline. */
   artifacts: PanelArtifactRef[]
+  /** Mirrored StoryRecord fields for the story detail view. */
+  tapdId: string
+  retryCount: number
+  createdAt: string
+  pushedSha: string
+  mrIid: number | null
 }
 
 /** Flattened ArtifactRef: kind, filename, when it was written. */
@@ -115,6 +122,17 @@ export interface PanelModule {
   tapdTokenConfigured?: boolean
   gitlabTokenConfigured?: boolean
   modelSelection?: Record<string, string>
+  /**
+   * Per-workspace TAPD poll snapshot, surfaced so the client can show
+   * "synced at HH:MM, added N stories" per workspace. Absent when the
+   * host runtime did not publish one (legacy callers, tests).
+   */
+  pollStat?: {
+    lastAttemptAt: string | null
+    lastSuccessAt: string | null
+    lastError: string | null
+    lastNewCount: number
+  }
 }
 
 /**
@@ -393,7 +411,7 @@ async function gitlabGlobalConfigured(credentials: CredentialsService): Promise<
 export function buildPanelModel(
   storage: AutoRdStorage,
   config: Config | undefined,
-  runtime: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null } | undefined,
+  runtime: RuntimeStats | undefined,
   tokenState: TokenState,
 ): PanelModel {
   // Module ids come from `config.modules` (the live source of truth),
@@ -487,6 +505,11 @@ export function buildPanelModel(
         artifacts: Object.values(s.artifacts ?? {}).sort((a, b) =>
           a.createdAt < b.createdAt ? -1 : 1,
         ),
+        tapdId: s.tapdId ?? s.id,
+        retryCount: s.retryCount ?? 0,
+        createdAt: s.createdAt ?? '',
+        pushedSha: s.pushedSha ?? '',
+        mrIid: s.mrIid ?? null,
       })),
       overflow: Math.max(0, all.length - visible.length),
       inFlight,
@@ -501,6 +524,17 @@ export function buildPanelModel(
       tapdTokenConfigured: tokenState.tapd.get(m.id) === true,
       gitlabTokenConfigured: tokenState.gitlab.get(m.id) === true,
       modelSelection: m.modelSelection ?? {},
+      pollStat: runtime?.pollStats?.has(m.id)
+        ? (() => {
+            const s = runtime.pollStats!.get(m.id)!
+            return {
+              lastAttemptAt: s.lastAttemptAt?.toISOString() ?? null,
+              lastSuccessAt: s.lastSuccessAt?.toISOString() ?? null,
+              lastError: s.lastError,
+              lastNewCount: s.lastNewCount,
+            }
+          })()
+        : undefined,
     }
   })
 

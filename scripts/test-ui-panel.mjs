@@ -470,6 +470,55 @@ await (async () => {
   check('client: order is a number', typeof CLIENT_PANEL_ORDER === 'number')
 }
 
+// ---- per-workspace poll stat --------------------------------------
+
+{
+  // buildPanelModel surfaces runtime.pollStats per module, serialising
+  // Dates to ISO strings, and omits the field when absent.
+  const m1 = mod({ id: 'm1' })
+  const m2 = mod({ id: 'm2', title: 'Search' })
+  const runtimeWithStats = {
+    mountedAt: new Date('2025-01-01T00:00:00.000Z'),
+    lastTapdPollAt: null,
+    lastTapdError: null,
+    pollStats: new Map([
+      ['m1', {
+        moduleId: 'm1',
+        lastAttemptAt: new Date('2025-01-01T00:01:00.000Z'),
+        lastSuccessAt: new Date('2025-01-01T00:01:00.000Z'),
+        lastError: null,
+        lastNewCount: 2,
+      }],
+      ['m2', {
+        moduleId: 'm2',
+        lastAttemptAt: new Date('2025-01-01T00:02:00.000Z'),
+        lastSuccessAt: null,
+        lastError: '401 Unauthorized',
+        lastNewCount: 0,
+      }],
+    ]),
+  }
+  const model = buildPanelModel(
+    fakeStorage({ modules: [m1, m2], stories: [] }),
+    configFor([m1, m2]),
+    runtimeWithStats,
+    tokenStateFromConfig(configFor([m1, m2])),
+  )
+  const p1 = model.modules.find((x) => x.id === 'm1')
+  const p2 = model.modules.find((x) => x.id === 'm2')
+  check('pollStat: success module carries ISO successAt', p1.pollStat.lastSuccessAt === '2025-01-01T00:01:00.000Z', JSON.stringify(p1.pollStat))
+  check('pollStat: success module has lastNewCount', p1.pollStat.lastNewCount === 2, String(p1.pollStat.lastNewCount))
+  check('pollStat: failing module carries the error', p2.pollStat.lastError === '401 Unauthorized', String(p2.pollStat.lastError))
+  check('pollStat: failing module keeps successAt null', p2.pollStat.lastSuccessAt === null, String(p2.pollStat.lastSuccessAt))
+}
+
+{
+  // No runtime (legacy callers): the field is simply absent, never null.
+  const m1 = mod({ id: 'm1' })
+  const model = buildPanelModel(fakeStorage({ modules: [m1], stories: [] }), configFor([m1]), undefined, tokenStateFromConfig(configFor([m1])))
+  check('pollStat: absent runtime omits the field', model.modules[0].pollStat === undefined, JSON.stringify(model.modules[0].pollStat))
+}
+
 // ---- Summary --------------------------------------------------------
 
 process.stdout.write(`\nUiPanel tests: ${pass} pass, ${fail} fail\n`)
