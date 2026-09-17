@@ -31,7 +31,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
-import { buildPanelModel, renderPanelText } from './ui-panel.js'
+import { buildPanelModel, renderPanelText, resolveTokenStates } from './ui-panel.js'
 import { resolveLogChannel, type LogChannel } from '../utils/logger.js'
 
 /** Default route path. Exported so the client half and tests agree. */
@@ -69,6 +69,12 @@ export interface PanelRouteDeps {
    * live "X seconds since mount" indicator.
    */
   runtime?: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null }
+  /**
+   * DSH credentials service — feeds the per-module `*TokenConfigured`
+   * flags and the setup-issue checklist (issue #10). When absent the
+   * route falls back to the legacy field-presence heuristic.
+   */
+  credentials?: import('../types/dsh-services.js').CredentialsService
 }
 
 function channel(ctx: Context, deps: PanelRouteDeps): LogChannel {
@@ -126,7 +132,7 @@ export function registerPanelRoute(
     return null
   }
 
-  const handler = (req: IncomingMessage, res: ServerResponse): void => {
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // Only GET is meaningful; anything else is a client bug.
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.statusCode = 405
@@ -139,7 +145,8 @@ export function registerPanelRoute(
     let body: string
     try {
       const cfg = deps.getConfig ? deps.getConfig() : deps.config
-      const model = buildPanelModel(deps.storage, cfg, deps.runtime)
+      const tokenState = await resolveTokenStates(deps.credentials, cfg?.modules ?? [])
+      const model = buildPanelModel(deps.storage, cfg, deps.runtime, tokenState)
       body = JSON.stringify(
         {
           ok: true,

@@ -25,12 +25,21 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
+import type { CredentialsService } from '../types/dsh-services.js'
+import { resolveTapdToken, formatTokenResolution } from '../domain/credentials.js'
 import { HttpClient, HttpError } from '../utils/http-client.js'
 
 export interface TapdPollerDeps {
   storage: AutoRdStorage
   logger: Logger
   config: Config
+  /**
+   * DSH credentials service. Used to resolve per-module and global
+   * TAPD tokens at tick time. The poller NEVER reads the literal
+   * off `module.tapdApiToken` directly — that's a credential
+   * reference name as of issue #10.
+   */
+  credentials?: CredentialsService
   /**
    * Injected HttpClient. Defaults to a Node-fetch-backed client if not
    * supplied. Test harness can pass one with a fake fetcher.
@@ -239,10 +248,31 @@ export class TapdPoller {
     const all: TapdStory[] = []
     for (const m of modules) {
       const tapdWorkspaceId = m.tapdWorkspaceId as string
-      // Effective token: per-workspace override first, else global.
-      const token = m.tapdApiToken || this.deps.config.tapdApiToken
+      // Resolve the token through the credentials seam. The value in
+      // `m.tapdApiToken` is a CredentialRef name (`DSH_*` env var id);
+      // resolver cascades per-module -> global -> undefined.
+      const tapdResolution = await resolveTapdToken(
+        this.deps.credentials,
+        m.tapdApiToken || this.deps.config.tapdApiToken ? m.id : undefined,
+      )
+      if (!tapdResolution) {
+        this.deps.logger.warn(
+          `[TapdPoller] module ${m.id} (TAPD ${tapdWorkspaceId}): no TAPD token configured ` +
+            `neither per-module (${m.tapdApiToken ?? 'unset'}) nor globally; skipping this module.`,
+        )
+        continue
+      }
+      this.deps.logger.info(
+        formatTokenResolution({
+          role: 'tapd',
+          moduleId: m.id,
+          ref: (m.tapdApiToken as never) ?? ('DSH_TAPD_API_TOKEN' as never),
+          source: tapdResolution.source,
+          at: new Date(),
+        }),
+      )
       try {
-        const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, token)
+        const stories = await this.fetchStoriesFromApi(tapdWorkspaceId, tapdResolution.value)
         all.push(...stories)
       } catch (err) {
         if (err instanceof HttpError && !err.transient) {

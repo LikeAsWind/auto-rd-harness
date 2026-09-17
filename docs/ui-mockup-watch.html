@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Auto-RD 值守台 · 设计图</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* 生产环境类名前缀为 auto-rd-，此处用 ar- 作可读替身 */
+:root{
+  --ink:#14232a; --ink-soft:#5c6b72; --ink-faint:#9aa6ab;
+  --paper:#eef1f1; --surface:#ffffff; --rule:#dbe1e2; --rule-soft:#e8ecec;
+  --live:#235c9e; --live-wash:#e4edf7;
+  --halt:#a0322a; --halt-wash:#f8e8e6;
+  --sans:"IBM Plex Sans",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+[data-theme=dark]{
+  --ink:#e4eaec; --ink-soft:#93a2a9; --ink-faint:#5a6a71;
+  --paper:#0d1415; --surface:#172123; --rule:#263133; --rule-soft:#1f2a2c;
+  --live:#6ba3e0; --live-wash:#16283a;
+  --halt:#e0776c; --halt-wash:#33201e;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; padding:34px 26px 80px;
+  background:var(--paper); color:var(--ink);
+  font:400 13px/1.55 var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+.doc{max-width:1180px;margin:0 auto}
+.doc-head{display:flex;align-items:baseline;gap:16px;margin-bottom:6px}
+.doc-head h1{font:600 17px/1.3 var(--sans);margin:0;letter-spacing:-.01em}
+.doc-head p{margin:0;color:var(--ink-soft);font-size:12px}
+.toggle{
+  margin-left:auto;border:1px solid var(--rule);background:var(--surface);
+  color:var(--ink-soft);font:500 11px/1 var(--mono);padding:7px 11px;
+  border-radius:5px;cursor:pointer;
+}
+.toggle:hover{color:var(--ink);border-color:var(--ink-faint)}
+.toggle:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.caption{
+  margin:30px 0 9px;color:var(--ink-soft);
+  font:500 11px/1.4 var(--mono);
+}
+.caption b{color:var(--ink);font-weight:500}
+
+/* ── 宿主槽位模拟：宽度可拖动，用于验证容器查询 ── */
+.host{
+  background:var(--surface);border:1px solid var(--rule);border-radius:9px;
+  overflow:hidden;resize:horizontal;min-width:320px;max-width:100%;
+}
+.host--narrow{width:430px}
+</style>
+<style>
+/* ══ 面板本体：注入式 <style>，靠 @container 响应宿主槽位宽度 ══ */
+.ar-panel{container:arpanel / inline-size;font:400 13px/1.55 var(--sans);color:var(--ink)}
+
+/* ── 心跳条：常驻，唯一持续变化的元素 ── */
+.ar-pulse{
+  display:flex;align-items:center;gap:9px;
+  padding:9px 14px;border-bottom:1px solid var(--rule);
+  font:400 11px/1 var(--mono);color:var(--ink-soft);
+}
+.ar-pulse-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--live);
+  flex:none;animation:arbeat 5s ease-in-out infinite;
+}
+@keyframes arbeat{0%,100%{opacity:1}50%{opacity:.28}}
+.ar-pulse[data-state=stale] .ar-pulse-dot{background:var(--halt);animation:none}
+.ar-pulse[data-state=stale]{color:var(--halt)}
+.ar-pulse-sep{color:var(--ink-faint)}
+.ar-refresh{
+  margin-left:auto;border:0;background:none;padding:3px 5px;margin:-3px -5px -3px auto;
+  color:var(--ink-faint);cursor:pointer;border-radius:4px;line-height:0;
+}
+.ar-refresh:hover{color:var(--ink);background:var(--rule-soft)}
+.ar-refresh:focus-visible{outline:2px solid var(--live);outline-offset:1px}
+
+/* ── 全局配置问题：仅 workspaceRoot 一类跨空间问题落此 ── */
+.ar-global{
+  display:flex;gap:10px;padding:11px 14px;
+  border-bottom:1px solid var(--rule);background:var(--halt-wash);
+}
+.ar-global-mark{color:var(--halt);font:500 12px/1.4 var(--mono);flex:none}
+.ar-global-msg{font-size:12px;line-height:1.45}
+.ar-global-fix{color:var(--ink-soft);font-size:12px}
+
+/* ── 工作空间行 ── */
+.ar-list{list-style:none;margin:0;padding:0}
+.ar-ws{border-bottom:1px solid var(--rule-soft)}
+.ar-ws:last-child{border-bottom:0}
+.ar-ws-head{
+  display:grid;grid-template-columns:auto 1fr auto;align-items:baseline;
+  gap:4px 11px;width:100%;padding:13px 14px;
+  border:0;background:none;text-align:left;cursor:pointer;font:inherit;color:inherit;
+  list-style:none;
+}
+.ar-ws-head::-webkit-details-marker{display:none}
+.ar-ws-head::marker{content:""}
+.ar-ws-head:hover{background:var(--rule-soft)}
+.ar-ws-head:focus-visible{outline:2px solid var(--live);outline-offset:-2px}
+.ar-ws-caret{
+  color:var(--ink-faint);font-size:9px;line-height:1.9;
+  transition:transform .14s ease;
+}
+[open] .ar-ws-caret{transform:rotate(90deg)}
+@media (prefers-reduced-motion:reduce){
+  .ar-ws-caret{transition:none}
+  .ar-pulse-dot{animation:none}
+}
+.ar-ws-name{font:500 14px/1.35 var(--sans);letter-spacing:-.005em}
+.ar-ws-tally{
+  grid-column:2;font:400 11px/1.5 var(--mono);color:var(--ink-soft);
+}
+.ar-ws-tally b{color:var(--ink);font-weight:500}
+.ar-ws-tally .live{color:var(--live);font-weight:500}
+.ar-ws-tally .halt{color:var(--halt);font-weight:500}
+.ar-ws-path{
+  grid-row:1;grid-column:3;font:400 11px/1.6 var(--mono);color:var(--ink-faint);
+}
+@container arpanel (max-width:560px){
+  .ar-ws-path{display:none}
+}
+
+/* ── 就近贴到行上的配置问题 ── */
+.ar-ws-issue{
+  display:flex;flex-wrap:wrap;gap:3px 8px;align-items:baseline;
+  grid-column:2/-1;font-size:12px;color:var(--halt);
+}
+.ar-ws-issue .fix{color:var(--ink-soft)}
+</style>
+<style>
+/* ══ 招牌元素：四段式阶段计量条 ══
+   刻度即信息 —— 4 段 × 4 格，段间留白划出阶段边界。
+   完成段落褪为静默灰，仅当前段着色。 */
+.ar-gauge{display:flex;gap:5px;align-items:center}
+.ar-gauge-stage{display:flex;gap:1.5px}
+.ar-gauge-tick{
+  width:7px;height:11px;background:var(--rule);border-radius:.5px;
+}
+@container arpanel (max-width:420px){
+  .ar-gauge-tick{width:5px}
+}
+.ar-gauge-stage[data-fill=done] .ar-gauge-tick{background:var(--ink-faint)}
+.ar-gauge-stage[data-fill=live] .ar-gauge-tick[data-on]{background:var(--live)}
+.ar-gauge-stage[data-fill=halt] .ar-gauge-tick[data-on]{background:var(--halt)}
+.ar-gauge-legend{
+  display:flex;gap:5px;margin-top:5px;
+  font:400 9.5px/1 var(--mono);color:var(--ink-faint);
+}
+.ar-gauge-legend span{width:35px}
+@container arpanel (max-width:420px){
+  .ar-gauge-legend span{width:27px}
+}
+
+/* ── story 行 ── */
+.ar-stories{list-style:none;margin:0;padding:0 14px 14px}
+.ar-story{
+  display:grid;grid-template-columns:14px 1fr;gap:2px 9px;
+  padding:9px 0;border-top:1px solid var(--rule-soft);
+}
+.ar-story:first-child{border-top:0}
+.ar-story-mark{font:400 12px/1.5 var(--mono);color:var(--ink-faint)}
+.ar-story[data-state=halt] .ar-story-mark{color:var(--halt)}
+.ar-story[data-state=live] .ar-story-mark{color:var(--live)}
+.ar-story-line{
+  display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 9px;
+}
+.ar-story-id{
+  font:400 11px/1.5 var(--mono);color:var(--ink-soft);
+  border:0;background:none;padding:0;cursor:pointer;
+}
+.ar-story-title{
+  font:400 13px/1.45 var(--sans);border:0;background:none;padding:0;
+  color:inherit;cursor:pointer;text-align:left;
+}
+.ar-story-title:hover,.ar-story-id:hover{text-decoration:underline}
+.ar-story-title:focus-visible,.ar-story-id:focus-visible{
+  outline:2px solid var(--live);outline-offset:2px;border-radius:2px;
+}
+.ar-story-why{
+  grid-column:2;font-size:12px;color:var(--halt);
+}
+.ar-story-gauge{grid-column:2;margin-top:3px}
+.ar-story-mr{
+  font:400 11px/1.5 var(--mono);color:var(--live);
+  text-decoration:none;margin-left:auto;
+}
+.ar-story-mr:hover{text-decoration:underline}
+
+/* ── 已完成折叠行 + 截断说明 ── */
+.ar-done{
+  margin:3px 14px 14px;padding:8px 0 0;border-top:1px solid var(--rule-soft);
+  font:400 11px/1.5 var(--mono);color:var(--ink-faint);
+}
+.ar-done summary{cursor:pointer;list-style:none}
+.ar-done summary::-webkit-details-marker{display:none}
+.ar-done summary:hover{color:var(--ink-soft)}
+.ar-done summary:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.ar-done-body{padding-top:7px;display:grid;gap:4px}
+.ar-done-row{display:flex;gap:9px;align-items:baseline}
+.ar-truncated{color:var(--ink-faint);font-style:normal}
+.ar-pending{
+  border:1px dashed var(--rule);border-radius:4px;
+  padding:2px 6px;font:400 10px/1.5 var(--mono);color:var(--ink-faint);
+}
+</style>
+<style>
+/* ══ 详情页：整页替换，失败原因置顶 ══ */
+.ar-back{
+  display:inline-flex;align-items:baseline;gap:7px;
+  border:0;background:none;padding:11px 14px;cursor:pointer;
+  font:400 11px/1.5 var(--mono);color:var(--ink-soft);
+}
+.ar-back:hover{color:var(--ink)}
+.ar-back:focus-visible{outline:2px solid var(--live);outline-offset:-2px}
+.ar-detail{padding:0 14px 22px;max-width:62ch}
+.ar-detail-title{
+  font:600 20px/1.25 var(--sans);margin:2px 0 0;letter-spacing:-.015em;
+}
+.ar-detail-sub{
+  display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;
+  margin-top:5px;font:400 11px/1.5 var(--mono);color:var(--ink-soft);
+}
+.ar-detail-state{color:var(--halt);font-weight:500}
+.ar-detail-gauge{margin:18px 0 0}
+
+/* 失败原因：唯一有实底的块 */
+.ar-cause{
+  margin:20px 0 0;padding:13px 14px;
+  background:var(--halt-wash);border-left:2px solid var(--halt);border-radius:0 5px 5px 0;
+}
+.ar-cause-stage{font:500 12px/1.4 var(--sans);color:var(--halt)}
+.ar-cause-msg{font:400 12.5px/1.5 var(--mono);margin-top:5px;word-break:break-word}
+.ar-cause-fix{font-size:12.5px;color:var(--ink-soft);margin-top:7px}
+
+/* 字段表：定义列表，非卡片 */
+.ar-facts{
+  display:grid;grid-template-columns:auto 1fr;gap:8px 18px;
+  margin:22px 0 0;font-size:12.5px;
+}
+@container arpanel (max-width:400px){
+  .ar-facts{grid-template-columns:1fr;gap:2px}
+  .ar-facts dt{margin-top:9px}
+}
+.ar-facts dt{font:400 11px/1.6 var(--mono);color:var(--ink-faint)}
+.ar-facts dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
+.ar-facts dd.empty{color:var(--ink-faint);font-style:normal}
+.ar-facts a{color:var(--live);text-decoration:none}
+.ar-facts a:hover{text-decoration:underline}
+
+/* 待对接区：虚线描边如实标注数据缺口 */
+.ar-await{
+  margin:24px 0 0;padding:14px;
+  border:1px dashed var(--rule);border-radius:6px;
+}
+.ar-await-tag{
+  font:400 10.5px/1.4 var(--mono);color:var(--ink-faint);
+}
+.ar-await h3{
+  font:500 13px/1.4 var(--sans);margin:10px 0 0;
+}
+.ar-await h3:first-of-type{margin-top:7px}
+.ar-await ul{margin:6px 0 0;padding-left:17px;color:var(--ink-soft);font-size:12.5px}
+.ar-await li{margin-bottom:2px}
+.ar-trail{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:5px}
+.ar-trail li{
+  display:grid;grid-template-columns:14px 1fr auto;gap:9px;align-items:baseline;
+  font-size:12.5px;color:var(--ink-soft);
+}
+.ar-trail .m{font:400 11px/1.5 var(--mono)}
+.ar-trail .t{font:400 10.5px/1.6 var(--mono);color:var(--ink-faint)}
+.ar-trail [data-ok] .m{color:var(--ink-faint)}
+.ar-trail [data-bad] .m,.ar-trail [data-bad]{color:var(--halt)}
+
+/* ── 骨架屏：修首屏闪空态 ── */
+.ar-skel{padding:14px;display:grid;gap:15px}
+.ar-skel-row{display:grid;gap:6px}
+.ar-skel-bar{height:11px;border-radius:2px;background:var(--rule-soft)}
+.ar-skel-bar[data-w=s]{width:22%}
+.ar-skel-bar[data-w=m]{width:46%}
+.ar-skel-bar[data-w=l]{width:64%}
+</style>
+</head>
+<body>
+<div class="doc">
+
+<div class="doc-head">
+  <h1>Auto-RD 值守台</h1>
+  <p>嵌 DSH 主区槽位 · 宽度由宿主决定</p>
+  <button class="toggle" id="themeBtn" type="button">切到深色</button>
+</div>
+
+<p class="caption"><b>场景 1</b> 值守常态：有阻塞的工作空间默认展开，健康的收起</p>
+
+<div class="host">
+<div class="ar-panel">
+
+  <div class="ar-pulse" data-state="live">
+    <span class="ar-pulse-dot"></span>
+    <span>已同步</span>
+    <span class="ar-pulse-sep">·</span>
+    <span>2 秒前</span>
+    <button class="ar-refresh" type="button" aria-label="立即同步">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M14 8a6 6 0 1 1-1.8-4.3M14 2v3.6h-3.6"/>
+      </svg>
+    </button>
+  </div>
+
+  <ul class="ar-list">
+
+    <!-- 有阻塞 → 默认展开 -->
+    <li class="ar-ws">
+      <details open>
+        <summary class="ar-ws-head">
+          <span class="ar-ws-caret">▶</span>
+          <span class="ar-ws-name">payment</span>
+          <span class="ar-ws-path">D:\repos\payment-service</span>
+          <span class="ar-ws-tally">
+            17 需求 <span class="live">2 进行</span> <span class="halt">1 阻塞</span> 13 完成 1 失败
+          </span>
+          <span class="ar-ws-issue">
+            GitLab token 缺失
+            <span class="fix">填入后才能创建合并请求</span>
+          </span>
+        </summary>
+
+        <ul class="ar-stories">
+          <li class="ar-story" data-state="halt">
+            <span class="ar-story-mark" aria-hidden="true">✕</span>
+            <span class="ar-story-line">
+              <button class="ar-story-id" type="button">TAPD-8821</button>
+              <button class="ar-story-title" type="button">优惠券叠加校验</button>
+            </span>
+            <span class="ar-story-why">plan 阶段停在 401 Unauthorized</span>
+            <span class="ar-story-gauge">
+              <span class="ar-gauge">
+                <span class="ar-gauge-stage" data-fill="done"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage" data-fill="halt"><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+              </span>
+              <span class="ar-gauge-legend"><span>规格</span><span>计划</span><span>实现</span><span>验证</span></span>
+            </span>
+          </li>
+
+          <li class="ar-story" data-state="live">
+            <span class="ar-story-mark" aria-hidden="true">●</span>
+            <span class="ar-story-line">
+              <button class="ar-story-id" type="button">TAPD-8834</button>
+              <button class="ar-story-title" type="button">支付回滚重试</button>
+            </span>
+            <span class="ar-story-gauge">
+              <span class="ar-gauge">
+                <span class="ar-gauge-stage" data-fill="done"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage" data-fill="done"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage" data-fill="live"><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+              </span>
+              <span class="ar-gauge-legend"><span>规格</span><span>计划</span><span>实现</span><span>验证</span></span>
+            </span>
+          </li>
+
+          <li class="ar-story" data-state="live">
+            <span class="ar-story-mark" aria-hidden="true">●</span>
+            <span class="ar-story-line">
+              <button class="ar-story-id" type="button">TAPD-8840</button>
+              <button class="ar-story-title" type="button">对账单批量导出</button>
+            </span>
+            <span class="ar-story-gauge">
+              <span class="ar-gauge">
+                <span class="ar-gauge-stage" data-fill="live"><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+                <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+              </span>
+              <span class="ar-gauge-legend"><span>规格</span><span>计划</span><span>实现</span><span>验证</span></span>
+            </span>
+          </li>
+        </ul>
+
+        <details class="ar-done">
+          <summary>13 条已完成 · 1 条失败　展开</summary>
+          <div class="ar-done-body">
+            <span class="ar-done-row">TAPD-8802　优惠券列表　<a class="ar-story-mr" href="#">!42</a></span>
+            <span class="ar-done-row">TAPD-8799　退款回调幂等　<a class="ar-story-mr" href="#">!41</a></span>
+            <span class="ar-done-row ar-truncated">服务端每空间只回传 10 条，其余需按 id 单独查询 <span class="ar-pending">待对接</span></span>
+          </div>
+        </details>
+      </details>
+    </li>
+
+    <!-- 健康 → 收起 -->
+    <li class="ar-ws">
+      <details>
+        <summary class="ar-ws-head">
+          <span class="ar-ws-caret">▶</span>
+          <span class="ar-ws-name">order</span>
+          <span class="ar-ws-path">D:\repos\order-core</span>
+          <span class="ar-ws-tally">12 需求　全部完成</span>
+        </summary>
+        <ul class="ar-stories">
+          <li class="ar-story">
+            <span class="ar-story-mark" aria-hidden="true">✓</span>
+            <span class="ar-story-line">
+              <button class="ar-story-id" type="button">TAPD-8710</button>
+              <button class="ar-story-title" type="button">订单超时自动关闭</button>
+              <a class="ar-story-mr" href="#">!38</a>
+            </span>
+          </li>
+        </ul>
+      </details>
+    </li>
+
+    <!-- 配置未完 → 展开，问题贴在行上 -->
+    <li class="ar-ws">
+      <details open>
+        <summary class="ar-ws-head">
+          <span class="ar-ws-caret">▶</span>
+          <span class="ar-ws-name">inventory</span>
+          <span class="ar-ws-path">git@gitlab.com:org/inventory.git</span>
+          <span class="ar-ws-tally">尚未拉取需求</span>
+          <span class="ar-ws-issue">
+            未设 TAPD 工作空间 ID
+            <span class="fix">留空则不会拉取需求</span>
+          </span>
+        </summary>
+      </details>
+    </li>
+
+  </ul>
+</div>
+</div>
+<p class="caption"><b>场景 2</b> 连接中断：数据陈旧时心跳条改口，不再谎称已同步</p>
+
+<div class="host">
+<div class="ar-panel">
+  <div class="ar-pulse" data-state="stale">
+    <span class="ar-pulse-dot"></span>
+    <span>重连中</span>
+    <span class="ar-pulse-sep">·</span>
+    <span>数据停在 14:32</span>
+    <button class="ar-refresh" type="button" aria-label="立即重试">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M14 8a6 6 0 1 1-1.8-4.3M14 2v3.6h-3.6"/>
+      </svg>
+    </button>
+  </div>
+  <div class="ar-global">
+    <span class="ar-global-mark" aria-hidden="true">✕</span>
+    <span>
+      <span class="ar-global-msg">workspaceRoot 未设置</span><br>
+      <span class="ar-global-fix">新工作空间会落到当前目录，建议指定一个专用目录</span>
+    </span>
+  </div>
+  <ul class="ar-list">
+    <li class="ar-ws">
+      <details>
+        <summary class="ar-ws-head">
+          <span class="ar-ws-caret">▶</span>
+          <span class="ar-ws-name">payment</span>
+          <span class="ar-ws-path">D:\repos\payment-service</span>
+          <span class="ar-ws-tally">17 需求 <span class="live">2 进行</span> <span class="halt">1 阻塞</span></span>
+        </summary>
+      </details>
+    </li>
+  </ul>
+</div>
+</div>
+
+<p class="caption"><b>场景 3</b> 首帧骨架屏：数据到达前不再误报「还没有工作空间」</p>
+
+<div class="host host--narrow">
+<div class="ar-panel">
+  <div class="ar-skel" aria-busy="true" aria-label="正在载入">
+    <span class="ar-skel-row"><span class="ar-skel-bar" data-w="s"></span><span class="ar-skel-bar" data-w="l"></span></span>
+    <span class="ar-skel-row"><span class="ar-skel-bar" data-w="s"></span><span class="ar-skel-bar" data-w="m"></span></span>
+    <span class="ar-skel-row"><span class="ar-skel-bar" data-w="s"></span><span class="ar-skel-bar" data-w="l"></span></span>
+  </div>
+</div>
+</div>
+
+<p class="caption"><b>场景 4</b> story 详情（整页替换）：失败原因置顶，只读，无操作按钮。<span class="ar-pending">待对接</span> 标记服务端尚未回传的字段</p>
+
+<div class="host">
+<div class="ar-panel">
+  <button class="ar-back" type="button">
+    <span aria-hidden="true">←</span>
+    <span>payment</span>
+  </button>
+
+  <div class="ar-detail">
+    <h2 class="ar-detail-title">优惠券叠加校验</h2>
+    <p class="ar-detail-sub">
+      <span>TAPD-8821</span>
+      <span class="ar-pulse-sep">·</span>
+      <span class="ar-detail-state">阻塞</span>
+      <span class="ar-pulse-sep">·</span>
+      <span>更新于 14:44</span>
+    </p>
+
+    <div class="ar-detail-gauge">
+      <span class="ar-gauge">
+        <span class="ar-gauge-stage" data-fill="done"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+        <span class="ar-gauge-stage" data-fill="halt"><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick" data-on></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+        <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+        <span class="ar-gauge-stage"><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i><i class="ar-gauge-tick"></i></span>
+      </span>
+      <span class="ar-gauge-legend"><span>规格</span><span>计划</span><span>实现</span><span>验证</span></span>
+    </div>
+
+    <div class="ar-cause">
+      <p class="ar-cause-stage" style="margin:0">计划阶段中断</p>
+      <p class="ar-cause-msg" style="margin:0">TAPD 接口返回 401 Unauthorized</p>
+      <p class="ar-cause-fix" style="margin:0">在 payment 的设置里更新 TAPD token，下一轮轮询会自动重试</p>
+    </div>
+
+    <dl class="ar-facts">
+      <dt>分支</dt>
+      <dd>auto-rd/TAPD-8821 <span class="ar-pending">待对接</span></dd>
+      <dt>合并请求</dt>
+      <dd class="empty">尚未创建</dd>
+      <dt>工作树</dt>
+      <dd>D:\repos\payment-service\.auto-rd\8821 <span class="ar-pending">待对接</span></dd>
+      <dt>会话</dt>
+      <dd>ses_4f2a9c1e <span class="ar-pending">待对接</span></dd>
+    </dl>
+
+    <div class="ar-await">
+      <p class="ar-await-tag" style="margin:0">以下内容已存在于 StoryRecord，服务端尚未回传</p>
+
+      <h3>验收标准</h3>
+      <ul>
+        <li>同一订单叠加多张券时，折扣按券面额升序结算</li>
+        <li>券已失效时返回明确错误码，不静默跳过</li>
+        <li>重复提交同一优惠券保持幂等</li>
+      </ul>
+
+      <h3>产物</h3>
+      <ul class="ar-trail">
+        <li data-ok>
+          <span class="m" aria-hidden="true">✓</span>
+          <span>06-spec.md</span>
+          <span class="t">10:22</span>
+        </li>
+        <li data-bad>
+          <span class="m" aria-hidden="true">✕</span>
+          <span>计划生成失败</span>
+          <span class="t">10:31</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+</div>
+
+</div>
+
+<script>
+document.getElementById('themeBtn').addEventListener('click', function () {
+  var root = document.documentElement;
+  var dark = root.dataset.theme === 'dark';
+  root.dataset.theme = dark ? 'light' : 'dark';
+  this.textContent = dark ? '切到深色' : '切到浅色';
+});
+</script>
+</body>
+</html>

@@ -38,6 +38,7 @@ import {
 import { syncTapd } from './tapd-poller.js'
 import { HttpClient } from '../utils/http-client.js'
 import type { TrajectoryRecorder } from './trajectory.js'
+import { resolveTapdToken, resolveGitlabToken } from '../domain/credentials.js'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage
@@ -63,6 +64,13 @@ export interface StoryRunnerDeps {
    * display title to the story title after creation.
    */
   sessionTitle?: import('../types/dsh-services.js').SessionTitleService
+  /**
+   * DSH credentials service. The runner resolves TAPD and GitLab
+   * tokens at the moment of an HTTP call rather than reading them
+   * off the module record (issue #10 — module fields hold ref
+   * names, not values).
+   */
+  credentials?: import('../types/dsh-services.js').CredentialsService
 }
 
 interface StageHandler {
@@ -1042,7 +1050,16 @@ async function runMrCreatingStage(
     )
     try {
       // Effective GitLab token: per-workspace override first, else global.
-      const gitlabApiToken = module.gitlabApiToken || deps.config.gitlabApiToken
+      // Resolved through the credentials seam (issue #10) — the value in
+      // `module.gitlabApiToken` is now a ref name, not the literal.
+      const gitlabResolution = await resolveGitlabToken(deps.credentials, module.id)
+      if (!gitlabResolution) {
+        deps.logger.error(
+          `[story-runner] no GitLab token configured for module ${module.id} (and no global); cannot create MR`,
+        )
+        throw new Error('no GitLab token configured')
+      }
+      const gitlabApiToken = gitlabResolution.value
       const mr = await createOrReuseMR(mergerDeps, {
         gitlabBaseUrl: deps.config.gitlabBaseUrl,
         gitlabApiToken,
@@ -1148,8 +1165,17 @@ async function runTapdSyncingStage(
 
     try {
       // Effective TAPD token: per-workspace override first, else global.
+      // Resolved through the credentials seam (issue #10).
       const module = deps.storage.modules().get(story.moduleId)
-      const tapdApiToken = (module?.tapdApiToken as string | undefined) || deps.config.tapdApiToken
+      const tapdModuleId = module?.id ?? story.moduleId
+      const tapdResolution = await resolveTapdToken(deps.credentials, tapdModuleId)
+      if (!tapdResolution) {
+        deps.logger.error(
+          `[story-runner] no TAPD token configured for module ${tapdModuleId} (and no global); cannot sync TAPD`,
+        )
+        throw new Error('no TAPD token configured')
+      }
+      const tapdApiToken = tapdResolution.value
       await syncTapd({
         tapdBaseUrl: deps.config.tapdBaseUrl,
         tapdApiToken,

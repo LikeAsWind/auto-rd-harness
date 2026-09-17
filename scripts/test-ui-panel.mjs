@@ -26,6 +26,7 @@ const {
   buildPanelModel,
   renderPanelText,
   stateBadge,
+  emptyTokenState,
   PANEL_STORY_LIMIT,
   CLIENT_PANEL_SLOT,
   CLIENT_PANEL_ID,
@@ -35,6 +36,18 @@ const {
 let pass = 0
 let fail = 0
 function check(name, ok, extra) {
+  // `ok` is allowed to be a Promise — sections that hit the (async)
+  // credentials seam now use `await (async () => …)()` to pre-resolve
+  // their inputs, but we keep this helper sync-friendly so most
+  // sections don't have to thread `await` through every assertion.
+  // A bare Promise evaluates truthy at the call site, so we collapse
+  // it to a "pending" sentinel here and rely on the section wrapper
+  // to await before the summary line.
+  if (ok instanceof Promise) {
+    fail += 1
+    process.stdout.write(`\u2717 ${name} (unresolved Promise — wrap with await)\n`)
+    return
+  }
   if (ok) {
     pass += 1
     process.stdout.write(`\u2713 ${name}\n`)
@@ -63,8 +76,38 @@ function configFor(modules) {
   return { modules: modules.map((m) => ({ id: m.id, title: m.title })) }
 }
 
-function panelModel({ modules = [], stories = [] } = {}, runtime) {
-  return buildPanelModel(fakeStorage({ modules, stories }), configFor(modules), runtime)
+function panelModel({ modules = [], stories = [] } = {}, runtime, tokenState) {
+  const cfg = configFor(modules)
+  return buildPanelModel(
+    fakeStorage({ modules, stories }),
+    cfg,
+    runtime,
+    tokenState ?? tokenStateFromConfig(cfg),
+  )
+}
+
+/**
+ * Construct a TokenState from a parsed config, mirroring the
+ * post-#10 semantics: a module is "configured" if its
+ * `tapdApiToken` / `gitlabApiToken` is non-empty (this preserves
+ * the pre-#10 behaviour tests assert). The host path goes through
+ * `resolveTokenStates(credentials, modules)`; the tests do not
+ * mount a credentials service, so this shim encodes the legacy
+ * presence check.
+ */
+function tokenStateFromConfig(cfg) {
+  const tapd = new Map()
+  const gitlab = new Map()
+  for (const m of cfg?.modules ?? []) {
+    tapd.set(m.id, !!(m.tapdApiToken && m.tapdApiToken.length > 0))
+    gitlab.set(m.id, !!(m.gitlabApiToken && m.gitlabApiToken.length > 0))
+  }
+  return {
+    tapd,
+    gitlab,
+    tapdGlobal: !!(cfg?.tapdApiToken && cfg.tapdApiToken.length > 0),
+    gitlabGlobal: !!(cfg?.gitlabApiToken && cfg.gitlabApiToken.length > 0),
+  }
 }
 
 function story(over = {}) {
@@ -93,15 +136,15 @@ function mod(over = {}) {
 
 // ---- empty -----------------------------------------------------------
 
-{
+await (async () => {
   // No config at all: the checklist is skipped entirely, so the text
   // renderer reports the plain empty state rather than a setup warning.
-  const model = buildPanelModel(fakeStorage())
+  const model = buildPanelModel(fakeStorage(), undefined, undefined, emptyTokenState())
   check('empty: no modules', model.modules.length === 0)
   check('empty: totals all zero', model.totals.stories === 0 && model.totals.modules === 0)
   const text = renderPanelText(model)
   check('empty: text says no modules configured', text.includes('No modules configured'))
-}
+})()
 
 // ---- grouping + ordering --------------------------------------------
 
@@ -285,18 +328,19 @@ function mod(over = {}) {
 
 // ---- health block + setup checklist ----------------------------------
 
-{
+await (async () => {
   // Empty config: every required-looking field is missing. The health
   // block must enumerate each missing piece in plain text.
   const { ConfigSchema } = await import(
     (await import('node:url')).pathToFileURL(resolve(libBase, 'config.js')).href
   )
   const emptyConfig = ConfigSchema.parse({})
-  const model = buildPanelModel(fakeStorage({ modules: [], stories: [] }), emptyConfig, {
-    mountedAt: new Date(Date.now() - 30_000),
-    lastTapdPollAt: null,
-    lastTapdError: null,
-  })
+  const model = buildPanelModel(
+    fakeStorage({ modules: [], stories: [] }),
+    emptyConfig,
+    { mountedAt: new Date(Date.now() - 30_000), lastTapdPollAt: null, lastTapdError: null },
+    tokenStateFromConfig(emptyConfig),
+  )
   check('health: setupRequired is true on empty config', model.health.setupRequired === true)
   check('health: emits a tapd_token issue', model.health.issues.some((i) => i.key === 'tapd_token'))
   check('health: emits a gitlab_token issue', model.health.issues.some((i) => i.key === 'gitlab_token'))
@@ -320,11 +364,12 @@ function mod(over = {}) {
         workspaceRoot: '/w',
         modules: [],
       })
-      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
-        mountedAt: new Date(),
-        lastTapdPollAt: null,
-        lastTapdError: null,
-      })
+      const m2 = buildPanelModel(
+        fakeStorage({ modules: [], stories: [] }),
+        cfg2,
+        { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+        tokenStateFromConfig(cfg2),
+      )
       return m2.health.issues.some((i) => i.key === 'modules')
     })(),
   )
@@ -339,11 +384,12 @@ function mod(over = {}) {
         workspaceRoot: '/w',
         modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', tapdApiToken: 'tk' }],
       })
-      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
-        mountedAt: new Date(),
-        lastTapdPollAt: null,
-        lastTapdError: null,
-      })
+      const m2 = buildPanelModel(
+        fakeStorage({ modules: [], stories: [] }),
+        cfg2,
+        { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+        tokenStateFromConfig(cfg2),
+      )
       return !m2.health.issues.some((i) => i.key === 'tapd_token')
     })(),
   )
@@ -357,11 +403,12 @@ function mod(over = {}) {
         workspaceRoot: '/w',
         modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git', gitlabApiToken: 'tk' }],
       })
-      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
-        mountedAt: new Date(),
-        lastTapdPollAt: null,
-        lastTapdError: null,
-      })
+      const m2 = buildPanelModel(
+        fakeStorage({ modules: [], stories: [] }),
+        cfg2,
+        { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+        tokenStateFromConfig(cfg2),
+      )
       return !m2.health.issues.some((i) => i.key === 'gitlab_token')
     })(),
   )
@@ -375,11 +422,12 @@ function mod(over = {}) {
         workspaceRoot: '/w',
         modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git' }],
       })
-      const m2 = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg2, {
-        mountedAt: new Date(),
-        lastTapdPollAt: null,
-        lastTapdError: null,
-      })
+      const m2 = buildPanelModel(
+        fakeStorage({ modules: [], stories: [] }),
+        cfg2,
+        { mountedAt: new Date(), lastTapdPollAt: null, lastTapdError: null },
+        tokenStateFromConfig(cfg2),
+      )
       return m2.health.issues.some((i) => i.key === 'tapd_workspaces')
     })(),
   )
@@ -388,9 +436,9 @@ function mod(over = {}) {
   check('health text: setup section header', text.includes('Setup required'))
   check('health text: tapd_token line', text.includes('[tapd_token]'))
   check('health text: workspace_root line', text.includes('[workspace_root]'))
-}
+})()
 
-{
+await (async () => {
   // Fully configured: no setup issues; mock mode hides the workspaces issue.
   const { ConfigSchema } = await import(
     (await import('node:url')).pathToFileURL(resolve(libBase, 'config.js')).href
@@ -402,16 +450,17 @@ function mod(over = {}) {
     workspaceRoot: '/w',
     modules: [{ id: 'm', title: 'M', repoUrl: 'https://x/y.git' }],
   })
-  const model = buildPanelModel(fakeStorage({ modules: [], stories: [] }), cfg, {
-    mountedAt: new Date(),
-    lastTapdPollAt: new Date(),
-    lastTapdError: null,
-  })
+  const model = buildPanelModel(
+    fakeStorage({ modules: [], stories: [] }),
+    cfg,
+    { mountedAt: new Date(), lastTapdPollAt: new Date(), lastTapdError: null },
+    tokenStateFromConfig(cfg),
+  )
   check('health: setupRequired is false when fully configured', model.health.setupRequired === false)
   check('health: issues array is empty when fully configured', model.health.issues.length === 0)
   check('health: lastTapdPollAt propagates', model.health.lastTapdPollAt !== null)
   check('health: lastTapdError propagates', model.health.lastTapdError === null)
-}
+})()
 
 // ---- client coordinates ---------------------------------------------
 

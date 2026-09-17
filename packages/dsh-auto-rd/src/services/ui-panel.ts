@@ -40,6 +40,16 @@ import type { Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
 import type { ModuleRecord, StoryRecord } from '../domain/schema.js'
+import type { CredentialsService } from '../types/dsh-services.js'
+import {
+  tapdRefFor,
+  gitlabRefFor,
+  CREDENTIAL_REFS,
+  TAPD_GLOBAL_REF,
+  GITLAB_GLOBAL_REF,
+  describeTapdToken,
+  describeGitlabToken,
+} from '../domain/credentials.js'
 
 export interface AutoRdPanelDeps {
   storage: AutoRdStorage
@@ -168,8 +178,22 @@ const TERMINAL_STATES = new Set(['completed', 'failed'])
  *   - add at least one workspace id when not in mock mode
  *
  * Empty array = plugin is fully configured and polling for real.
+ *
+ * Issue #10: the "token configured?" check now goes through
+ * `ctx.credentials.describe(ref)` rather than reading the literal
+ * off the config / module record. A ref-name value like
+ * `DSH_TAPD_API_TOKEN` is treated as "configured" iff
+ * `credentials.describe(DSH_TAPD_API_TOKEN).configured === true` —
+ * which is true when either the credentials file has the entry OR
+ * the launching shell exports the env var.
+ *
+ * Pre-#10 plaintext literals (legacy migration target) used to make
+ * the field "look configured" without being set anywhere; now those
+ * are routed into the credentials store by `migrateStorageToCredentials`
+ * on plugin mount, and the host path always sees the post-migration
+ * ref name.
  */
-export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] {
+export function buildSetupIssues(config: Config | undefined, tokenState: TokenState): PanelSetupIssue[] {
   if (!config) return []
   const issues: PanelSetupIssue[] = []
 
@@ -181,13 +205,11 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
   // warn about missing modules / workspace ids — those are not how
   // the fixture is routed".
   //
-  // The mock fixture (see tapd-poller.ts MOCK_TAPD_FIXTURE) carries
-  // its own `category` labels, so a missing modules list and a
-  // missing tapdWorkspaceIds list are the expected dev state, not a
-  // misconfiguration. Telling the user to fix them while mock mode is
-  // active is noise.
-  const tapdTokenMissing = !config.tapdApiToken || config.tapdApiToken.trim() === ''
-  const isMock = !!config.useTapdMock || tapdTokenMissing
+  // The token-state path is the post-#10 source of truth: both the
+  // per-module probes and the global probe come from
+  // `resolveTokenStates`. Pre-#10 plaintext migration is handled by
+  // `migrateStorageToCredentials` before any of this code runs.
+  const isMock = !!config.useTapdMock || !tokenState.tapdGlobal
 
   // tapd_token / gitlab_token are per-workspace concerns, not global:
   // the panel UI has a "workspace settings" form where the user pastes
@@ -201,10 +223,10 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
   // the row that lacks them; the host only flags a token when NONE of
   // the workspaces has one — that's the genuinely-global case.
   const modules = config.modules ?? []
-  const anyModuleHasTapdToken = modules.some((m) => (m.tapdApiToken ?? '').length > 0)
-  const anyModuleHasGitlabToken = modules.some((m) => (m.gitlabApiToken ?? '').length > 0)
+  const anyModuleHasTapdToken = [...tokenState.tapd.values()].some((v) => v)
+  const anyModuleHasGitlabToken = [...tokenState.gitlab.values()].some((v) => v)
 
-  if (tapdTokenMissing && !anyModuleHasTapdToken) {
+  if (!tokenState.tapdGlobal && !anyModuleHasTapdToken) {
     issues.push({
       key: 'tapd_token',
       message: 'TAPD token is empty — the poller is running against a local mock fixture.',
@@ -214,7 +236,7 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
     })
   }
 
-  if ((config.gitlabApiToken ?? '').length === 0 && !anyModuleHasGitlabToken) {
+  if (!tokenState.gitlabGlobal && !anyModuleHasGitlabToken) {
     issues.push({
       key: 'gitlab_token',
       message: 'GitLab token is empty — MR creation will fail per story.',
@@ -279,11 +301,100 @@ export function buildSetupIssues(config: Config | undefined): PanelSetupIssue[] 
  *
  * Pure over its inputs so it can be unit-tested without a runtime, and
  * so the same projection can serve a client-side renderer.
+ *
+ * `credentials` is required for the per-module `*TokenConfigured`
+ * flags to be authoritative — they reflect whether the user's
+ * credentials store (or env override) actually resolves a ref for
+ * each module, NOT whether the module record's field is non-empty
+ * (which would be misleading once the field is a ref name). When
+ * the service is absent (headless profile) we fall back to the
+ * legacy field-presence check.
+ */
+/**
+ * Pre-resolved token state. The host path passes this AFTER awaiting
+ * `resolveTokenStates`, so the inner `buildPanelModel` projection
+ * stays synchronous. Tests pass an empty / hand-built state to keep
+ * the suite sync (test-client-half and friends never need real
+ * credentials).
+ */
+export interface TokenState {
+  /** Per-module TAPD token, key = moduleId. */
+  readonly tapd: ReadonlyMap<string, boolean>
+  /** Per-module GitLab token, key = moduleId. */
+  readonly gitlab: ReadonlyMap<string, boolean>
+  /** "Is the global TAPD token configured?" — covers both
+   *  `DSH_TAPD_API_TOKEN` ref and any legacy plaintext. */
+  readonly tapdGlobal: boolean
+  /** "Is the global GitLab token configured?" */
+  readonly gitlabGlobal: boolean
+}
+
+/** Build an empty TokenState — every probe reports "not configured". */
+export function emptyTokenState(): TokenState {
+  return {
+    tapd: new Map(),
+    gitlab: new Map(),
+    tapdGlobal: false,
+    gitlabGlobal: false,
+  }
+}
+
+/**
+ * Walk every module id and resolve its TAPD / GitLab token state, plus
+ * the two global refs. Returns a single TokenState snapshot suitable
+ * for passing into `buildPanelModel`. The host path calls this once
+ * per request and re-uses the result.
+ *
+ * Failures of any single `describe` are swallowed (logged via the
+ * per-module helpers) and reported as `false`, so a broken credentials
+ * service cannot block the panel.
+ */
+export async function resolveTokenStates(
+  credentials: CredentialsService | undefined,
+  modules: ReadonlyArray<{ id: string }>,
+): Promise<TokenState> {
+  const tapd = new Map<string, boolean>()
+  const gitlab = new Map<string, boolean>()
+  if (!credentials) return { tapd, gitlab, tapdGlobal: false, gitlabGlobal: false }
+  for (const m of modules) {
+    tapd.set(m.id, (await describeTapdToken(credentials, m.id)).configured)
+    gitlab.set(m.id, (await describeGitlabToken(credentials, m.id)).configured)
+  }
+  return {
+    tapd,
+    gitlab,
+    tapdGlobal: await tapdGlobalConfigured(credentials),
+    gitlabGlobal: await gitlabGlobalConfigured(credentials),
+  }
+}
+
+/** Whether the GLOBAL TAPD ref resolves. Used by the panel setup
+ *  checklist to decide whether to suppress the per-module token hint
+ *  and whether to mark the panel as mock-mode. */
+async function tapdGlobalConfigured(credentials: CredentialsService): Promise<boolean> {
+  return (await credentials.describe(TAPD_GLOBAL_REF)).configured
+}
+
+async function gitlabGlobalConfigured(credentials: CredentialsService): Promise<boolean> {
+  return (await credentials.describe(GITLAB_GLOBAL_REF)).configured
+}
+
+/**
+ * Build the sidebar model from a storage snapshot + pre-resolved
+ * token state. Pure over its inputs (tokenState carries the answer
+ * to every "is this token set?" probe), so unit tests can run sync.
+ *
+ * Host path: call `resolveTokenStates(credentials, config.modules)`,
+ * then pass the result here.
+ *
+ * Test path: pass `emptyTokenState()` for "nothing configured", or
+ * build a hand-rolled state for assertions.
  */
 export function buildPanelModel(
   storage: AutoRdStorage,
-  config?: Config,
-  runtime?: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null },
+  config: Config | undefined,
+  runtime: { mountedAt: Date; lastTapdPollAt: Date | null; lastTapdError: string | null } | undefined,
+  tokenState: TokenState,
 ): PanelModel {
   // Module ids come from `config.modules` (the live source of truth),
   // not from storage. Two reasons:
@@ -381,14 +492,19 @@ export function buildPanelModel(
       inFlight,
       // Per-workspace settings (empty = inherit global). Token values
       // stay in the host; the client only learns whether one exists.
+      // The configured flag goes through `credentials.describe` (issue
+      // #10) so a ref name like `DSH_TAPD_API_TOKEN_FOR_<id>` reads as
+      // configured iff the credentials store or the launching env
+      // actually has a value under that ref. The TokenState map
+      // pre-resolves this per request, so this stays sync.
       tapdWorkspaceId: m.tapdWorkspaceId ?? '',
-      tapdTokenConfigured: (m.tapdApiToken ?? '').length > 0,
-      gitlabTokenConfigured: (m.gitlabApiToken ?? '').length > 0,
+      tapdTokenConfigured: tokenState.tapd.get(m.id) === true,
+      gitlabTokenConfigured: tokenState.gitlab.get(m.id) === true,
       modelSelection: m.modelSelection ?? {},
     }
   })
 
-  const issues = buildSetupIssues(config)
+  const issues = buildSetupIssues(config, tokenState)
   const mountedAt = runtime?.mountedAt ?? new Date()
   const mountedForSec = Math.max(0, Math.floor((Date.now() - mountedAt.getTime()) / 1000))
 
@@ -561,7 +677,7 @@ export function registerAutoRdPanel(ctx: Context, deps: AutoRdPanelDeps): boolea
   }
 
   // The host-side surface that always works.
-  const model = buildPanelModel(deps.storage)
+  const model = buildPanelModel(deps.storage, undefined, undefined, emptyTokenState())
   const text = renderPanelText(model)
   log.debug(`panel snapshot:\n${text}`)
 

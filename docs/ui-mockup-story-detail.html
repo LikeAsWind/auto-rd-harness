@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>auto-rd — 任务详情</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* 全部使用 DSH shell 的真实 CSS token（fallback 仅用于独立预览）。 */
+  :root {
+    --bg-base:        var(--dsw-alias-bg-base, #ffffff);
+    --surface-primary: var(--dsw-alias-surface-primary, #ffffff);
+    --surface-secondary: var(--dsw-alias-surface-secondary, rgba(0,0,0,0.02));
+    --label-primary:  var(--dsw-alias-label-primary, #111111);
+    --label-secondary: var(--dsw-alias-label-secondary, #555555);
+    --label-tertiary: var(--dsw-alias-label-tertiary, #888888);
+    --border-l3:      var(--dsw-alias-border-l3, rgba(0,0,0,0.10));
+    --border-l2:      var(--dsw-alias-border-l2, rgba(0,0,0,0.14));
+    --status-success: var(--dsw-alias-status-success, #2a7f5f);
+    --status-warning: var(--dsw-alias-status-warning, #d19a3f);
+    --status-error:   var(--dsw-alias-status-error, #d9534f);
+    --status-info:    var(--dsw-alias-status-info, #3a6fbe);
+    --accent:         var(--dsw-alias-accent-primary, #3a6fbe);
+    --accent-soft:    var(--dsw-alias-accent-soft, rgba(58,111,190,0.12));
+    --font-code:      var(--ds-font-family-code, ui-monospace, monospace);
+  }
+
+  body {
+    background: var(--bg-base);
+    color: var(--label-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    padding: 32px;
+  }
+
+  .frame {
+    max-width: 760px;
+    margin: 0 auto;
+    background: var(--surface-primary);
+    border: 1px solid var(--border-l3);
+    border-radius: 8px;
+    padding: 20px 22px;
+  }
+
+  /* 面包屑 / 返回 */
+  .crumb {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--label-tertiary);
+    margin-bottom: 14px;
+  }
+  .crumb .link { color: var(--accent); cursor: pointer; }
+  .crumb .sep { opacity: 0.5; }
+
+  /* 任务头：标题 + 状态徽章 */
+  .head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .head h1 {
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.35;
+    flex: 1;
+    color: var(--label-primary);
+  }
+  .badge {
+    flex-shrink: 0;
+    font-family: var(--font-code);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .badge.implementing { background: var(--accent-soft); color: var(--accent); }
+  .badge.blocked    { background: rgba(209,154,63,0.14); color: var(--status-warning); }
+  .badge.failed     { background: rgba(217,83,79,0.12); color: var(--status-error); }
+  .badge.completed  { background: rgba(42,127,95,0.12); color: var(--status-success); }
+
+  /* 元数据条：mono 小字，一行排开 */
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-family: var(--font-code);
+    font-size: 11px;
+    color: var(--label-secondary);
+    padding: 10px 0;
+    border-top: 1px solid var(--border-l3);
+    border-bottom: 1px solid var(--border-l3);
+    margin-bottom: 18px;
+  }
+  .meta .k { color: var(--label-tertiary); margin-right: 6px; }
+  .meta a { color: var(--accent); text-decoration: none; }
+
+  /* 区块 */
+  .section { margin-bottom: 22px; }
+  .section h2 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--label-secondary);
+    margin-bottom: 8px;
+    letter-spacing: 0;
+  }
+  .section p {
+    font-size: 13px;
+    color: var(--label-primary);
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .section .empty { color: var(--label-tertiary); }
+
+  /* 验收标准列表 */
+  .criteria { list-style: none; }
+  .criteria li {
+    position: relative;
+    padding-left: 16px;
+    margin-bottom: 4px;
+    font-size: 13px;
+  }
+  .criteria li::before {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 0.6em;
+    width: 6px;
+    height: 6px;
+    border: 1.5px solid var(--label-tertiary);
+    border-radius: 50%;
+  }
+
+  /* artifacts 列表 */
+  .artifacts { list-style: none; }
+  .artifacts li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-l3);
+  }
+  .artifacts li:last-child { border-bottom: none; }
+  .artifacts .kind {
+    font-family: var(--font-code);
+    font-size: 10px;
+    color: var(--label-tertiary);
+    width: 92px;
+    flex-shrink: 0;
+  }
+  .artifacts .summary {
+    flex: 1;
+    font-size: 12px;
+    color: var(--label-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .artifacts .time {
+    font-family: var(--font-code);
+    font-size: 10px;
+    color: var(--label-tertiary);
+  }
+
+  /* 阻塞原因 banner */
+  .blocked {
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: rgba(209,154,63,0.10);
+    color: var(--status-warning);
+    margin-bottom: 18px;
+  }
+
+  /* 标注行 label */
+  .label-note {
+    text-align: center;
+    color: var(--label-tertiary);
+    font-size: 11px;
+    font-family: var(--font-code);
+    margin: 20px 0 24px;
+  }
+</style>
+</head>
+<body>
+
+<div class="label-note">MOCKUP — 任务详情（点击 workspace 下的 story 后展开）</div>
+
+<div class="frame">
+
+  <div class="crumb">
+    <span class="link">payment</span>
+    <span class="sep">/</span>
+    <span>任务</span>
+    <span class="sep">/</span>
+    <span>TAPD-MOCK-001</span>
+  </div>
+
+  <div class="head">
+    <h1>Add /refunds endpoint to payment service</h1>
+    <span class="badge implementing">implementing</span>
+  </div>
+
+  <div class="meta">
+    <span><span class="k">id</span>TAPD-MOCK-001</span>
+    <span><span class="k">branch</span>auto-rd/TAPD-MOCK-001</span>
+    <span><span class="k">MR</span><a href="#">!42 →</a></span>
+    <span><span class="k">updated</span>14:32:08</span>
+  </div>
+
+  <div class="section">
+    <h2>描述</h2>
+    <p>Users want to be able to issue a partial refund against a captured payment. The endpoint should accept an order id + amount and call the gateway.</p>
+  </div>
+
+  <div class="section">
+    <h2>验收标准</h2>
+    <ul class="criteria">
+      <li>Given a captured payment, when POST /refunds with {orderId, amount}, then a refund record is created</li>
+      <li>The gateway is called with the right args</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>产物</h2>
+    <ul class="artifacts">
+      <li><span class="kind">spec</span><span class="summary">06-spec.md — 退款接口规格</span><span class="time">14:20</span></li>
+      <li><span class="kind">plan</span><span class="summary">07-plan.md — 实施计划</span><span class="time">14:24</span></li>
+      <li><span class="kind">implementation</span><span class="summary">refunds.py + tests</span><span class="time">14:31</span></li>
+      <li><span class="kind">verification</span><span class="summary">11-verify-report.md</span><span class="time">14:35</span></li>
+    </ul>
+  </div>
+
+</div>
+
+</body>
+</html>

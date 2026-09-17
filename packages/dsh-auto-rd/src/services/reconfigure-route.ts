@@ -46,10 +46,139 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ConfigSchema, normalizeConfig, type Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
-import type { WorkspaceControllerService, SessionTitleService } from '../types/dsh-services.js'
-import { buildPanelModel, renderPanelText } from './ui-panel.js'
+import type {
+  WorkspaceControllerService,
+  SessionTitleService,
+  CredentialsService,
+  CredentialRef,
+} from '../types/dsh-services.js'
+import {
+  tapdRefFor,
+  gitlabRefFor,
+  TAPD_GLOBAL_REF,
+  GITLAB_GLOBAL_REF,
+} from '../domain/credentials.js'
+import { buildPanelModel, renderPanelText, resolveTokenStates } from './ui-panel.js'
 
 export const RECONFIGURE_ROUTE_PATH = '/auto-rd/reconfigure'
+
+/**
+ * Outcome of routing a literal token through `ctx.credentials`.
+ *
+ *   - `'persisted'` — `credentials.set` accepted the value, the ref
+ *     name is in `refName`. This is the success path; the module
+ *     record stores `refName`, never the literal.
+ *   - `'cleared'`   — the caller passed an empty token and we issued
+ *     `credentials.unset`. The module record stores `''`.
+ *   - `'fallback'`  — credentials service is absent; the literal is
+ *     returned for the caller to write into the module record the
+ *     legacy way. Logged at WARN.
+ *   - `'rejected'`  — `credentials.set` threw (env-var shadow,
+ *     invalid ref name, etc.). The error message is in `error`.
+ *     Module record keeps the previous value.
+ */
+type TokenRoute =
+  | { kind: 'persisted'; refName: string }
+  | { kind: 'cleared' }
+  | { kind: 'fallback'; literal: string }
+  | { kind: 'rejected'; error: string }
+
+/**
+ * Resolve the literal a workspace-submitted token payload into either:
+ *   - a persisted ref name (preferred path, issue #10), or
+ *   - the empty string (cleared), or
+ *   - the literal itself (headless fallback, no credentials service).
+ *
+ * Never returns the literal in the `persisted` branch — only the ref
+ * name. The literal crosses the function boundary ONLY in the
+ * `fallback` branch, which is the pre-#10 behaviour for headless
+ * profiles that lack `ctx.credentials`.
+ */
+async function routeTapdToken(
+  literal: string,
+  moduleId: string,
+  credentials: CredentialsService | undefined,
+  logger: Logger,
+): Promise<TokenRoute> {
+  return await routeToken(literal, tapdRefFor(moduleId), credentials, 'tapd', moduleId, logger)
+}
+
+async function routeGitlabToken(
+  literal: string,
+  moduleId: string,
+  credentials: CredentialsService | undefined,
+  logger: Logger,
+): Promise<TokenRoute> {
+  return await routeToken(literal, gitlabRefFor(moduleId), credentials, 'gitlab', moduleId, logger)
+}
+
+async function routeToken(
+  literal: string,
+  ref: CredentialRef,
+  credentials: CredentialsService | undefined,
+  role: 'tapd' | 'gitlab',
+  moduleId: string,
+  logger: Logger,
+): Promise<TokenRoute> {
+  // Empty token = user wants to clear the stored credential.
+  if (literal === '') {
+    if (credentials) {
+      try {
+        await credentials.unset(ref)
+        logger.info(`[auto-rd] cleared ${role} credential for module ${moduleId} (${ref})`)
+        return { kind: 'cleared' }
+      } catch (err) {
+        logger.error(
+          `[auto-rd] failed to clear ${role} credential for module ${moduleId} (${ref}): ${(err as Error).message}`,
+        )
+        return { kind: 'rejected', error: (err as Error).message }
+      }
+    }
+    return { kind: 'cleared' }
+  }
+
+  if (!credentials) {
+    logger.warn(
+      `[auto-rd] no credentials service mounted — writing ${role} token to module ${moduleId} storage in plaintext. ` +
+        `This is a headless fallback; web profile should mount dsh-credentials-local.`,
+    )
+    return { kind: 'fallback', literal }
+  }
+
+  try {
+    await credentials.set(ref, literal)
+    logger.info(
+      `[auto-rd] persisted ${role} credential for module ${moduleId} (${ref}, value length=${literal.length})`,
+    )
+    return { kind: 'persisted', refName: ref }
+  } catch (err) {
+    const msg = (err as Error).message
+    logger.error(
+      `[auto-rd] failed to persist ${role} credential for module ${moduleId} (${ref}): ${msg}`,
+    )
+    return { kind: 'rejected', error: msg }
+  }
+}
+
+/**
+ * Same helper for the GLOBAL fields on the live config. Same
+ * branches, just without a moduleId.
+ */
+async function routeGlobalTapdToken(
+  literal: string,
+  credentials: CredentialsService | undefined,
+  logger: Logger,
+): Promise<TokenRoute> {
+  return await routeToken(literal, TAPD_GLOBAL_REF, credentials, 'tapd', '<global>', logger)
+}
+
+async function routeGlobalGitlabToken(
+  literal: string,
+  credentials: CredentialsService | undefined,
+  logger: Logger,
+): Promise<TokenRoute> {
+  return await routeToken(literal, GITLAB_GLOBAL_REF, credentials, 'gitlab', '<global>', logger)
+}
 
 /**
  * The shape of the runtime services that get rebuilt on reconfigure.
@@ -102,6 +231,21 @@ export interface ReconfigureRouteDeps {
    * display title after it is created. Absent in headless profiles.
    */
   sessionTitle?: SessionTitleService
+  /**
+   * DSH credentials service. The handler routes every token payload
+   * (`tapdToken` / `gitlabToken` on `add_workspace` / `update_workspace`)
+   * through `ctx.credentials.set` so the literal value lands in
+   * `~/.dsh/.credentials.yaml` and never in storage, patch.yml, or the
+   * network response. Absent in headless profiles — the handler then
+   * writes the literal straight into the module record, mirroring the
+   * pre-#10 behaviour, and logs a warning.
+   *
+   * When `set` rejects (e.g. an env-var shadow wins precedence), the
+   * handler propagates that failure to the client as
+   * `credential_write_rejected` so the user understands why the UI
+   * still reports "not configured" after a successful 200.
+   */
+  credentials?: CredentialsService
 }
 
 /** WebServer contract — same as panel-route. */
@@ -255,6 +399,62 @@ async function handleReconfigure(
   }
 
   const next = normalizeConfig(parsed)
+
+  // If the full-config-swap carries literal (non-reference-name) tokens
+  // in either global field, route them through the credentials store
+  // exactly like the per-workspace handlers do, then rewrite the field
+  // to the ref name. A reference-name value (`DSH_TAPD_API_TOKEN` etc.)
+  // passes through untouched — the user already told us where the
+  // token lives.
+  if (typeof next.tapdApiToken === 'string' && next.tapdApiToken !== '') {
+    const tapdRoute = await routeGlobalTapdToken(next.tapdApiToken, deps.credentials, logger)
+    if (tapdRoute.kind === 'persisted') {
+      next.tapdApiToken = tapdRoute.refName
+    } else if (tapdRoute.kind === 'cleared') {
+      next.tapdApiToken = ''
+    } else if (tapdRoute.kind === 'fallback') {
+      next.tapdApiToken = tapdRoute.literal
+    }
+    if (tapdRoute.kind === 'rejected') {
+      res.statusCode = 422
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: 'credential_write_rejected',
+          message: `tapd: ${tapdRoute.error}`,
+        }),
+      )
+      return
+    }
+  }
+  if (typeof next.gitlabApiToken === 'string' && next.gitlabApiToken !== '') {
+    const gitlabRoute = await routeGlobalGitlabToken(
+      next.gitlabApiToken,
+      deps.credentials,
+      logger,
+    )
+    if (gitlabRoute.kind === 'persisted') {
+      next.gitlabApiToken = gitlabRoute.refName
+    } else if (gitlabRoute.kind === 'cleared') {
+      next.gitlabApiToken = ''
+    } else if (gitlabRoute.kind === 'fallback') {
+      next.gitlabApiToken = gitlabRoute.literal
+    }
+    if (gitlabRoute.kind === 'rejected') {
+      res.statusCode = 422
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: 'credential_write_rejected',
+          message: `gitlab: ${gitlabRoute.error}`,
+        }),
+      )
+      return
+    }
+  }
+
   const previous = deps.liveConfig.current
 
   // Stop the currently-running services BEFORE swapping the config so
@@ -325,7 +525,8 @@ async function handleReconfigure(
 
   // Return the new health snapshot so the client can render without
   // a second round-trip.
-  const model = buildPanelModel(deps.storage, next, deps.runtime)
+  const tokenState = await resolveTokenStates(deps.credentials, next.modules)
+  const model = buildPanelModel(deps.storage, next, deps.runtime, tokenState)
   res.statusCode = 200
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')
@@ -412,6 +613,42 @@ async function handleAddWorkspace(
     return
   }
 
+  // Route both tokens through the credentials service BEFORE we
+  // snapshot the new config or write the module record. The token
+  // literal must never reach either location; only the ref name
+  // (or, in the headless fallback branch, the literal itself) does.
+  const tapdRoute = await routeTapdToken(tapdToken, name, deps.credentials, logger)
+  const gitlabRoute = await routeGitlabToken(gitlabToken, name, deps.credentials, logger)
+
+  // Translate the route outcome into the value the module record and
+  // the live config will carry.
+  //
+  //   - `persisted`  -> ref name (no plaintext in storage / config).
+  //   - `cleared`    -> ''.
+  //   - `fallback`   -> literal (only in profiles without credentials).
+  //   - `rejected`   -> '' (the user's previous value, if any, is kept
+  //                     by `existing` upstream; we never overwrite a
+  //                     good value with '' after a write failure).
+  const persistedTapdToken = tapdRoute.kind === 'persisted' ? tapdRoute.refName : tapdRoute.kind === 'cleared' ? '' : tapdRoute.kind === 'fallback' ? tapdRoute.literal : ''
+  const persistedGitlabToken = gitlabRoute.kind === 'persisted' ? gitlabRoute.refName : gitlabRoute.kind === 'cleared' ? '' : gitlabRoute.kind === 'fallback' ? gitlabRoute.literal : ''
+
+  if (tapdRoute.kind === 'rejected' || gitlabRoute.kind === 'rejected') {
+    const rejectedFields: string[] = []
+    if (tapdRoute.kind === 'rejected') rejectedFields.push(`tapd: ${tapdRoute.error}`)
+    if (gitlabRoute.kind === 'rejected') rejectedFields.push(`gitlab: ${gitlabRoute.error}`)
+    res.statusCode = 422
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error: 'credential_write_rejected',
+        message: `credentials service refused to store: ${rejectedFields.join('; ')}. ` +
+          `If the matching DSH_* environment variable is set in the launching shell, unset it first.`,
+      }),
+    )
+    return
+  }
+
   const next: Config = {
     ...current,
     modules: [
@@ -428,8 +665,8 @@ async function handleAddWorkspace(
         // Per-workspace overrides. Empty values inherit the global
         // config at use time (see tapd-poller / story-runner).
         tapdWorkspaceId,
-        tapdApiToken: tapdToken,
-        gitlabApiToken: gitlabToken,
+        tapdApiToken: persistedTapdToken,
+        gitlabApiToken: persistedGitlabToken,
         modelSelection,
       },
     ],
@@ -458,8 +695,8 @@ async function handleAddWorkspace(
       workspacePath: pathResolve(next.workspaceRoot || '.', name),
       createdAt: new Date().toISOString(),
       tapdWorkspaceId,
-      tapdApiToken: tapdToken,
-      gitlabApiToken: gitlabToken,
+      tapdApiToken: persistedTapdToken,
+      gitlabApiToken: persistedGitlabToken,
       modelSelection,
     })
   } catch (err) {
@@ -521,7 +758,8 @@ async function handleAddWorkspace(
       `gitlab-token: ${gitlabToken ? 'set' : 'fallback'}`,
   )
 
-  const model = buildPanelModel(deps.storage, next, deps.runtime)
+  const tokenState = await resolveTokenStates(deps.credentials, next.modules)
+  const model = buildPanelModel(deps.storage, next, deps.runtime, tokenState)
   res.statusCode = 200
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')
@@ -599,6 +837,24 @@ async function handleRemoveWorkspace(
 
   deps.liveConfig.current = next
 
+  // Best-effort: drop the credentials this workspace owned, so a
+  // future `add_workspace` with the same id starts from a clean
+  // slate. `unset` is a no-op if the ref was never set, and the env-
+  // var shadow (if any) is left in place — that's the launching
+  // shell's problem, not ours.
+  if (deps.credentials) {
+    for (const ref of [tapdRefFor(name), gitlabRefFor(name)]) {
+      try {
+        await deps.credentials.unset(ref)
+        logger.info(`[auto-rd] cleared credential ${ref} for removed workspace ${name}`)
+      } catch (err) {
+        logger.warn(
+          `[auto-rd] failed to clear credential ${ref} for removed workspace ${name}: ${(err as Error).message}`,
+        )
+      }
+    }
+  }
+
   // Drop the storage records so the panel route's workspace and story
   // counts reflect the new state on the very next fetch. Stories are
   // keyed by moduleId; leaving them behind turns them into orphans the
@@ -636,7 +892,8 @@ async function handleRemoveWorkspace(
 
   logger.info(`[auto-rd] workspace removed: id=${name}`)
 
-  const model = buildPanelModel(deps.storage, next, deps.runtime)
+  const tokenState = await resolveTokenStates(deps.credentials, next.modules)
+  const model = buildPanelModel(deps.storage, next, deps.runtime, tokenState)
   res.statusCode = 200
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')
@@ -700,14 +957,78 @@ async function handleUpdateWorkspace(
     typeof payload.tapdWorkspaceId === 'string' && payload.tapdWorkspaceId.trim() !== ''
       ? payload.tapdWorkspaceId.trim()
       : existing.tapdWorkspaceId
-  const tapdApiToken =
-    typeof payload.tapdToken === 'string' && payload.tapdToken !== ''
+
+  // For tokens, the payload distinguishes:
+  //   - key absent (not sent)      -> keep existing (user did not touch the field)
+  //   - key present, value === ''  -> CLEAR (route through credentials.unset)
+  //   - key present, value !== ''  -> REPLACE (route through credentials.set)
+  // The previous implementation conflated "key absent" with "key empty"
+  // and silently dropped the user's intent to clear a token. That
+  // bug (also surfaced via issue #10) is fixed here so the routeToken
+  // helper can return a `cleared` outcome.
+  const tapdTokenInput =
+    'tapdToken' in payload && typeof payload.tapdToken === 'string'
       ? payload.tapdToken
-      : existing.tapdApiToken
-  const gitlabApiToken =
-    typeof payload.gitlabToken === 'string' && payload.gitlabToken !== ''
+      : undefined
+  const gitlabTokenInput =
+    'gitlabToken' in payload && typeof payload.gitlabToken === 'string'
       ? payload.gitlabToken
-      : existing.gitlabApiToken
+      : undefined
+
+  const tapdRoute = await routeTapdToken(tapdTokenInput ?? '', name, deps.credentials, logger)
+  const gitlabRoute = await routeGitlabToken(
+    gitlabTokenInput ?? '',
+    name,
+    deps.credentials,
+    logger,
+  )
+
+  // Translate the route outcome into the field value. `undefined`
+  // means "the user did not touch this field, keep existing".
+  let persistedTapdToken: string | undefined
+  if (tapdTokenInput === undefined) {
+    persistedTapdToken = existing.tapdApiToken
+  } else if (tapdRoute.kind === 'persisted') {
+    persistedTapdToken = tapdRoute.refName
+  } else if (tapdRoute.kind === 'cleared') {
+    persistedTapdToken = ''
+  } else if (tapdRoute.kind === 'fallback') {
+    persistedTapdToken = tapdRoute.literal
+  } else {
+    // rejected: leave the existing value intact, surface the error
+    persistedTapdToken = existing.tapdApiToken
+  }
+
+  let persistedGitlabToken: string | undefined
+  if (gitlabTokenInput === undefined) {
+    persistedGitlabToken = existing.gitlabApiToken
+  } else if (gitlabRoute.kind === 'persisted') {
+    persistedGitlabToken = gitlabRoute.refName
+  } else if (gitlabRoute.kind === 'cleared') {
+    persistedGitlabToken = ''
+  } else if (gitlabRoute.kind === 'fallback') {
+    persistedGitlabToken = gitlabRoute.literal
+  } else {
+    persistedGitlabToken = existing.gitlabApiToken
+  }
+
+  if (tapdRoute.kind === 'rejected' || gitlabRoute.kind === 'rejected') {
+    const rejectedFields: string[] = []
+    if (tapdRoute.kind === 'rejected') rejectedFields.push(`tapd: ${tapdRoute.error}`)
+    if (gitlabRoute.kind === 'rejected') rejectedFields.push(`gitlab: ${gitlabRoute.error}`)
+    res.statusCode = 422
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error: 'credential_write_rejected',
+        message: `credentials service refused to store: ${rejectedFields.join('; ')}. ` +
+          `If the matching DSH_* environment variable is set in the launching shell, unset it first.`,
+      }),
+    )
+    return
+  }
+
   const modelSelection =
     typeof payload.modelSelection === 'object' && payload.modelSelection !== null
       ? { ...(existing.modelSelection ?? {}), ...(payload.modelSelection as Record<string, string>) }
@@ -716,8 +1037,8 @@ async function handleUpdateWorkspace(
   const updatedModule = {
     ...existing,
     tapdWorkspaceId,
-    tapdApiToken,
-    gitlabApiToken,
+    tapdApiToken: persistedTapdToken,
+    gitlabApiToken: persistedGitlabToken,
     modelSelection,
   }
 
@@ -741,8 +1062,8 @@ async function handleUpdateWorkspace(
       await deps.storage.modules().put(name, {
         ...stored,
         tapdWorkspaceId,
-        tapdApiToken,
-        gitlabApiToken,
+        tapdApiToken: persistedTapdToken,
+        gitlabApiToken: persistedGitlabToken,
         modelSelection,
       })
     } catch (err) {
@@ -762,7 +1083,8 @@ async function handleUpdateWorkspace(
 
   logger.info(`[auto-rd] workspace updated: id=${name}`)
 
-  const model = buildPanelModel(deps.storage, next, deps.runtime)
+  const tokenState = await resolveTokenStates(deps.credentials, next.modules)
+  const model = buildPanelModel(deps.storage, next, deps.runtime, tokenState)
   res.statusCode = 200
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')

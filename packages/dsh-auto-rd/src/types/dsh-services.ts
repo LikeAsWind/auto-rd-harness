@@ -274,6 +274,84 @@ export interface SubagentsStartService {
   start(name: string, request: Record<string, unknown>): Promise<unknown>
 }
 
+// ---- credentials -----------------------------------------------------
+
+/**
+ * A credential reference name — a POSIX shell identifier such as
+ * `DSH_TAPD_API_TOKEN`. Branded for safety so the compiler refuses to
+ * pass arbitrary strings to `ctx.credentials` calls.
+ *
+ * The actual values are NEVER carried in the cordis patch tree. They
+ * live in `~/.dsh/.credentials.yaml` (managed by the
+ * `@deepseek-ai/dsh-credentials-local` provider that ships with the
+ * web profile). When that service is unavailable (headless profile),
+ * `credentials.resolve` falls back to `process.env[<name>]`.
+ */
+export type CredentialRef = string & { readonly __brand: 'CredentialRef' }
+
+export type CredentialSource = 'credentials-file' | 'process-env' | 'shadow' | 'unset'
+
+/**
+ * What `ctx.credentials.resolve` returns when the reference is known
+ * AND resolvable. `source` lets the caller distinguish "user set it
+ * explicitly" from "we fell through to env" without leaking the value.
+ */
+export interface ResolvedCredential {
+  readonly value: string
+  readonly source: Exclude<CredentialSource, 'unset'>
+}
+
+export interface CredentialDescriptor {
+  /** Whether any source (file or env) currently resolves this ref. */
+  readonly configured: boolean
+  /** Which layer won the last resolve, if any. */
+  readonly source?: CredentialSource
+  /** Whether this caller may write to the store. False while a read-only
+   *  shadow (typically the launching process env) takes precedence. */
+  readonly writable: boolean
+}
+
+/**
+ * The narrow shape we actually call. The real provider offers more
+ * (records / grant flows), but auto-rd only uses the reference half:
+ * setting, unsetting, resolving, and describing.
+ *
+ * Every method is async even when the underlying store is synchronous
+ * (the local provider hits disk), so the rest of the codebase can
+ * `await ctx.credentials.set(...)` uniformly.
+ */
+export interface CredentialsService {
+  /**
+   * Store `value` under `ref`. Rejects if the ref is invalid syntax
+   * (`isCredentialRefName` returns false) or if a read-only shadow
+   * (e.g. the launching shell still has the env var set to a non-empty
+   * value) takes precedence over the writable store.
+   */
+  set(ref: CredentialRef, value: string): Promise<void>
+
+  /**
+   * Remove `ref` from the store. No-op when absent. Same shadow rule
+   * as `set`. The env var, if set, is untouched.
+   */
+  unset(ref: CredentialRef): Promise<void>
+
+  /**
+   * Read the current value. Returns `undefined` when no source
+   * resolves the ref. `source` tells the caller whether the value
+   * came from the credentials file or the process env, so we can
+   * warn the user when their env-var override no longer matches
+   * what's in the file.
+   */
+  resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined>
+
+  /**
+   * Cheap "is it set?" probe — used by the panel to show the
+   * configured / not-configured indicator without ever surfacing the
+   * actual value to the browser.
+   */
+  describe(ref: CredentialRef): Promise<CredentialDescriptor>
+}
+
 // ---- Local StoryRecord re-export -------------------------------------
 
 export type { StoryRecord } from '../domain/schema.js'

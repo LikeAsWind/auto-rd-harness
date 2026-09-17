@@ -33,6 +33,7 @@ import { AgentProvider } from './services/agent-provider.js'
 import { StoryRunner } from './services/story-runner.js'
 import { StoryQueue } from './services/story-queue.js'
 import { recoverStories } from './services/recover.js'
+import { migrateStorageToCredentials } from './services/migrate-storage-credentials.js'
 import { StoryNotifierService } from './services/story-notifier.js'
 import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
@@ -186,7 +187,49 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     lastTapdPollAt: null as Date | null,
     lastTapdError: null as string | null,
   }
-  const services = startServices(ctx, storage, logger, liveConfig.current, runtime)
+
+  // Resolve the DSH credentials service ONCE at mount time. The
+  // service may be absent in headless profiles (no
+  // dsh-credentials-local mounted); the rest of the plugin tolerates
+  // `undefined` and falls back to the pre-#10 plaintext path.
+  const credentials = ctx.get('credentials' as never) as
+    | import('./types/dsh-services.js').CredentialsService
+    | undefined
+
+  const services = startServices(ctx, storage, logger, liveConfig.current, runtime, credentials)
+
+  // 3.5. Migrate legacy plaintext tokens from storage into the DSH
+  // credentials store (issue #10). Pre-#10 builds wrote the user's
+  // token directly into module.tapdApiToken / module.gitlabApiToken /
+  // config.tapdApiToken / config.gitlabApiToken. After this migration
+  // those fields hold reference names and the literal lives in
+  // `~/.dsh/.credentials.yaml`. The migration is idempotent and
+  // best-effort — a missing credentials service is a no-op.
+  void migrateStorageToCredentials(
+    storage,
+    liveConfig.current,
+    credentials,
+    logger,
+  )
+    .then((report) => {
+      const summary: string[] = []
+      if (report.modulesTouched.length > 0) {
+        summary.push(`${report.modulesTouched.length} module(s): ${report.modulesTouched.join(', ')}`)
+      }
+      if (report.globalTokensTouched.tapd) summary.push('global tapd token')
+      if (report.globalTokensTouched.gitlab) summary.push('global gitlab token')
+      if (report.skipped.length > 0) {
+        summary.push(`skipped ${report.skipped.length}: ${report.skipped.map((s) => s.ref).join(', ')}`)
+      }
+      if (summary.length > 0) {
+        logger.info(`[auto-rd] credentials migration: ${summary.join('; ')}`)
+      } else {
+        logger.info('[auto-rd] credentials migration: nothing to do')
+      }
+    })
+    .catch((err) => {
+      logger.error(`[auto-rd] credentials migration failed: ${(err as Error).message}`)
+    })
 
   // 4. Recover any in-flight stories from a previous run. We do this BEFORE
   // starting timers so StoryQueue picks them up cleanly on its first tick.
@@ -286,6 +329,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         logger,
         getConfig: () => liveConfig.current,
         runtime,
+        credentials,
         retryMs: WEBSERVER_RETRY_MS,
         maxAttempts: WEBSERVER_RETRY_CAP,
       })
@@ -327,7 +371,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         logger,
         liveConfig,
         runtime,
-        startServices: (cfg) => startServices(ctx, storage, logger, cfg, runtime),
+        startServices: (cfg) => startServices(ctx, storage, logger, cfg, runtime, credentials),
         stopServices: (svcs) => {
           svcs.queue.stop()
           svcs.poller.stop()
@@ -336,6 +380,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         currentServices: services,
         workspaceController,
         sessionTitle,
+        credentials,
       })
       return () => {
         if (dispose) dispose()
@@ -381,6 +426,7 @@ function startServices(
   logger: Logger,
   config: Config,
   runtime: { lastTapdPollAt: Date | null; lastTapdError: string | null },
+  credentials: import('./types/dsh-services.js').CredentialsService | undefined,
 ): {
   trajectory: TrajectoryRecorder
   workspaceManager: WorkspaceManager
@@ -409,12 +455,14 @@ function startServices(
     trajectory,
     sessions,
     sessionTitle,
+    credentials,
   })
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })
   const poller = new TapdPoller(ctx, {
     storage,
     logger,
     config,
+    credentials,
     onTickEnd: ({ at, error }) => {
       runtime.lastTapdPollAt = at
       runtime.lastTapdError = error ? error.message : null

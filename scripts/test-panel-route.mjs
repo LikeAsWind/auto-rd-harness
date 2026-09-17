@@ -302,10 +302,24 @@ for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
   // the new state.
   const ws = fakeWebServer()
   let currentConfig = { tapdApiToken: '', gitlabApiToken: '', workspaceRoot: '', modules: [] }
+  // Mock credentials service: tapd/gitlab are configured iff the
+  // current live config has the field. Mirrors the test-ui-panel
+  // shim (`tokenStateFromConfig`) — keeps the panel route's
+  // post-#10 token probe aligned with the test's intent.
+  const credentials = {
+    describe: async (ref) => ({
+      configured:
+        ref === 'DSH_TAPD_API_TOKEN'
+          ? !!(currentConfig.tapdApiToken && currentConfig.tapdApiToken.length > 0)
+          : !!(currentConfig.gitlabApiToken && currentConfig.gitlabApiToken.length > 0),
+      writable: true,
+    }),
+  }
   registerPanelRoute(ctxWith(ws), {
     storage: fakeStorage({ stories: STORIES, modules: MODULES }),
     logger: silentLogger(),
     getConfig: () => currentConfig,
+    credentials,
   })
 
   // Empty config: setupRequired must be true.
@@ -370,6 +384,29 @@ const silentLog = silentLogger()
   let newSvcsStartCount = 0
   let stopCount = 0
 
+  // Mock credentials service: tapd/gitlab are configured iff the
+  // live config has the field. Mirrors the test-ui-panel shim
+  // (`tokenStateFromConfig`). The reconfigure route rewrites
+  // plaintext tokens into ref names and calls `credentials.set`;
+  // we record the writes so the next describe returns configured.
+  const credStore = new Map()
+  const credentials = {
+    describe: async (ref) => ({
+      configured: credStore.has(ref) && credStore.get(ref).length > 0,
+      writable: true,
+    }),
+    resolve: async (ref) => credStore.get(ref) ?? '',
+    set: async (ref, value) => {
+      if (!ref || !ref.match(/^[A-Z][A-Z0-9_]{0,63}$/)) {
+        throw new Error('not a credential ref name')
+      }
+      credStore.set(ref, value)
+    },
+    unset: async (ref) => {
+      credStore.delete(ref)
+    },
+  }
+
   // minimal services fake
   const oldSvcs = {
     queue: { start: () => {}, stop: () => { stopCount += 1 } },
@@ -388,6 +425,7 @@ const silentLog = silentLogger()
     logger: silentLog,
     liveConfig,
     runtime,
+    credentials,
     startServices: (cfg) => {
       // Pretend a successful build.
       return newSvcs
@@ -416,7 +454,18 @@ const silentLog = silentLogger()
   check('reconfigure: POST body is application/json', (res.headers['content-type'] ?? '').includes('application/json'))
   const body = JSON.parse(res.body)
   check('reconfigure: body.ok is true', body.ok === true)
-  check('reconfigure: liveConfig was swapped', liveConfig.current.tapdApiToken === 'new-tok')
+  // After issue #10, the reconfigure route routes plaintext tokens
+  // through the credentials store and rewrites the live config field
+  // to a ref name. The plaintext value is no longer mirrored back.
+  check(
+    'reconfigure: liveConfig was swapped to a tapd ref name',
+    liveConfig.current.tapdApiToken === 'DSH_TAPD_API_TOKEN',
+    String(liveConfig.current.tapdApiToken),
+  )
+  check(
+    'reconfigure: the literal tapd token now lives in the credentials store',
+    (await credentials.resolve('DSH_TAPD_API_TOKEN')) === 'new-tok',
+  )
   check('reconfigure: setupRequired is now false', body.model.health.setupRequired === false)
   check('reconfigure: stopServices was called on the old services', stopCount === 1)
   check('reconfigure: new services were started', newSvcsStartCount === 1)
