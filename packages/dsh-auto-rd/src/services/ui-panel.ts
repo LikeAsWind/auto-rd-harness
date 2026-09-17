@@ -73,6 +73,15 @@ export interface PanelModule {
   overflow: number
   /** Stories that are neither completed nor failed. */
   inFlight: number
+  /**
+   * Per-workspace settings, surfaced to the client so the expanded
+   * workspace panel can offer an edit form. Empty values mean "inherit
+   * the global config" (see services/story-runner.ts + tapd-poller.ts).
+   */
+  tapdWorkspaceId?: string
+  tapdApiToken?: string
+  gitlabApiToken?: string
+  modelSelection?: Record<string, string>
 }
 
 /**
@@ -294,6 +303,11 @@ export function buildPanelModel(
       })),
       overflow: Math.max(0, all.length - visible.length),
       inFlight,
+      // Per-workspace settings (empty = inherit global).
+      tapdWorkspaceId: m.tapdWorkspaceId ?? '',
+      tapdApiToken: m.tapdApiToken ?? '',
+      gitlabApiToken: m.gitlabApiToken ?? '',
+      modelSelection: m.modelSelection ?? {},
     }
   })
 

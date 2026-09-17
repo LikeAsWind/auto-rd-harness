@@ -46,6 +46,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ConfigSchema, normalizeConfig, type Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { Logger } from '../utils/logger.js'
+import type { WorkspaceControllerService, SessionTitleService } from '../types/dsh-services.js'
 import { buildPanelModel, renderPanelText } from './ui-panel.js'
 
 export const RECONFIGURE_ROUTE_PATH = '/auto-rd/reconfigure'
@@ -88,6 +89,19 @@ export interface ReconfigureRouteDeps {
    * handler to call `stopServices` against.
    */
   currentServices: AutoRdServices
+  /**
+   * Optional DSH workspace controller. When present, add_workspace also
+   * adopts the module's directory as a DSH workspace so the auto-rd
+   * module and the DSH workspace stay 1:1. Absent in headless profiles
+   * (no DSH workspace service) — the module still registers, just
+   * without the DSH binding.
+   */
+  workspaceController?: WorkspaceControllerService
+  /**
+   * Optional DSH session-title service, used to set the story session's
+   * display title after it is created. Absent in headless profiles.
+   */
+  sessionTitle?: SessionTitleService
 }
 
 /** WebServer contract — same as panel-route. */
@@ -184,6 +198,11 @@ export function registerReconfigureRoute(
 
     if (action === 'remove_workspace') {
       await handleRemoveWorkspace(payload, res, deps, logger)
+      return
+    }
+
+    if (action === 'update_workspace') {
+      await handleUpdateWorkspace(payload, res, deps, logger)
       return
     }
 
@@ -360,6 +379,11 @@ async function handleAddWorkspace(
   const path = typeof payload.path === 'string' ? payload.path.trim() : ''
   const tapdToken = typeof payload.tapdToken === 'string' ? payload.tapdToken : ''
   const gitlabToken = typeof payload.gitlabToken === 'string' ? payload.gitlabToken : ''
+  const tapdWorkspaceId = typeof payload.tapdWorkspaceId === 'string' ? payload.tapdWorkspaceId.trim() : ''
+  const modelSelection =
+    typeof payload.modelSelection === 'object' && payload.modelSelection !== null
+      ? (payload.modelSelection as Record<string, string>)
+      : {}
 
   if (!name || !path) {
     res.statusCode = 400
@@ -401,13 +425,14 @@ async function handleAddWorkspace(
         // placeholder that satisfies the schema validator.
         repoUrl: source === 'git' ? path : 'local://' + name,
         defaultBranch: 'main',
+        // Per-workspace overrides. Empty values inherit the global
+        // config at use time (see tapd-poller / story-runner).
+        tapdWorkspaceId,
+        tapdApiToken: tapdToken,
+        gitlabApiToken: gitlabToken,
+        modelSelection,
       },
     ],
-    // Per-workspace token overrides. Empty string == fall back to
-    // shell env, so an empty value here MUST NOT clobber the existing
-    // top-level token — only non-empty payloads change the top-level.
-    tapdApiToken: tapdToken ? tapdToken : current.tapdApiToken,
-    gitlabApiToken: gitlabToken ? gitlabToken : current.gitlabApiToken,
   }
 
   // Stop existing services BEFORE swapping the config so the poller
@@ -432,14 +457,50 @@ async function handleAddWorkspace(
       defaultBranch: 'main',
       workspacePath: pathResolve(next.workspaceRoot || '.', name),
       createdAt: new Date().toISOString(),
-      // Extra fields are not on the ModuleRecord schema today but the
-      // storage layer is forgiving; if a future schema validates these,
-      // surface them here.
+      tapdWorkspaceId,
+      tapdApiToken: tapdToken,
+      gitlabApiToken: gitlabToken,
+      modelSelection,
     })
   } catch (err) {
     logger.error(
       `[auto-rd] failed to seed module ${name}: ${(err as Error).message}`,
     )
+  }
+
+  // Adopt the module's directory as a DSH workspace (1:1 binding).
+  // Only for a local path we can resolve to an absolute directory now —
+  // a git URL has not been cloned yet, so the DSH workspace is created
+  // later, when the clone lands (see workspace-manager). When the
+  // controller is absent (headless profile) we skip silently.
+  let dsWorkspaceId = ''
+  if (source === 'local' && deps.workspaceController) {
+    try {
+      const absPath = pathResolve(path)
+      const result = await deps.workspaceController.create({ path: absPath })
+      dsWorkspaceId = result.workspace.workspaceId
+      logger.info(
+        `[auto-rd] adopted DSH workspace ${dsWorkspaceId} for module ${name} (${result.created ? 'created' : 'existing'})`,
+      )
+    } catch (err) {
+      // Non-fatal: the auto-rd module still registers; the DSH binding
+      // is retried on a later update_workspace.
+      logger.warn(
+        `[auto-rd] failed to adopt DSH workspace for module ${name}: ${(err as Error).message}`,
+      )
+    }
+  }
+
+  // Persist the DSH workspace binding if we got one.
+  if (dsWorkspaceId) {
+    try {
+      const stored = deps.storage.modules().get(name)
+      if (stored) {
+        await deps.storage.modules().put(name, { ...stored, dsWorkspaceId })
+      }
+    } catch (err) {
+      logger.warn(`[auto-rd] failed to persist dsWorkspaceId for ${name}: ${(err as Error).message}`)
+    }
   }
 
   try {
@@ -572,6 +633,132 @@ async function handleRemoveWorkspace(
         ok: true,
         generatedAt: new Date().toISOString(),
         removed: name,
+        model,
+        text: renderPanelText(model),
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+/**
+ * Update an existing workspace's per-workspace settings in-place:
+ * TAPD workspace id, TAPD token, GitLab token, and per-role model
+ * selection. Any field omitted (or empty) is left unchanged — the UI
+ * sends only what the user edited.
+ *
+ * Body shape:
+ *   { action: 'update_workspace', name: string, tapdWorkspaceId?,
+ *     tapdToken?, gitlabToken?, modelSelection? }
+ *
+ * Same stop / swap / restart shape as add/remove, then re-seeds the
+ * module record in storage so the new values persist across restarts.
+ */
+async function handleUpdateWorkspace(
+  payload: Record<string, unknown>,
+  res: ServerResponse,
+  deps: ReconfigureRouteDeps,
+  logger: Logger,
+): Promise<void> {
+  const name = typeof payload.name === 'string' ? payload.name.trim() : ''
+  if (!name) {
+    res.statusCode = 400
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(
+      JSON.stringify({ ok: false, error: 'invalid_workspace', message: 'name is required' }),
+    )
+    return
+  }
+
+  const current = deps.liveConfig.current
+  const idx = current.modules.findIndex((m) => m.id === name)
+  if (idx < 0) {
+    res.statusCode = 404
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(
+      JSON.stringify({ ok: false, error: 'workspace_not_found', message: `workspace "${name}" does not exist` }),
+    )
+    return
+  }
+
+  const existing = current.modules[idx]
+  const tapdWorkspaceId =
+    typeof payload.tapdWorkspaceId === 'string' && payload.tapdWorkspaceId.trim() !== ''
+      ? payload.tapdWorkspaceId.trim()
+      : existing.tapdWorkspaceId
+  const tapdApiToken =
+    typeof payload.tapdToken === 'string' && payload.tapdToken !== ''
+      ? payload.tapdToken
+      : existing.tapdApiToken
+  const gitlabApiToken =
+    typeof payload.gitlabToken === 'string' && payload.gitlabToken !== ''
+      ? payload.gitlabToken
+      : existing.gitlabApiToken
+  const modelSelection =
+    typeof payload.modelSelection === 'object' && payload.modelSelection !== null
+      ? { ...(existing.modelSelection ?? {}), ...(payload.modelSelection as Record<string, string>) }
+      : existing.modelSelection
+
+  const updatedModule = {
+    ...existing,
+    tapdWorkspaceId,
+    tapdApiToken,
+    gitlabApiToken,
+    modelSelection,
+  }
+
+  const next: Config = {
+    ...current,
+    modules: current.modules.map((m, i) => (i === idx ? updatedModule : m)),
+  }
+
+  try {
+    deps.stopServices(deps.currentServices)
+  } catch (err) {
+    logger.error(`[auto-rd] failed to stop old services during update_workspace: ${(err as Error).message}`)
+  }
+
+  deps.liveConfig.current = next
+
+  // Persist the updated module record back to storage.
+  const stored = deps.storage.modules().get(name)
+  if (stored) {
+    try {
+      await deps.storage.modules().put(name, {
+        ...stored,
+        tapdWorkspaceId,
+        tapdApiToken,
+        gitlabApiToken,
+        modelSelection,
+      })
+    } catch (err) {
+      logger.error(`[auto-rd] failed to update module ${name} in storage: ${(err as Error).message}`)
+    }
+  }
+
+  try {
+    const newServices = deps.startServices(next)
+    deps.currentServices = newServices
+    newServices.queue.start()
+    newServices.poller.start()
+    newServices.notifier.start()
+  } catch (err) {
+    logger.error(`[auto-rd] failed to start new services during update_workspace: ${(err as Error).message}`)
+  }
+
+  logger.info(`[auto-rd] workspace updated: id=${name}`)
+
+  const model = buildPanelModel(deps.storage, next, deps.runtime)
+  res.statusCode = 200
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(
+    JSON.stringify(
+      {
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        updated: name,
         model,
         text: renderPanelText(model),
       },
