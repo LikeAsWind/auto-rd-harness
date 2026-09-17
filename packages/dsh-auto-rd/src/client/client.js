@@ -187,9 +187,9 @@ window.__ModuleLoader__.load({
       // `[open]`.
       '.auto-rd-ws-row summary {',
       '  display: grid;',
-      '  grid-template-columns: 16px 1fr auto auto;',
+      '  grid-template-columns: 16px minmax(0, 1fr) auto auto auto;',
       '  align-items: center;',
-      '  gap: 14px;',
+      '  gap: 12px;',
       '  padding: 14px 16px;',
       '  border: 1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.10));',
       '  border-radius: 7px;',
@@ -1009,6 +1009,8 @@ window.__ModuleLoader__.load({
       var onRemove = props.onRemove
       var onUpdate = props.onUpdate
       var onStoryClick = props.onStoryClick
+      var settingsOpen = !!props.settingsOpen
+      var onToggleSettings = props.onToggleSettings
 
       var dotStyle = {
         width: 8,
@@ -1082,6 +1084,9 @@ window.__ModuleLoader__.load({
                 color: styles.labelSecondary,
                 textAlign: 'right',
                 whiteSpace: 'nowrap',
+                maxWidth: '40%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
               },
             },
             progress.length
@@ -1102,8 +1107,38 @@ window.__ModuleLoader__.load({
             'button',
             {
               type: 'button',
+              className: 'auto-rd-ws-settings',
+              title: settingsOpen ? '收起配置' : '编辑配置',
+              'aria-pressed': settingsOpen ? 'true' : 'false',
+              'aria-label': settingsOpen ? '收起配置' : '编辑配置',
+              onClick: function (e) {
+                e.preventDefault()
+                e.stopPropagation()
+                if (typeof onToggleSettings === 'function') onToggleSettings()
+              },
+              style: {
+                width: 22,
+                height: 22,
+                padding: 0,
+                background: settingsOpen ? styles.panelBg : 'transparent',
+                border: '1px solid ' + (settingsOpen ? styles.borderL2 : styles.borderL3),
+                borderRadius: 4,
+                color: settingsOpen ? styles.labelPrimary : styles.labelTertiary,
+                fontSize: 12,
+                lineHeight: '20px',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+              },
+            },
+            '⚙',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
               className: 'auto-rd-ws-remove',
               title: '删除工作空间(不删除本地代码)',
+              'aria-label': '删除工作空间',
               onClick: function (e) {
                 e.preventDefault()
                 e.stopPropagation()
@@ -1131,6 +1166,9 @@ window.__ModuleLoader__.load({
           onUpdate: onUpdate,
           onStoryClick: onStoryClick,
         }),
+        settingsOpen
+          ? h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate })
+          : null,
       )
 
       function statusColor(status) {
@@ -1637,7 +1675,6 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
-        h(WorkspaceSettingsForm, { workspace: ws, onUpdate: onUpdate }),
       )
     }
 
@@ -1990,6 +2027,8 @@ window.__ModuleLoader__.load({
       var onUpdate = props.onUpdate
       var onStoryClick = props.onStoryClick
       var expandedOverrides = props.expandedOverrides || {}
+      var settingsOpenId = props.settingsOpenId
+      var onToggleSettings = props.onToggleSettings
 
       if (!workspaces || workspaces.length === 0) {
         return h(
@@ -2019,12 +2058,17 @@ window.__ModuleLoader__.load({
           workspaces.map(function (ws) {
             var hasOverride = Object.prototype.hasOwnProperty.call(expandedOverrides, ws.id)
             var defaultOpen = hasOverride ? !!expandedOverrides[ws.id] : workspaceNeedsAttention(ws)
+            var isSettingsOpen = settingsOpenId === ws.id
             return h(WorkspaceRow, {
               key: ws.id,
               workspace: ws,
               defaultOpen: defaultOpen,
+              settingsOpen: isSettingsOpen,
               onToggle: function () {
                 if (typeof props.onToggleExpanded === 'function') props.onToggleExpanded(ws.id)
+              },
+              onToggleSettings: function () {
+                if (typeof onToggleSettings === 'function') onToggleSettings(ws.id)
               },
               onRemove: function (id) {
                 if (typeof onRemove === 'function') onRemove(id)
@@ -2388,6 +2432,12 @@ window.__ModuleLoader__.load({
       // explicitly toggled that workspace, so their preference is
       // remembered across polls.
       var expandedOverrides = React.useState({})
+      // settingsOpen tracks which workspace the user has explicitly
+      // expanded the settings form for. Distinct from the
+      // <details>/<summary> row expansion: clicking the row caret
+      // shows stories, clicking the gear button shows the settings
+      // form. Either can be open without the other.
+      var settingsOpen = React.useState(null)
       // Selected story drives the detail view (issue #8). When set, the
       // main panel renders StoryDetail instead of WorkspaceList. The
       // selected story id is remembered across re-renders; clicking
@@ -2408,6 +2458,8 @@ window.__ModuleLoader__.load({
       var setAddOpen = addOpen[1]
       var expandedOverridesValue = expandedOverrides[0]
       var setExpandedOverrides = expandedOverrides[1]
+      var settingsOpenValue = settingsOpen[0]
+      var setSettingsOpen = settingsOpen[1]
       var selectedStoryIdValue = selectedStoryId[0]
       var setSelectedStoryId = selectedStoryId[1]
 
@@ -2428,6 +2480,10 @@ window.__ModuleLoader__.load({
           next[id] = !cur
           return next
         })
+      }
+
+      function toggleSettings(id) {
+        setSettingsOpen(function (cur) { return cur === id ? null : id })
       }
 
       // Derive the workspaces[] shape that the UI consumes from the host's
@@ -2556,7 +2612,9 @@ window.__ModuleLoader__.load({
         return h(WorkspaceList, {
           workspaces: workspaces,
           expandedOverrides: expandedOverridesValue,
+          settingsOpenId: settingsOpenValue,
           onToggleExpanded: toggleExpanded,
+          onToggleSettings: toggleSettings,
           onRefresh: refresh,
           onRemove: removeWorkspace,
           onUpdate: refresh,
@@ -2624,6 +2682,12 @@ window.__ModuleLoader__.load({
                 delete next[id]
                 return next
               })
+              // Same for the settings panel — if it was open for this
+              // workspace, the panel is now dangling. The render path
+              // would already short-circuit (the workspace is gone), but
+              // we clear the state so reopening another workspace does
+              // not see a stale id.
+              setSettingsOpen(function (cur) { return cur === id ? null : cur })
               refresh(result.body)
             } else {
               setRemoveError(

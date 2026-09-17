@@ -109,6 +109,12 @@ function someElement(node, pred) {
   return found
 }
 
+function findElement(node, pred) {
+  let found = null
+  walk(node, (el) => { if (found == null && pred(el)) found = el })
+  return found
+}
+
 function expandTree(node) {
   if (node == null || node === false) return node
   if (Array.isArray(node)) return node.map(expandTree).filter((n) => n != null && n !== false)
@@ -187,7 +193,7 @@ async function renderAndReread(model) {
   const { shim, exports, panel } = renderWithFetch(model)
   await settleFetch()
   shim.resetCursor()
-  return { tree: expandTree(panel()), shim, exports }
+  return { tree: expandTree(panel()), shim, exports, panel }
 }
 
 async function settleFetch() {
@@ -326,7 +332,7 @@ const ATTENTION_MODEL = {
 }
 
 {
-  const { tree } = await renderAndReread(ATTENTION_MODEL)
+  const { tree, panel, shim } = await renderAndReread(ATTENTION_MODEL)
 
   // #7: each workspace row is a <details> with an inline summary.
   const wsRows = []
@@ -341,6 +347,44 @@ const ATTENTION_MODEL = {
   const healthyOpen = wsRows.filter((r) => (r.props.className || '').includes('is-open')).length > 1
   check('#7: blocked workspace auto-expands (is-open)', haltedOpen)
   check('#7: healthy workspace does NOT auto-expand', !healthyOpen)
+
+  // #7 follow-up: the settings form is NOT auto-shown with the row.
+  // It lives behind its own gear button next to the delete × so the
+  // user can review or edit workspace config without flipping the
+  // row's open state.
+  const settingsButton = findElement(tree, (el) =>
+    el.props && el.props.className === 'auto-rd-ws-settings',
+  )
+  check('#7: row carries a settings (gear) button', !!settingsButton)
+  const settingsFormVisible = someElement(tree, (el) => {
+    // WorkspaceSettingsForm renders a top-level "配置" heading inside
+    // its container; if any element under the tree carries that text,
+    // the form is currently shown. The default render should NOT.
+    return el && el.children && Array.isArray(el.children)
+      ? el.children.some((c) => typeof c === 'string' && c === '配置')
+      : false
+  })
+  check('#7: settings form is NOT auto-opened by default', !settingsFormVisible)
+
+  // #7 follow-up: clicking the gear button opens the settings form.
+  // We invoke the React handler directly (the test shim's React just
+  // runs onClick as a plain callback) and re-read the tree. The shim
+  // re-uses state slots only when cursor is reset, so we have to
+  // reset before re-rendering — the original `renderAndReread` does
+  // the same thing after the fetch resolves.
+  if (settingsButton && typeof settingsButton.props.onClick === 'function') {
+    settingsButton.props.onClick({ preventDefault() {}, stopPropagation() {} })
+    shim.resetCursor()
+    const after = expandTree(panel())
+    const settingsNowVisible = someElement(after, (el) => {
+      return el && el.children && Array.isArray(el.children)
+        ? el.children.some((c) => typeof c === 'string' && c === '配置')
+        : false
+    })
+    check('#7: clicking the gear button opens the settings form', settingsNowVisible)
+  } else {
+    check('#7: clicking the gear button opens the settings form', false, 'no settingsButton.props.onClick')
+  }
 
   // #7: completed stories fold into a <details> summary line; the
   // user can still expand them.
