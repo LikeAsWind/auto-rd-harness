@@ -2536,9 +2536,17 @@ window.__ModuleLoader__.load({
           .then(function (result) {
             setConfirmRemove(null)
             if (result.ok && result.body && result.body.ok) {
-              // Collapse the row we just removed so a stale expansion
-              // does not point at a workspace that no longer exists.
-              if (expandedIdValue === id) setExpandedId(null)
+              // Drop the user's remembered open/closed preference for
+              // the removed workspace; otherwise the override hangs
+              // around in state pointing at a workspace that no longer
+              // exists. `refresh` then rebuilds the list from the
+              // host's response.
+              setExpandedOverrides(function (prev) {
+                if (!prev || !Object.prototype.hasOwnProperty.call(prev, id)) return prev
+                var next = Object.assign({}, prev)
+                delete next[id]
+                return next
+              })
               refresh(result.body)
             } else {
               setRemoveError(
