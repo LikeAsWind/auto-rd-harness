@@ -21,6 +21,7 @@
     "test:probe": "node scripts/test-project-probe.mjs",
     "test:plan": "node scripts/test-plan-builder.mjs",
     "test:clarify": "node scripts/test-clarify.mjs",
+    "test:resolution": "node scripts/test-resolution.mjs",
     "test:spec": "node scripts/test-spec-builder.mjs",
     "test:design": "node scripts/test-design-loop.mjs",
     "test:storage": "node scripts/test-storage-adapter.mjs",

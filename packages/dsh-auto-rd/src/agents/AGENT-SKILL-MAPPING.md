@@ -129,7 +129,8 @@
 | Agent | 借鉴的 Patterns（带 ID） | Pattern 总数 |
 |---|---|---|
 | **ContextAgent** | W-1（Step 0 Detect） / W-2（Native Tools First） / W-3（Verify Clean Baseline） | 3 |
-| **ClarificationAgent** | B-1（Three Paths） / B-2（One Question） / B-3（Multiple-Choice） / B-4（HARD-GATE） / G-1（Grill Relentlessly） | 5 |
+| **ClarificationAgent** | B-1（Three Paths） / B-2（One Question） / B-3（Multiple-Choice） / G-1（Grill Relentlessly） | 4 |
+| **ResolutionAgent** | SD-1（Rulings, Not Stalls） / SD-7（Ledger Cross-Compaction） / SD-8（Hand Artifacts As Files） | 3 |
 | **BrainstormAgent** | B-5（Propose 2-3） / B-6（Lead With Recommended） / B-7（YAGNI Ruthlessly） | 3 |
 | **CriticAgent** | CR-3（Spec Line-by-Line） / RC-2（Severity Scale） / RC-4（Reviewer Can Be Wrong） | 3 |
 | **DecisionAgent** | SD-1（Rulings, Not Stalls） / SD-7（Ledger Cross-Compaction） / PL-7（Execution Handoff） / RC-4（Reviewer Can Be Wrong） | 4 |
@@ -158,12 +159,11 @@
 | **CR-5: Fowler 12** | 2 | ReviewAgent, FinalVerifyAgent |
 | **RC-2: Severity Scale** | 2 | CriticAgent, ReviewAgent |
 | **RC-4: Reviewer Can Be Wrong** | 2 | DecisionAgent, ReviewAgent |
-| **SD-7: Ledger** | 2 | DecisionAgent, FinalVerifyAgent |
+| **SD-7: Ledger** | 3 | DecisionAgent, FinalVerifyAgent, ResolutionAgent |
 | **F-1: Re-Run on Integration Tree** | 2 | VerificationAgent, FinalVerifyAgent |
 | **PL-5: No Placeholders** | 2 | SpecAgent, PlannerAgent |
 | **PL-7: Execution Handoff** | 1 | DecisionAgent |
 | **B-2: One Question At A Time** | 1（但 G-2 也类似） | ClarificationAgent |
-| **B-4: HARD-GATE** | 1 | ClarificationAgent |
 | **T-1: Iron Law (No Code Without Test)** | 1 | ImplementationAgent |
 | **T-4: Code Before Test? Delete It** | 3 | ImplementationAgent, TestAgent, FixAgent |
 | **D-1: Iron Law (No Fix Without Root Cause)** | 1 | FixAgent |

@@ -120,6 +120,8 @@ const { recoverStories } = await import(
   await f.put('dead', { id: 'dead', moduleId: 'payment', state: 'failed', updatedAt: 'old', retryCount: 0 })
   await f.put('halted', { id: 'halted', moduleId: 'payment', state: 'blocked', updatedAt: 'old', retryCount: 0 })
   await f.put('queued', { id: 'queued', moduleId: 'payment', state: 'pending', updatedAt: 'old', retryCount: 5 })
+  await f.put('delivered', { id: 'delivered', moduleId: 'payment', state: 'delivery_ready', updatedAt: 'old', retryCount: 0 })
+  await f.put('mropen', { id: 'mropen', moduleId: 'payment', state: 'mr_opened', updatedAt: 'old', retryCount: 0 })
 
   const result = await recoverStories(f.storage, f.logger, new Set(['payment']), f.trajectory)
 
@@ -127,6 +129,8 @@ const { recoverStories } = await import(
   check('recover: completed left alone', dump.get('done').state === 'completed')
   check('recover: failed left alone', dump.get('dead').state === 'failed')
   check('recover: blocked left alone', dump.get('halted').state === 'blocked')
+  check('recover: delivery_ready left alone', dump.get('delivered').state === 'delivery_ready')
+  check('recover: mr_opened left alone', dump.get('mropen').state === 'mr_opened')
   check(
     'recover: pending left alone (already in queue)',
     dump.get('queued').state === 'pending',

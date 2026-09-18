@@ -1,5 +1,5 @@
 /**
- * AgentProvider — dispatches SubAgents for auto-rd's 13 specialized roles.
+ * AgentProvider — dispatches SubAgents for auto-rd's 14 specialized roles.
  *
  * This is the bridge between StoryRunner (state machine) and DSH's agent
  * factory. Each persona in src/agents/ registers here.
@@ -46,6 +46,7 @@ import type {
 } from '../types/dsh-services.js'
 import { ContextAgent } from '../agents/context.js'
 import { ClarificationAgent } from '../agents/clarification.js'
+import { ResolutionAgent } from '../agents/resolution.js'
 import { BrainstormAgent, type BrainstormVariation } from '../agents/brainstorm.js'
 import { CriticAgent } from '../agents/critic.js'
 import { DecisionAgent } from '../agents/decision.js'
@@ -69,6 +70,7 @@ import {
 import { probeProject } from './project-probe.js'
 import { buildPlan } from './plan-builder.js'
 import { clarifyStory } from './clarify.js'
+import { buildResolution } from './resolution-builder.js'
 import { buildSpec, generateAcceptanceCriteria } from './spec-builder.js'
 import {
   buildProposals,
@@ -501,6 +503,7 @@ export class AgentProvider {
   private registerBuiltins(): void {
     this.register('context', new ContextAgent(), runContextHandler)
     this.register('clarification', new ClarificationAgent(), runClarificationHandler)
+    this.register('resolution', new ResolutionAgent(), runResolutionHandler)
     // BrainstormAgent is special: the same name is dispatched three times in
     // parallel with different `variation` values. The dispatch path picks the
     // right AgentSpec per call rather than registering three separate keys.
@@ -682,9 +685,9 @@ async function runClarificationHandler(
 
   // ---- Real ambiguity detection ----
   //
-  // This is the HARD-GATE (B-4). A blocking finding must park the
-  // story for a human answer rather than letting the ambiguity flow
-  // into implementation.
+  // Clarification ASKS; the Resolution role ANSWERS. A blocking finding
+  // becomes a question the resolver records a decision for, NOT a reason
+  // to park the story. The only unresolvable case is an empty description.
   const result = clarifyStory({
     title: story.title,
     description: story.description,
@@ -692,7 +695,18 @@ async function runClarificationHandler(
   })
 
   const bounded = result.classification === 'bounded'
-  const sentinel = bounded ? '[CLARIFICATION_COMPLETE]' : '[CLARIFICATION_BLOCKED]'
+  // The sentinel contract is the single source of truth the runner reads:
+  //   - bounded       -> [CLARIFICATION_COMPLETE]
+  //   - questions     -> [CLARIFICATION_QUESTIONS: N]
+  //   - no description-> [CLARIFICATION_BLOCKED: empty description]
+  // An empty description is the ONLY unresolvable case: even a
+  // deterministic resolver cannot ground a decision in nothing.
+  const emptyDescription = (story.description ?? '').trim().length === 0
+  const sentinel = emptyDescription
+    ? '[CLARIFICATION_BLOCKED: empty description]'
+    : bounded
+      ? '[CLARIFICATION_COMPLETE]'
+      : `[CLARIFICATION_QUESTIONS: ${result.blocking.length}]`
 
   const questionLines =
     result.blocking.length > 0
@@ -726,9 +740,11 @@ async function runClarificationHandler(
       : null,
     ``,
     `## Handoff`,
-    bounded
-      ? `Zero blocking questions; orchestrator may proceed to \`brainstorm\`.`
-      : `${result.blocking.length} blocking question(s) must be answered by a human before the pipeline can continue. The orchestrator will park this story in \`blocked\`.`,
+    emptyDescription
+      ? `No description to grill — this story cannot be resolved automatically.`
+      : bounded
+        ? `Zero questions; the resolver will record an empty decision ledger, then \`brainstorm\` runs.`
+        : `${result.blocking.length} question(s) will be answered by the resolver role — see \`02b-resolution.md\` next.`,
     ``,
     sentinel,
   ]
@@ -737,16 +753,61 @@ async function runClarificationHandler(
 
   writeFileSync(join(req.artifactsDir, '02-clarification.md'), report, 'utf-8')
 
-  if (!bounded) {
-    const first = result.blocking[0]
+  // Only a story with NO description is genuinely unresolvable — even a
+  // deterministic resolver cannot ground a decision in nothing. Every
+  // other finding is handed to the resolver (success path).
+  if (emptyDescription) {
     return {
       status: 'blocked',
-      reason: `${result.blocking.length} blocking question(s): ${first.question}`,
+      reason: 'empty description — nothing to resolve',
     }
   }
   return {
     status: 'success',
-    summary: `Clarification bounded (${result.criteria.length} criteria, 0 blocking questions).`,
+    summary: bounded
+      ? `Clarification bounded (${result.criteria.length} criteria, 0 questions).`
+      : `${result.blocking.length} question(s) — hand to resolver.`,
+  }
+}
+
+async function runResolutionHandler(
+  req: AgentDispatchRequest,
+  deps: AgentProviderDeps,
+): Promise<AgentDispatchResult> {
+  const story = req.inputs.story as {
+    id: string
+    title: string
+    description?: string
+    acceptanceCriteria?: string
+  }
+  deps.logger.info(`ResolutionAgent running for story ${story.id}`)
+
+  // ---- Deterministic arbitration ----
+  //
+  // The resolver reads the questions the Clarification stage already
+  // produced and resolves each one with the least-invention reading
+  // (see resolution-builder.ts). The model-backed path does the same
+  // with real judgement; this is the "advance without a model" path.
+  const clarify = clarifyStory({
+    title: story.title,
+    description: story.description ?? '',
+    acceptanceCriteria: story.acceptanceCriteria,
+  })
+
+  const resolution = buildResolution(
+    {
+      title: story.title,
+      description: story.description ?? '',
+      acceptanceCriteria: story.acceptanceCriteria,
+    },
+    clarify.blocking,
+  )
+
+  writeFileSync(join(req.artifactsDir, '02b-resolution.md'), resolution.markdown, 'utf-8')
+
+  return {
+    status: 'success',
+    summary: `Resolution: ${resolution.decisions.length} decision(s), ${resolution.resolvedCriteria.length} resolved criteria.`,
   }
 }
 

@@ -189,6 +189,8 @@ export interface AutoRdServices {
   queue: { start(): void; stop(): void }
   poller: { start(): void; stop(): void; tick(moduleId?: string): Promise<void> }
   notifier: { start(): void; stop(): void }
+  delivery: { start(): void; stop(): void }
+  sweep: { start(): void; stop(): void }
   trajectory: unknown
   workspaceManager: unknown
   agentProvider: unknown
@@ -514,6 +516,8 @@ async function handleReconfigure(
     newServices.queue.start()
     newServices.poller.start()
     newServices.notifier.start()
+    newServices.delivery.start()
+    newServices.sweep.start()
   } catch (err) {
     logger.error(
       `[auto-rd] failed to start new services during reconfigure: ${(err as Error).message}`,
@@ -750,6 +754,8 @@ async function handleAddWorkspace(
     newServices.queue.start()
     newServices.poller.start()
     newServices.notifier.start()
+    newServices.delivery.start()
+    newServices.sweep.start()
   } catch (err) {
     logger.error(
       `[auto-rd] failed to start new services during add_workspace: ${(err as Error).message}`,
@@ -888,6 +894,8 @@ async function handleRemoveWorkspace(
     newServices.queue.start()
     newServices.poller.start()
     newServices.notifier.start()
+    newServices.delivery.start()
+    newServices.sweep.start()
   } catch (err) {
     logger.error(
       `[auto-rd] failed to start new services during remove_workspace: ${(err as Error).message}`,
@@ -1081,6 +1089,8 @@ async function handleUpdateWorkspace(
     newServices.queue.start()
     newServices.poller.start()
     newServices.notifier.start()
+    newServices.delivery.start()
+    newServices.sweep.start()
   } catch (err) {
     logger.error(`[auto-rd] failed to start new services during update_workspace: ${(err as Error).message}`)
   }

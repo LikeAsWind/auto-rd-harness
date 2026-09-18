@@ -35,6 +35,8 @@ import { StoryQueue } from './services/story-queue.js'
 import { recoverStories } from './services/recover.js'
 import { migrateStorageToCredentials } from './services/migrate-storage-credentials.js'
 import { StoryNotifierService } from './services/story-notifier.js'
+import { DeliveryTask } from './services/delivery-task.js'
+import { MrSweep } from './services/mr-sweep.js'
 import { TrajectoryRecorder } from './services/trajectory.js'
 import { registerAutoRdPanel } from './services/ui-panel.js'
 import { registerPanelRoute, registerPanelRouteWithRetry } from './services/panel-route.js'
@@ -254,13 +256,17 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     services.queue.start()
     services.poller.start()
     services.notifier.start()
-    logger.info('[auto-rd] plugin mounted — poller + queue + notifier running')
+    services.delivery.start()
+    services.sweep.start()
+    logger.info('[auto-rd] plugin mounted — poller + queue + notifier + delivery + sweep running')
 
     return () => {
       logger.info('[auto-rd] plugin unmounting — stopping timers')
       services.queue.stop()
       services.poller.stop()
       services.notifier.stop()
+      services.delivery.stop()
+      services.sweep.stop()
     }
   }, 'auto-rd:timers')
 
@@ -397,6 +403,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
           svcs.queue.stop()
           svcs.poller.stop()
           svcs.notifier.stop()
+          svcs.delivery.stop()
+          svcs.sweep.stop()
         },
         currentServices: services,
         workspaceController,
@@ -456,6 +464,8 @@ function startServices(
   queue: StoryQueue
   poller: TapdPoller
   notifier: StoryNotifierService
+  delivery: DeliveryTask
+  sweep: MrSweep
 } {
   const trajectory = new TrajectoryRecorder(ctx, { storage, logger })
   const workspaceManager = new WorkspaceManager(ctx, { storage, logger, config })
@@ -513,5 +523,7 @@ function startServices(
     },
   })
   const notifier = new StoryNotifierService(ctx, { storage, logger })
-  return { trajectory, workspaceManager, agentProvider, runner, queue, poller, notifier }
+  const delivery = new DeliveryTask(ctx, { storage, logger, config, credentials, trajectory })
+  const sweep = new MrSweep(ctx, { storage, logger, config, credentials, trajectory })
+  return { trajectory, workspaceManager, agentProvider, runner, queue, poller, notifier, delivery, sweep }
 }

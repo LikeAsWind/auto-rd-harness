@@ -226,11 +226,13 @@ await (async () => {
 {
   const distinct = {
     completed: '\u2713',
+    delivery_ready: '\u2713',
+    mr_opened: '\u2197',
     failed: '\u2717',
     blocked: '\u26A0',
     pending: '\u00B7',
     implementing: '\u21BB',
-    tapd_syncing: '\u21BB',
+    final_verifying: '\u21BB',
   }
   for (const [state, glyph] of Object.entries(distinct)) {
     check(`stateBadge: ${state}`, stateBadge(state) === glyph, stateBadge(state))
@@ -239,7 +241,7 @@ await (async () => {
   const all = [
     'pending', 'context', 'clarification', 'brainstorm', 'critic', 'decision',
     'spec', 'planning', 'implementing', 'testing', 'fixing', 'verifying',
-    'reviewing', 'final_verifying', 'mr_creating', 'tapd_syncing',
+    'reviewing', 'final_verifying', 'delivery_ready', 'mr_opened',
     'completed', 'failed', 'blocked',
   ]
   check('stateBadge: defined for all 19 states', all.every((s) => typeof stateBadge(s) === 'string' && stateBadge(s).length > 0))

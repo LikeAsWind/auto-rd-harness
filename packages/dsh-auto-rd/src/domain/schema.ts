@@ -52,13 +52,21 @@ export type ModuleRecord = z.infer<typeof ModuleRecordSchema>
 // ---- Story ----
 
 /**
- * The 19-story state machine. See auto-rd-native-plugin-design.md §5.
+ * The 19-state machine, split across two tiers (see
+ * docs/architecture/auto-rd-two-tier-pipeline.md §4):
  *
- * Terminal states: completed, failed
- * Branch states: pending (queue), blocked (human)
- * Active states: context, clarification, brainstorm, critic, decision, spec,
- *                planning, implementing, testing, fixing, verifying,
- *                reviewing, final_verifying, mr_creating, tapd_syncing
+ *   Tier 1 (rd-pipeline) owns the role-execution flow:
+ *     pending → context → clarification → brainstorm → critic → decision
+ *            → spec → planning → implementing → testing → fixing
+ *            → verifying → reviewing → final_verifying → delivery_ready
+ *
+ *   Tier 2 (delivery loop) owns the delivery tail:
+ *     delivery_ready → mr_opened → completed
+ *
+ *   Shared guardrail terminals: failed, blocked
+ *
+ * Terminal states: delivery_ready (Tier 1 done), completed, failed, blocked
+ * Queue state: pending (human / poller injects here)
  */
 export const StoryStateSchema = z.enum([
   'pending',
@@ -75,8 +83,8 @@ export const StoryStateSchema = z.enum([
   'verifying',
   'reviewing',
   'final_verifying',
-  'mr_creating',
-  'tapd_syncing',
+  'delivery_ready',
+  'mr_opened',
   'completed',
   'failed',
   'blocked',
@@ -88,6 +96,7 @@ export const ArtifactRefSchema = z.object({
   kind: z.enum([
     'context',
     'clarification',
+    'resolution',
     'proposal',
     'critique',
     'decision',
@@ -186,20 +195,21 @@ export const StoryRecordSchema = z.object({
 
   /**
    * M4-A checkpoint fields for idempotent recovery across the
-   * mr_creating -> tapd_syncing -> completed tail. Each is set when
-   * the corresponding external side effect succeeds; the stage handler
-   * re-checks these on entry and skips work already done.
+   * delivery tail. Each is set when the corresponding external side
+   * effect succeeds; the delivery task / sweep re-check these on entry
+   * and skip work already done.
    */
-  pushedSha: z.string().optional().describe('Last commit SHA pushed to origin by mr_creating'),
+  pushedSha: z.string().optional().describe('Last commit SHA pushed to origin by Tier 1'),
   pushedAt: z.string().optional().describe('ISO timestamp of the last successful push'),
   mrIid: z.number().int().optional().describe('GitLab MR iid; set when createOrReuseMR succeeds'),
   mrCreatedAt: z.string().optional().describe('ISO timestamp of the last MR createOrReuse'),
   /** True if the last MR lookup found an existing MR (replayed across runs). */
   mrReused: z.boolean().optional(),
-  tapdSyncedAt: z.string().optional().describe('ISO timestamp of the last successful TAPD sync'),
+  /** ISO timestamp of the last successful TAPD status advance (评审中). */
+  tapdSyncedAt: z.string().optional(),
   /**
-   * Count of failed TAPD-sync attempts. We use this for exponential
-   * backoff in the runner, not as a hard breaker (network flakiness is
+   * Count of failed TAPD-sync attempts. Used for bounded retry in the
+   * Tier-2 delivery task, not as a hard breaker (network flakiness is
    * not a story-level failure).
    */
   tapdSyncAttempts: z.number().int().min(0).optional(),
@@ -293,7 +303,7 @@ export const AUTORD_DOMAIN_NAME = 'auto_rd'
  * (§10) re-runs after the rebuild so any in-flight stories get a
  * clean slate to start over.
  */
-export const AUTORD_DOMAIN_VERSION = 6
+export const AUTORD_DOMAIN_VERSION = 7
 
 export function buildAutoRdDomainTables() {
   return {

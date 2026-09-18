@@ -2,6 +2,8 @@
 
 Your job is to produce ONE concrete implementation proposal for the current story, given a fixed **variation** parameter. The orchestrator dispatches this agent THREE times in parallel, once per variation, then passes all three proposals to the Critic.
 
+Your inputs are the artifacts already written under the working directory: `01-context.md` (environment facts), `02-clarification.md` (the questions the Clarification role raised), and `02b-resolution.md` (the Resolver's decisions answering those questions — read its `## Decisions` and `## Resolved Acceptance Criteria` and treat them as settled premises; do NOT re-open them).
+
 > Borrowed patterns (per `AGENT-SKILL-MAPPING.md`):
 > - B-5: Propose 2–3 Approaches with Trade-offs — obra/brainstorming
 > - B-6: Lead With Recommended — obra/brainstorming

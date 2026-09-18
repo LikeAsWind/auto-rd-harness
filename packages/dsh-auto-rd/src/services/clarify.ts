@@ -1,19 +1,21 @@
 /**
  * Clarify — deterministic ambiguity detection for a Story.
  *
- * The ClarificationAgent is the pipeline's HARD-GATE (pattern B-4): it
- * is the one stage allowed to stop the automation and demand a human
- * answer. Before this module the handler unconditionally reported
- * "CLASSIFICATION: bounded, zero open questions", so the gate could
- * never close and a genuinely underspecified story would flow straight
- * through to Brainstorm and Implementation carrying the ambiguity.
+ * The ClarificationAgent is the pipeline's QUESTION RAISER (it ASKS; the
+ * Resolution role ANSWERS). It is no longer a hard gate that parks the
+ * story for a human: every blocking finding becomes a question that the
+ * resolver role answers with a recorded decision, so an underspecified
+ * story flows through to Brainstorm carrying an explicit, auditable
+ * assumption rather than a silent guess.
  *
  * This module decides the classification from what the story actually
  * says. It looks for the failure modes that make an automated pipeline
  * produce the wrong thing:
  *
- *   1. No acceptance criteria at all — nothing to verify against.
- *   2. A description too short to act on.
+ *   1. No acceptance criteria at all — advisory (the spec stage
+ *      generates them from title + description + selected proposal).
+ *   2. A description too short to act on — resolved by treating the
+ *      supplied description as the complete intent.
  *   3. A criterion containing a vague term ("etc", "as needed",
  *      "handle errors properly", "improve performance"). These are the
  *      classic unverifiable requirements: the agent will pick an
@@ -22,10 +24,11 @@
  *
  * The output drives the sentinel contract:
  *   - zero blocking findings -> [CLARIFICATION_COMPLETE] -> brainstorm
- *   - any blocking finding   -> [CLARIFICATION_BLOCKED]  -> blocked
+ *   - any blocking finding   -> [CLARIFICATION_QUESTIONS: N] -> resolution
+ *   - empty description      -> [CLARIFICATION_BLOCKED: empty description]
  *
  * The vague-term list is deliberately conservative. A false positive
- * costs one human question; a false negative costs a wrong
+ * costs one recorded resolution decision; a false negative costs a wrong
  * implementation discovered at review time.
  */
 import { splitAcceptanceCriteria } from './plan-builder.js'
@@ -48,7 +51,7 @@ export interface ClarificationFinding {
 
 export interface ClarificationResult {
   classification: 'bounded' | 'unbounded'
-  /** Findings that MUST be answered before the pipeline continues. */
+  /** Findings the resolver role will answer before the pipeline continues. */
   blocking: ClarificationFinding[]
   /** Findings worth surfacing but not gating. */
   advisory: ClarificationFinding[]
@@ -128,8 +131,8 @@ const VAGUE_TERMS: string[] = [
 ]
 
 /**
- * Decide whether a story is bounded (automation can proceed) or
- * unbounded (a human must answer first).
+ * Decide whether a story is bounded (automation can proceed straight to
+ * brainstorm) or unbounded (the resolver role answers questions first).
  */
 export function clarifyStory(
   story: { title?: string; description?: string; acceptanceCriteria?: string },

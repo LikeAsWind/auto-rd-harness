@@ -25,8 +25,7 @@ const POLL_INTERVAL_MS = 10_000
 const ACTIVE_STATES: StoryState[] = [
   'context', 'clarification', 'brainstorm', 'critic', 'decision',
   'spec', 'planning', 'implementing', 'testing', 'fixing',
-  'verifying', 'reviewing', 'final_verifying', 'mr_creating',
-  'tapd_syncing',
+  'verifying', 'reviewing', 'final_verifying',
 ]
 
 export class StoryQueue {

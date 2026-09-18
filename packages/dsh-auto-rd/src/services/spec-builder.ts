@@ -350,7 +350,7 @@ function renderSpec(
 
   // Open Questions
   lines.push('## Open Questions')
-  lines.push('_None — see `02-clarification.md` for the gate that cleared them._')
+  lines.push('_None — see `02-clarification.md` (questions raised) and `02b-resolution.md` (decisions recorded)._')
   lines.push('')
 
   lines.push('[SPEC_COMPLETE]')

@@ -18,9 +18,8 @@
  *   - `tapdApiToken` empty → the poller skips any module whose token
  *     cannot be resolved (per-module or global), so no 401-bound HTTP
  *     call is ever made with an empty bearer header.
- *   - `gitlabApiToken` empty → StoryRunner's `mr_creating` stage will
- *     fail loudly per-story; `auto_rd_status` reports it. The plugin
- *     itself still mounts.
+ *   - `gitlabApiToken` empty → the Tier-2 delivery task will fail loudly
+ *     per-story; `auto_rd_status` reports it. The plugin itself still mounts.
  *   - `workspaceRoot` empty → no module clones, no per-module worktrees;
  *     the UI shows the setup checklist.
  *   - `modules` empty → no polling happens (no TAPD workspace to map to);
@@ -75,6 +74,18 @@ export const ModuleConfigSchema = z.object({
    * one role (e.g. implementation → haiku) without repeating the rest.
    */
   modelSelection: z.record(z.string(), z.string()).default({}).optional(),
+  /**
+   * MR target branch for this workspace (Tier-2 delivery task). Empty →
+   * fall back to `defaultBranch`. Owned by the delivery task, not the
+   * Tier-1 runner — the runner pushes to the story branch only.
+   */
+  targetBranch: z.string().default('').optional(),
+  /**
+   * GitLab reviewer(s) for the delivery MR, comma-separated numeric
+   * GitLab user ids (mapped to `reviewer_ids`). Empty → no reviewer.
+   * Owned by the Tier-2 delivery task.
+   */
+  reviewer: z.string().default('').optional(),
 })
 
 export const ConfigSchema = z.object({

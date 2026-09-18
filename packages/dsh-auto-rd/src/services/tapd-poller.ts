@@ -406,13 +406,19 @@ function normalizeRawStory(raw: RawTapdApiStory): TapdStory | null {
  *
  * M4-A: real HTTP. Idempotent -- calling twice with the same payload is
  * a no-op on the TAPD side (PATCH semantics). Errors are propagated
- * up via HttpError / HttpTimeoutError / HttpNetworkError; the stage
- * handler decides whether to record a checkpoint and exit or block.
+ * up via HttpError / HttpTimeoutError / HttpNetworkError; the caller
+ * (the Tier-2 delivery task / sweep) decides whether to record a
+ * checkpoint and exit or block.
+ *
+ * The status is a PARAMETER, not a constant: the delivery task advances
+ * the story to `评审中` when the MR opens, and the daily sweep closes it
+ * to `completed` once the MR merges. See
+ * docs/architecture/auto-rd-two-tier-pipeline.md §2 ③④⑤.
  *
  * Endpoint:
  *   POST {tapdBaseUrl}/stories/{storyId}/changes
  *   Body: {
- *     status: 'completed',
+ *     status: params.status,       // e.g. '评审中' or 'completed'
  *     mr_url: string,
  *     git_branch: string,
  *     story_actor: 'auto-rd',
@@ -429,6 +435,12 @@ export interface SyncTapdParams {
   tapdId: string
   mrUrl: string
   gitBranch: string
+  /**
+   * Target TAPD status. `'评审中'` advances a delivered story; the
+   * sweep passes `'completed'` to close it. The exact status code is a
+   * deployment-workflow detail (see design §7.3).
+   */
+  status: string
   httpClient?: HttpClient
 }
 
@@ -439,7 +451,7 @@ export async function syncTapd(params: SyncTapdParams): Promise<void> {
   url.pathname = join(url.pathname, 'stories', params.tapdId, 'changes')
 
   const body = {
-    status: 'completed',
+    status: params.status,
     mr_url: params.mrUrl,
     git_branch: params.gitBranch,
     story_actor: 'auto-rd',

@@ -9,13 +9,14 @@
  * smallest honest number — fewer collapses different work into one bar,
  * more just renames the agent names.
  *
- * Pipeline reference: docs/architecture/auto-rd-native-plugin-design.md §5.
+ * Pipeline reference: docs/architecture/auto-rd-two-tier-pipeline.md §4.
  *
  *   - spec:    context, clarification, brainstorm, critic, decision, spec
  *   - plan:    planning
  *   - implement: implementing, testing, fixing
- *   - verify:  verifying, reviewing, final_verifying, mr_creating, tapd_syncing
+ *   - verify:  verifying, reviewing, final_verifying, delivery_ready
  *   - (terminal: completed, failed — handled separately)
+ *   - (delivery tail: mr_opened — renders as a done verify phase)
  *   - (human pause: blocked — does not advance the bar)
  *   - (queue: pending — the bar is still on phase 0 / "未开始")
  *
@@ -81,6 +82,8 @@ export function stateToBucket(state: StoryState): StageBucket {
       return 'completed'
     case 'failed':
       return 'failed'
+    case 'mr_opened':
+      return 'completed'
     case 'context':
     case 'clarification':
     case 'brainstorm':
@@ -97,8 +100,7 @@ export function stateToBucket(state: StoryState): StageBucket {
     case 'verifying':
     case 'reviewing':
     case 'final_verifying':
-    case 'mr_creating':
-    case 'tapd_syncing':
+    case 'delivery_ready':
       return 'verify'
   }
 }
@@ -112,7 +114,7 @@ export function stateToBucket(state: StoryState): StageBucket {
  * testing=3, fixing=3 (fixing loops back to testing visually because
  * the spec/plan tools define it as a self-test cycle). The verify
  * phase ticks up: verifying=1, reviewing=2, final_verifying=3,
- * mr_creating=4 (the bar is full once the MR exists), tapd_syncing=4.
+ * delivery_ready=4 (the bar is full once the code is delivery-ready).
  */
 export function bucketToStageView(bucket: StageBucket): StageView {
   switch (bucket) {
@@ -158,8 +160,7 @@ const SUB_PHASE_TICKS: Partial<Record<StageBucket, Partial<Record<string, number
     verifying: 1,
     reviewing: 2,
     final_verifying: 3,
-    mr_creating: 3,
-    tapd_syncing: 4,
+    delivery_ready: 4,
   },
 }
 

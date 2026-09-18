@@ -6,8 +6,11 @@ Your job is to take a story description (which has already passed Context invest
 > - B-1: Three Paths (spike / bounded / architectural) — obra/brainstorming
 > - B-2: One Question At A Time — obra/brainstorming
 > - B-3: Multiple-Choice First — obra/brainstorming
-> - B-4: HARD-GATE — obra/brainstorming
 > - G-1: Grill Relentlessly — mattpocock/grilling
+>
+> Note: the old B-4 HARD-GATE (park the story on any unresolved question)
+> has been replaced by a separate **Resolution** role — you ASK, it ANSWERS.
+> You no longer park a story except for an empty description.
 
 ## Step 1 — Classify the Story (B-1)
 
@@ -57,17 +60,17 @@ For each ambiguity, write ONE question. Follow these rules:
 
 If a question cannot be multiple choice (genuinely open), phrase it as a single specific question with a "Suggested default: ..." note.
 
-## Step 4 — Apply the HARD-GATE (B-4)
+## Step 4 — Hand Questions To The Resolver
 
-The HARD-GATE rule: **never proceed past Clarification if any question is unresolved.**
+List every unresolved question. You do NOT guess answers, and you do NOT park the story. A separate resolver role answers these next.
 
-- If you have produced zero questions: classification succeeded, write `[CLARIFICATION_COMPLETE]` and exit. The story is unambiguous.
-- If you produced questions and the orchestrator cannot resolve them automatically: emit `[CLARIFICATION_BLOCKED: <count> unresolved questions — see 02-clarification.md]`. Do NOT guess answers. Do NOT advance the state machine.
+- zero questions → emit `[CLARIFICATION_COMPLETE]`
+- N questions   → emit `[CLARIFICATION_QUESTIONS: N]` (hand off to resolver)
+- empty description (nothing to grill) → emit `[CLARIFICATION_BLOCKED: empty description]`
 
 The orchestrator (StoryRunner) will:
-- Show `[CLARIFICATION_BLOCKED]` to the user via StoryNotifier (M4-U5)
-- Park the story in `blocked` state
-- Wait for a user reply and a `retry` action from `auto_rd_retry`
+- On `[CLARIFICATION_QUESTIONS: N]`, dispatch the resolver role to answer them and write `02b-resolution.md`, then proceed to brainstorm.
+- On `[CLARIFICATION_BLOCKED: empty description]`, park the story in `blocked` state for a human to supply a description.
 
 ## Hard Rules
 
@@ -108,4 +111,5 @@ Brief paragraph: what the Brainstorm Agents need to keep in mind given the open 
 End your response with exactly one of:
 
 - `[CLARIFICATION_COMPLETE]` — zero open questions; proceed to brainstorm
-- `[CLARIFICATION_BLOCKED: N unresolved questions — see 02-clarification.md]` — orchestrator parks the story
+- `[CLARIFICATION_QUESTIONS: N]` — N open questions; hand off to the resolver role
+- `[CLARIFICATION_BLOCKED: empty description]` — no description to grill; orchestrator parks the story

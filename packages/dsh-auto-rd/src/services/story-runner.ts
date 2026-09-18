@@ -1,19 +1,22 @@
 /**
- * StoryRunner — executes the 19-state pipeline for a single story.
+ * StoryRunner — executes the Tier-1 pipeline for a single story.
  *
- * State machine (see auto-rd-native-plugin-design.md §5):
+ * State machine (see docs/architecture/auto-rd-two-tier-pipeline.md):
  *
  *   pending → context → clarification → brainstorm → critic → decision
  *          → spec → planning → implementing → testing → fixing → verifying
- *          → reviewing → final_verifying → mr_creating → tapd_syncing → completed
+ *          → reviewing → final_verifying → delivery_ready
  *
  * Each transition is dispatched by calling AgentProvider.dispatch(...).
- * This is the SINGLE owner of the state machine; StoryQueue and TapdPoller
- * never advance story state directly.
+ * This is the SINGLE owner of the Tier-1 state machine; StoryQueue and
+ * TapdPoller never advance story state directly.
  *
  * Every state dispatches to the matching handler in agent-provider.ts.
  * See that module for the two dispatch paths (model-backed vs
  * deterministic) and what each stage does without a model.
+ *
+ * The delivery tail (delivery_ready → mr_opened → completed) is owned by
+ * Tier 2 (delivery-task / mr-sweep), NOT this runner.
  *
  * Borrowed patterns:
  * - SD-1: Rulings, not stalls (advance state without waiting on human)
@@ -23,22 +26,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config.js'
 import type { AutoRdStorage } from '../domain/storage.js'
 import type { StoryRecord, StoryState, TaskRecord } from '../domain/schema.js'
+import type { PipelineInput } from '../domain/pipeline-input.js'
 import type { Logger } from '../utils/logger.js'
 import { WorkspaceManager } from './workspace-manager.js'
 import { AgentProvider } from './agent-provider.js'
+import { pushBranch } from './gitlab-merger.js'
 import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser.js'
+import { pipelineInputForStory } from '../domain/pipeline-input.js'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import {
-  pushBranch,
-  createOrReuseMR,
-  buildMRDescription,
-  projectIdFromRepoUrl,
-} from './gitlab-merger.js'
-import { syncTapd } from './tapd-poller.js'
-import { HttpClient } from '../utils/http-client.js'
 import type { TrajectoryRecorder } from './trajectory.js'
-import { resolveTapdToken, resolveGitlabToken } from '../domain/credentials.js'
 
 export interface StoryRunnerDeps {
   storage: AutoRdStorage
@@ -48,8 +45,9 @@ export interface StoryRunnerDeps {
   agentProvider: AgentProvider
   /**
    * Optional TrajectoryRecorder. When present, every state transition
-   * and external side effect (push / MR create / TAPD sync) is
-   * appended so the trajectory is the canonical execution log.
+   * is appended so the trajectory is the canonical execution log.
+   * (External side effects — push / MR / TAPD — are owned by Tier 2 and
+   * recorded there.)
    */
   trajectory?: TrajectoryRecorder
   /**
@@ -72,10 +70,10 @@ export interface StoryRunnerDeps {
    */
   agents?: import('../types/dsh-services.js').AgentsService
   /**
-   * DSH credentials service. The runner resolves TAPD and GitLab
-   * tokens at the moment of an HTTP call rather than reading them
-   * off the module record (issue #10 — module fields hold ref
-   * names, not values).
+   * DSH credentials service. Tier 2 (delivery-task / mr-sweep) resolves
+   * TAPD and GitLab tokens at the moment of an HTTP call; the Tier-1
+   * runner no longer makes those calls, so this field is retained only
+   * for interface continuity.
    */
   credentials?: import('../types/dsh-services.js').CredentialsService
 }
@@ -90,14 +88,13 @@ interface StageHandler {
  * Every `blockedReason` and `task.blockedReason` the runner writes starts
  * with a lowercase stage code and a colon, then human-readable detail:
  *
- *   clarification: 3 blocking question(s): What are the acceptance criteria?
+ *   clarification: empty description — nothing to resolve
  *   fixing: 5-round breaker tripped after 5 attempts on task T001
- *   mr_creating: GitLab rejected the request (config error): 403 ...
  *
  * The prefix is what the human-recovery tools and the notifier key off, so
  * it must stay a stable identifier rather than prose. Stage codes in use:
- * `runner`, `clarification`, `critic`, `spec`, `planning`, `implementing`,
- * `fixing`, `verifying`, `mr_creating`, `tapd_syncing`.
+ * `runner`, `clarification`, `resolution`, `critic`, `spec`, `planning`,
+ * `implementing`, `fixing`, `verifying`.
  */
 
 /**
@@ -105,8 +102,8 @@ interface StageHandler {
  *
  * Every state has a handler. The deterministic handlers produce real
  * artifacts and real side effects — worktree probes, subprocess test
- * runs, git commits, HTTP calls — so the machine advances with or
- * without a model attached.
+ * runs, git commits — so the machine advances with or without a model
+ * attached.
  */
 const STAGE_HANDLERS: Record<StoryState, StageHandler | null> = {
   pending: async () => 'context',
@@ -125,8 +122,8 @@ const STAGE_HANDLERS: Record<StoryState, StageHandler | null> = {
   verifying: runVerifyingStage,
   reviewing: runReviewingStage,
   final_verifying: runFinalVerifyingStage,
-  mr_creating: runMrCreatingStage,
-  tapd_syncing: runTapdSyncingStage,
+  delivery_ready: async (s) => s.state,
+  mr_opened: async (s) => s.state,
 
   completed: async (s) => s.state,
   failed: async (s) => s.state,
@@ -138,7 +135,8 @@ export class StoryRunner {
 
   /**
    * Run one story from its current state forward until it hits a non-advancing
-   * state (blocked / failed / completed / or a stage that yields itself).
+   * state (blocked / failed / delivery_ready / mr_opened / completed / or a
+   * stage that yields itself).
    */
   async runStory(storyId: string): Promise<void> {
     const stories = this.deps.storage.stories()
@@ -148,10 +146,15 @@ export class StoryRunner {
       return
     }
 
-    // Ensure the story is bound to a DSH session before running. This is
-    // idempotent: if `story.mainSessionId` is already set we skip; if the
-    // sessions service is absent (headless) we skip silently.
-    await this.ensureSession(story)
+    // Ensure the story is bound to a DSH session before running. The
+    // session is composed from the generic `PipelineInput` (title +
+    // optional git worktree), NOT from the TAPD-shaped StoryRecord — this
+    // is the seam F generalization: the Tier-1 engine can be driven by a
+    // chat entry (`source.kind='chat'`) with no TAPD identity. Idempotent:
+    // if `story.mainSessionId` is already set we skip; if the sessions
+    // service is absent (headless) we skip silently.
+    const input = this.buildPipelineInput(story)
+    await this.ensureSession(story, input)
 
     this.deps.logger.info(
       `StoryRunner starting ${storyId} from state=${story.state} retry=${story.retryCount}`,
@@ -412,14 +415,31 @@ export class StoryRunner {
   }
 
   /**
-   * Bind a story to a DSH session, idempotently. If the story already
-   * carries a `mainSessionId`, or the sessions service is absent
-   * (headless profile), this is a no-op. Otherwise it creates a new
-   * session whose working directory is the story's worktree, sets the
-   * session title to the story title, and persists the id back onto
+   * Fold this story into the generic `PipelineInput` entry contract
+   * (design §1.1 / seam F). The Tier-1 engine only ever reads
+   * `PipelineInput`, so the session (and everything downstream) is
+   * composed from the same shape whether the story came from a timed
+   * TAPD pull or a human chat. The module's repo binding becomes
+   * `input.git`; a story with no repo is git-less and the tail skips
+   * branch/commit/push.
+   */
+  private buildPipelineInput(story: StoryRecord): PipelineInput {
+    const m = this.deps.config.modules.find((x) => x.id === story.moduleId)
+    return pipelineInputForStory(story, m)
+  }
+
+  /**
+   * Bind a story to a DSH session, idempotently. The session is composed
+   * from `input` (the generic entry contract) rather than the story
+   * record, so the title / worktree / provenance come from the one shape
+   * both entry points produce. If the story already carries a
+   * `mainSessionId`, or the sessions service is absent (headless
+   * profile), this is a no-op. Otherwise it creates a new session whose
+   * working directory is the story's worktree (from `input.git`), sets
+   * the session title to `input.title`, and persists the id back onto
    * `story.mainSessionId`.
    */
-  private async ensureSession(story: StoryRecord): Promise<void> {
+  private async ensureSession(story: StoryRecord, input: PipelineInput): Promise<void> {
     if (story.mainSessionId) return
     const sessions = this.deps.sessions
     if (!sessions || typeof sessions.create !== 'function') return
@@ -437,7 +457,7 @@ export class StoryRunner {
 
       const handle = sessions.create(undefined, {
         meta: {
-          cwd: story.worktreePath,
+          cwd: input.git?.worktreePath ?? story.worktreePath,
           origin: 'subagent',
           // Block A: bind the story session to the rd-pipeline preset and
           // hang it under the workspace session in the session tree.
@@ -452,12 +472,12 @@ export class StoryRunner {
       story.updatedAt = new Date().toISOString()
       await this.deps.storage.stories().put(story.id, story)
 
-      // Set the session's display title to the story title so the DSH
+      // Set the session's display title to the entry title so the DSH
       // session list reads naturally. Non-fatal if the title service is
       // absent.
       if (this.deps.sessionTitle && typeof this.deps.sessionTitle.rename === 'function') {
         try {
-          this.deps.sessionTitle.rename(handle, story.title)
+          this.deps.sessionTitle.rename(handle, input.title)
         } catch (titleErr) {
           this.deps.logger.warn(
             `StoryRunner: created session ${handle.id} but failed to title it: ${(titleErr as Error).message}`,
@@ -478,13 +498,19 @@ export class StoryRunner {
 }
 
 function isTerminalState(state: StoryState): boolean {
-  return state === 'completed' || state === 'failed' || state === 'blocked'
+  return (
+    state === 'delivery_ready' ||
+    state === 'mr_opened' ||
+    state === 'completed' ||
+    state === 'failed' ||
+    state === 'blocked'
+  )
 }
 
 /**
  * True when a transition is a ROLLBACK (the story moves backwards in the
  * fixed orchestration order), which advances `loopCount`. The only legal
- * backward edges in the 19-state machine are:
+ * backward edges in the Tier-1 state machine are:
  *
  *   critic → clarification          (systemic design gap)
  *   testing/verifying/reviewing/final_verifying → fixing   (fix loop)
@@ -515,7 +541,8 @@ interface ArtifactContractRow {
 const ARTIFACT_CONTRACT: ArtifactContractRow[] = [
   { role: 'context', reads: [], writes: '01-context.md' },
   { role: 'clarification', reads: ['01-context.md'], writes: '02-clarification.md' },
-  { role: 'brainstorm', reads: ['01-context.md', '02-clarification.md'], writes: '03-proposal-{minimal,clean,novel}.md' },
+  { role: 'resolution', reads: ['02-clarification.md'], writes: '02b-resolution.md' },
+  { role: 'brainstorm', reads: ['01-context.md', '02-clarification.md', '02b-resolution.md'], writes: '03-proposal-{minimal,clean,novel}.md' },
   { role: 'critic', reads: ['03-proposal-minimal.md', '03-proposal-clean.md', '03-proposal-novel.md'], writes: '04-critique.md' },
   { role: 'decision', reads: ['04-critique.md'], writes: '05-decision.md' },
   { role: 'spec', reads: ['05-decision.md'], writes: '06-spec.md' },
@@ -526,8 +553,6 @@ const ARTIFACT_CONTRACT: ArtifactContractRow[] = [
   { role: 'verification', reads: ['08-impl-<taskId>.md', '06-spec.md'], writes: '11-verify-report.md' },
   { role: 'review', reads: [], writes: '12-review-<taskId>-<axis>.md' },
   { role: 'final-verify', reads: [], writes: '13-final-verify-<axis>.md' },
-  { role: 'mr_creating', reads: [], writes: '99-mr.md' },
-  { role: 'tapd_syncing', reads: ['99-mr.md'], writes: '98-tapd-sync.md' },
 ]
 
 /** Resolve a contract row by role. Output filenames may carry the `<>` /
@@ -583,6 +608,11 @@ function missingInputArtifacts(artifactsDir: string, contract: ArtifactContractR
 const PREVIOUS_ROLE_STATE: Record<string, StoryState | null> = {
   context: null,
   clarification: 'context',
+  // Resolution rides INSIDE the `clarification` state (no state of its
+  // own), so its "producer" — and brainstorm's producer — is the
+  // `clarification` state: a handoff break before brainstorm rolls back
+  // to `clarification`, which re-runs clarification + resolution together.
+  resolution: 'clarification',
   brainstorm: 'clarification',
   critic: 'brainstorm',
   decision: 'critic',
@@ -594,8 +624,6 @@ const PREVIOUS_ROLE_STATE: Record<string, StoryState | null> = {
   verification: 'testing',
   review: 'verifying',
   'final-verify': 'reviewing',
-  mr_creating: 'final_verifying',
-  tapd_syncing: 'mr_creating',
 }
 
 /**
@@ -614,7 +642,7 @@ function handoffBreakRollback(
   return PREVIOUS_ROLE_STATE[role] ?? null
 }
 
-/** Map the 19 story states onto the artifact-contract role names. */
+/** Map the Tier-1 story states onto the artifact-contract role names. */
 const STATE_TO_ROLE: Partial<Record<StoryState, string>> = {
   context: 'context',
   clarification: 'clarification',
@@ -629,8 +657,6 @@ const STATE_TO_ROLE: Partial<Record<StoryState, string>> = {
   verifying: 'verification',
   reviewing: 'review',
   final_verifying: 'final-verify',
-  mr_creating: 'mr_creating',
-  tapd_syncing: 'tapd_syncing',
 }
 
 /**
@@ -693,11 +719,12 @@ function recordArtifact(
   story.artifacts = {
     ...story.artifacts,
     [key]: {
-      // The kind is informational; every one of the 13 artifact kinds in
+      // The kind is informational; every one of the 14 artifact kinds in
       // ArtifactRefSchema is reachable from a stage here.
       kind: key as
         | 'context'
         | 'clarification'
+        | 'resolution'
         | 'proposal'
         | 'critique'
         | 'decision'
@@ -755,7 +782,8 @@ async function runClarificationAgent(
   })
 
   if (result.status === 'blocked') {
-    // HARD-GATE (B-4): unresolved questions park the story in `blocked`.
+    // Only an empty story description parks here — nothing for the
+    // resolver to ground a decision in (design: full-auto resolution).
     story.blockedReason = `clarification: ${result.reason}`
     deps.logger.warn(`ClarificationAgent blocked story ${story.id}: ${result.reason}`)
     return 'blocked'
@@ -767,7 +795,63 @@ async function runClarificationAgent(
 
   recordArtifact(story, 'clarification', '02-clarification.md', result.summary ?? '')
   deps.logger.info(`ClarificationAgent wrote artifact for story ${story.id}`)
+
+  // The sentinel is the SINGLE SOURCE OF TRUTH. The deterministic handler
+  // already returns `blocked` for an empty description, but the
+  // model-backed path completes normally even when it writes
+  // `[CLARIFICATION_BLOCKED: empty description]` — so re-check here.
+  const sentinel = readClarificationSentinel(join(artifactsDir, '02-clarification.md'))
+  deps.logger.info(`Clarification sentinel for story ${story.id}: ${sentinel}`)
+
+  if (sentinel === 'blocked') {
+    story.blockedReason = 'clarification: empty description — nothing to resolve'
+    deps.logger.warn(`ClarificationAgent blocked story ${story.id}: empty description`)
+    return 'blocked'
+  }
+
+  // Bounded or question-bearing, the resolver ALWAYS runs next so
+  // brainstorm's input contract (`02b-resolution.md`) is satisfied
+  // uniformly: a bounded story gets an empty decision ledger, a
+  // question-bearing story gets one decision per question.
+  const resolution = await deps.agentProvider.dispatch({
+    agentName: 'resolution',
+    label: `Resolution: ${story.id}`,
+    worktreePath: story.worktreePath!,
+    artifactsDir,
+    inputs: storyInput(story),
+  })
+
+  if (resolution.status !== 'success') {
+    deps.logger.warn(`ResolutionAgent returned status=${resolution.status} for story ${story.id}`)
+    return 'failed'
+  }
+
+  recordArtifact(story, 'resolution', '02b-resolution.md', resolution.summary ?? '')
+  deps.logger.info(`ResolutionAgent wrote artifact for story ${story.id}`)
   return 'brainstorm'
+}
+
+/**
+ * Read the final sentinel line the Clarification stage wrote. Returns
+ * `complete` for `[CLARIFICATION_COMPLETE]`, `questions` for
+ * `[CLARIFICATION_QUESTIONS: N]`, `blocked` for
+ * `[CLARIFICATION_BLOCKED: ...]`, or `unknown` when no sentinel is found.
+ */
+function readClarificationSentinel(path: string): 'complete' | 'questions' | 'blocked' | 'unknown' {
+  let content: string
+  try {
+    content = readFileSync(path, 'utf-8')
+  } catch {
+    return 'unknown'
+  }
+  const lines = content.split(/\r?\n/).map((l) => l.trim())
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (line === '[CLARIFICATION_COMPLETE]') return 'complete'
+    if (/^\[CLARIFICATION_QUESTIONS:\s*\d+\]$/.test(line)) return 'questions'
+    if (/^\[CLARIFICATION_BLOCKED/.test(line)) return 'blocked'
+  }
+  return 'unknown'
 }
 
 /**
@@ -1354,299 +1438,59 @@ async function runFinalVerifyingStage(
     deps.logger.warn(`FinalVerify: rejected (${verdicts.filter((v) => !v.endsWith(':success')).join(', ')})`)
     return 'fixing'
   }
-  return 'mr_creating'
+
+  // ---- Conditional push (Tier-1 tail, design §1.3) ----
+  // git present → push the story branch to origin and record the pushed
+  // SHA; git absent → skip (code stays in the workspace, review/final-verify
+  // already ran on the artifact files). A push failure throws and is caught
+  // by the runner's standard retry path (transient push errors retry like
+  // any other stage failure).
+  await conditionallyPush(story, deps)
+
+  return 'delivery_ready'
 }
 
 /**
- * mr_creating — push the story branch and create (or reuse) the MR.
- *
- * M4-A: real HTTP via gitlab-merger. Two checkpoints are persisted in
- * the StoryRecord so a partial failure can be replayed:
- *
- *   1. pushBranch -> story.pushedSha + story.pushedAt
- *   2. createOrReuseMR -> story.mrIid + story.mrCreatedAt + story.mrUrl + story.mrReused
- *
- * Failure handling — checkpoint pattern (NOT blocked):
- *   - push throws      -> story stays in mr_creating; runner re-tries
- *                         next tick. The next push will be a no-op if
- *                         origin/<branch> is already at pushedSha.
- *   - MR create throws -> same: replay will list existing MRs and reuse
- *                         it (alreadyUpToDate + reused=true).
- *   - We do NOT park the story in 'blocked' for transient HTTP / shell
- *     failures. Network blips are not story-level failures.
- *
- * True configuration errors (missing moduleId / repoUrl / token) DO
- * park the story in 'blocked' — they will never resolve on retry.
+ * Tier-1 tail conditional push (design §1.3): push only when the story is
+ * bound to a git worktree. Writes `pushedSha` / `pushedAt` checkpoints and a
+ * trajectory `external_side_effect` on success. Throws on failure so the
+ * runner's retry path (retryCount / failed-after-3) handles it uniformly.
  */
-async function runMrCreatingStage(
-  story: StoryRecord,
-  deps: StoryRunnerDeps,
-): Promise<StoryState> {
-  const artifactsDir = await ensureArtifacts(story, deps)
-  const stories = deps.storage.stories()
-  const modules = deps.storage.modules()
-  const module = modules.get(story.moduleId)
-  if (!module) {
-    story.blockedReason = `mr_creating: module ${story.moduleId} not found in storage`
-    return 'blocked'
-  }
-  if (!story.worktreePath) {
-    story.blockedReason = `mr_creating: story has no worktree path (cannot push)`
-    return 'blocked'
-  }
-
-  const httpClient =
-    (deps as unknown as { httpClient?: import('../utils/http-client.js').HttpClient }).httpClient ??
-    new HttpClient({ tag: 'gitlab-merger' })
-  const mergerDeps = { httpClient, logger: deps.logger }
-
-  // ---- Checkpoint 1: push branch ----
-  if (!story.pushedSha) {
-    try {
-      const pushResult = await pushBranch(mergerDeps, {
-        worktreePath: story.worktreePath,
-        branch: story.branch,
-        remote: 'origin',
-        userName: deps.config.gitlabPushUserName,
-        userEmail: deps.config.gitlabPushUserEmail,
-      })
-      story.pushedSha = pushResult.pushedSha ?? undefined
-      story.pushedAt = new Date().toISOString()
-      deps.logger.info(
-        `mr_creating: pushed ${story.branch} (sha=${story.pushedSha ?? '<none>'}, up-to-date=${pushResult.alreadyUpToDate})`,
-      )
-      await stories.put(story.id, story)
-      if (deps.trajectory) {
-        void deps.trajectory.append({
-          storyId: story.id,
-          kind: 'external_side_effect',
-          label: `git push ${story.branch}`,
-          payload: { sha: story.pushedSha, pushedAt: story.pushedAt, alreadyUpToDate: pushResult.alreadyUpToDate },
-        })
-      }
-    } catch (err) {
-      // Transient — stay in mr_creating, let the next tick retry.
-      const msg = (err as Error).message
-      deps.logger.warn(`mr_creating: push failed (will retry next tick): ${msg}`)
-      story.blockedReason = `mr_creating: push failed: ${msg}`
-      // We keep story.state unchanged by returning the same state; the
-      // outer while-loop will see no state advancement and re-dispatch.
-      await stories.put(story.id, story)
-      return 'mr_creating'
-    }
-  } else {
+async function conditionallyPush(story: StoryRecord, deps: StoryRunnerDeps): Promise<void> {
+  if (!story.worktreePath || !story.branch) {
     deps.logger.info(
-      `mr_creating: branch ${story.branch} already pushed at sha=${story.pushedSha}; skipping`,
+      `Story ${story.id}: no git worktree — skipping push (code stays in workspace)`,
     )
+    return
   }
 
-  // ---- Checkpoint 2: create / reuse MR ----
-  if (!story.mrUrl) {
-    const projectId = projectIdFromRepoUrl(module.repoUrl)
-    const description = buildMRDescription(
-      story,
-      [
-        `### Auto-RD spec`,
-        'See the artifact directory for the full `06-spec.md`.',
-        ``,
-        `### Verification`,
-        'See `11-verify-report.md`.',
-        ``,
-        `### Final review`,
-        'See `13-final-verify-standards.md` and `13-final-verify-spec.md`.',
-      ].join('\n'),
-    )
-    try {
-      // Effective GitLab token: per-workspace override first, else global.
-      // Resolved through the credentials seam (issue #10) — the value in
-      // `module.gitlabApiToken` is now a ref name, not the literal.
-      const gitlabResolution = await resolveGitlabToken(deps.credentials, module.id)
-      if (!gitlabResolution) {
-        deps.logger.error(
-          `[story-runner] no GitLab token configured for module ${module.id} (and no global); cannot create MR`,
-        )
-        throw new Error('no GitLab token configured')
-      }
-      const gitlabApiToken = gitlabResolution.value
-      const mr = await createOrReuseMR(mergerDeps, {
-        gitlabBaseUrl: deps.config.gitlabBaseUrl,
-        gitlabApiToken,
-        projectId,
-        sourceBranch: story.branch,
-        targetBranch: module.defaultBranch,
-        title: `[Auto-RD] ${story.title} (TAPD-${story.tapdId})`,
-        description,
-      })
-      story.mrIid = mr.mrIid
-      story.mrUrl = mr.webUrl
-      story.mrCreatedAt = new Date().toISOString()
-      story.mrReused = mr.reused
-      deps.logger.info(
-        `mr_creating: ${mr.reused ? 'reused' : 'created'} MR !${mr.mrIid} for ${story.branch}`,
-      )
-      await stories.put(story.id, story)
-      if (deps.trajectory) {
-        void deps.trajectory.append({
-          storyId: story.id,
-          kind: 'external_side_effect',
-          label: `${mr.reused ? 'reuse' : 'create'} MR !${mr.mrIid}`,
-          payload: { mrIid: mr.mrIid, mrUrl: mr.webUrl, reused: mr.reused, sourceBranch: story.branch, targetBranch: module.defaultBranch },
-        })
-      }
-    } catch (err) {
-      const msg = (err as Error).message
-      // 401 / 403 / 404 on project are config errors — block the story.
-      const transient = !(err as { transient?: boolean }).transient === false
-      if (!transient) {
-        story.blockedReason = `mr_creating: GitLab rejected the request (config error): ${msg}`
-        return 'blocked'
-      }
-      deps.logger.warn(`mr_creating: MR create failed (will retry next tick): ${msg}`)
-      story.blockedReason = `mr_creating: ${msg}`
-      await stories.put(story.id, story)
-      return 'mr_creating'
-    }
-  } else {
-    deps.logger.info(
-      `mr_creating: MR already exists at ${story.mrUrl}; skipping create`,
-    )
+  const result = await pushBranch(
+    { logger: deps.logger },
+    {
+      worktreePath: story.worktreePath,
+      branch: story.branch,
+      remote: 'origin',
+      userName: deps.config.gitlabPushUserName,
+      userEmail: deps.config.gitlabPushUserEmail,
+    },
+  )
+
+  story.pushedSha = result.pushedSha ?? undefined
+  story.pushedAt = new Date().toISOString()
+  await deps.storage.stories().put(story.id, story)
+  if (deps.trajectory) {
+    void deps.trajectory.append({
+      storyId: story.id,
+      kind: 'external_side_effect',
+      label: `push ${story.branch} → origin`,
+      payload: {
+        pushedSha: result.pushedSha,
+        alreadyUpToDate: result.alreadyUpToDate,
+        pushedAt: story.pushedAt,
+      },
+    })
   }
-
-  // Write a checkpoint file summarizing the actual side effects. Useful
-  // for auditing without trawling through logs.
-  const mrDoc = renderMrCheckpoint(story)
-  writeFileSyncOrLog(artifactsDir, '99-mr.md', mrDoc, deps.logger)
-  return 'tapd_syncing'
-}
-
-function renderMrCheckpoint(story: StoryRecord): string {
-  return [
-    `# MR — ${story.id}`,
-    ``,
-    `**Branch**: \`${story.branch}\``,
-    `**Pushed sha**: \`${story.pushedSha ?? '<not pushed>'}\``,
-    `**Pushed at**: ${story.pushedAt ?? '<n/a>'}`,
-    `**MR iid**: !${story.mrIid ?? '<n/a>'}`,
-    `**MR url**: ${story.mrUrl ?? '<not created>'}`,
-    `**MR created at**: ${story.mrCreatedAt ?? '<n/a>'}`,
-    `**Reused**: ${story.mrReused ?? false}`,
-    ``,
-    `Re-running this stage is safe: the runner checks \`story.pushedSha\``,
-    `and \`story.mrUrl\` and skips work already done.`,
-  ].join('\n')
-}
-
-/**
- * tapd_syncing — POST the MR link + status back to TAPD.
- *
- * M4-A: real HTTP via syncTapd. Checkpointed via story.tapdSyncedAt.
- *
- * Failure handling:
- *   - Transient HTTP / timeout / 5xx: increment tapdSyncAttempts; stay
- *     in tapd_syncing; runner re-tries next tick. The sync is
- *     idempotent so replays are safe.
- *   - 4xx other than 404: config error -> blocked.
- *   - Hard cap at 20 attempts: log error, park the story in 'failed'
- *     so the user can intervene. (Distinct from the SD-4 5-round
- *     breaker because a network outage lasting hours should not look
- *     the same as a code-level architecture issue.)
- */
-async function runTapdSyncingStage(
-  story: StoryRecord,
-  deps: StoryRunnerDeps,
-): Promise<StoryState> {
-  const artifactsDir = await ensureArtifacts(story, deps)
-
-  if (!story.mrUrl) {
-    story.blockedReason = `tapd_syncing: cannot sync without story.mrUrl (mr_creating must succeed first)`
-    return 'blocked'
-  }
-
-  if (!story.tapdSyncedAt) {
-    if ((story.tapdSyncAttempts ?? 0) >= 20) {
-      deps.logger.error(
-        `tapd_syncing: gave up after ${story.tapdSyncAttempts} attempts for story ${story.id}`,
-      )
-      story.blockedReason = `tapd_syncing: gave up after ${story.tapdSyncAttempts} transient attempts; manual intervention needed`
-      return 'failed'
-    }
-
-    try {
-      // Effective TAPD token: per-workspace override first, else global.
-      // Resolved through the credentials seam (issue #10).
-      const module = deps.storage.modules().get(story.moduleId)
-      const tapdModuleId = module?.id ?? story.moduleId
-      const tapdResolution = await resolveTapdToken(deps.credentials, tapdModuleId)
-      if (!tapdResolution) {
-        deps.logger.error(
-          `[story-runner] no TAPD token configured for module ${tapdModuleId} (and no global); cannot sync TAPD`,
-        )
-        throw new Error('no TAPD token configured')
-      }
-      const tapdApiToken = tapdResolution.value
-      await syncTapd({
-        tapdBaseUrl: deps.config.tapdBaseUrl,
-        tapdApiToken,
-        tapdId: story.tapdId,
-        mrUrl: story.mrUrl,
-        gitBranch: story.branch,
-      })
-      story.tapdSyncedAt = new Date().toISOString()
-      story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
-      deps.logger.info(`tapd_syncing: synced TAPD story ${story.tapdId}`)
-      await deps.storage.stories().put(story.id, story)
-      if (deps.trajectory) {
-        void deps.trajectory.append({
-          storyId: story.id,
-          kind: 'external_side_effect',
-          label: `tapd sync ${story.tapdId}`,
-          payload: { tapdId: story.tapdId, mrUrl: story.mrUrl, syncedAt: story.tapdSyncedAt, attempts: story.tapdSyncAttempts },
-        })
-      }
-    } catch (err) {
-      story.tapdSyncAttempts = (story.tapdSyncAttempts ?? 0) + 1
-      const msg = (err as Error).message
-      const transient = (err as { transient?: boolean }).transient !== false
-      if (!transient) {
-        story.blockedReason = `tapd_syncing: TAPD rejected the sync (config error): ${msg}`
-        return 'blocked'
-      }
-      deps.logger.warn(
-        `tapd_syncing: sync failed (attempt ${story.tapdSyncAttempts}/20, will retry): ${msg}`,
-      )
-      story.blockedReason = `tapd_syncing: ${msg}`
-      await deps.storage.stories().put(story.id, story)
-      return 'tapd_syncing'
-    }
-  } else {
-    deps.logger.info(
-      `tapd_syncing: TAPD already synced at ${story.tapdSyncedAt}; skipping`,
-    )
-  }
-
-  // Write the audit file (replacing the old M3 stub).
-  const tapdDoc = [
-    `# TAPD Sync — ${story.id}`,
-    ``,
-    `**Story**: ${story.title}`,
-    `**TAPD id**: ${story.tapdId}`,
-    `**MR url**: ${story.mrUrl}`,
-    `**Synced at**: ${story.tapdSyncedAt}`,
-    `**Attempts**: ${story.tapdSyncAttempts ?? 0}`,
-    ``,
-    `Re-running this stage is safe: the runner checks \`story.tapdSyncedAt\``,
-    `and skips the network call.`,
-  ].join('\n')
-
-  writeFileSyncOrLog(artifactsDir, '98-tapd-sync.md', tapdDoc, deps.logger)
-  return 'completed'
-}
-
-function writeFileSyncOrLog(dir: string, name: string, body: string, logger: Logger): void {
-  try {
-    const fs = require('node:fs') as typeof import('node:fs')
-    fs.writeFileSync(join(dir, name), body, 'utf-8')
-  } catch (err) {
-    logger.error(`Failed to write ${name}: ${(err as Error).message}`)
-  }
+  deps.logger.info(
+    `Story ${story.id}: pushed ${story.branch} (sha=${result.pushedSha ?? 'up-to-date'})`,
+  )
 }

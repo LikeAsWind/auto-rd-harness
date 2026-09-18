@@ -18,7 +18,11 @@
  *
  * This split lets a story be recovered cleanly across plugin restarts:
  * the storage layer persists `pushedSha` and `mrUrl` between runs, so
- * re-entering `mr_creating` skips already-completed checkpoints.
+ * re-entering the delivery task skips already-completed checkpoints.
+ *
+ * Ownership (two-tier split): `pushBranch` runs at the Tier-1 tail
+ * (conditional push); `createOrReuseMR` runs in the Tier-2 delivery
+ * task. Neither is called from the Tier-1 story runner anymore.
  *
  * NOT in scope:
  *   - Auto-merge / approvals / pipelines (M5+).
@@ -61,6 +65,8 @@ export interface CreateOrReuseMRParams {
   targetBranch: string
   title: string
   description: string
+  /** Numeric GitLab user ids to assign as reviewers (optional). */
+  reviewerIds?: number[]
 }
 
 export interface CreateOrReuseMRResult {
@@ -75,9 +81,14 @@ export interface CreateOrReuseMRResult {
  *
  * Configures the local user.name / user.email first so the commit
  * (if any) carries the auto-rd identity.
+ *
+ * Only a logger is required — pushing is a local `git` operation, not an
+ * HTTP call, so this is deliberately narrower than `GitLabMergerDeps`
+ * (which the MR functions use for their `httpClient`). The Tier-1 runner
+ * calls this directly with `{ logger }`.
  */
 export async function pushBranch(
-  deps: GitLabMergerDeps,
+  deps: { logger: Logger },
   params: PushBranchParams,
 ): Promise<PushBranchResult> {
   // Configure local identity for this push. Use --local so we don't
@@ -199,6 +210,9 @@ export async function createMR(
       target_branch: params.targetBranch,
       title: params.title,
       description: params.description,
+      ...(params.reviewerIds && params.reviewerIds.length > 0
+        ? { reviewer_ids: params.reviewerIds }
+        : {}),
       // remove_source_branch is GitLab-specific cleanup behaviour; we
       // leave it default (true on merge) -- branch cleanup happens
       // outside our scope.
@@ -235,6 +249,54 @@ export async function createOrReuseMR(
   const created = await createMR(deps, params)
   deps.logger.info(`createOrReuseMR: created new MR !${created.mrIid} for ${params.sourceBranch}`)
   return created
+}
+
+/**
+ * The subset of GitLab MR states the daily sweep (Tier 2) acts on.
+ * `opened` / `closed` / `merged` map 1:1 to GitLab's `state` field;
+ * the sweep treats a missing MR (deleted upstream) as `null`.
+ */
+export type MergeRequestState = 'opened' | 'closed' | 'merged'
+
+/**
+ * Read the current `state` of a single MR by project path + iid.
+ *
+ * The daily sweep calls this for every `mr_opened` story: merged →
+ * close TAPD; closed (unmerged) → revert + notify; opened → do nothing
+ * and keep `mr_opened`. Returns `null` when the MR no longer exists
+ * (deleted upstream) or the response does not carry a usable `state`.
+ */
+export async function getMRState(
+  deps: GitLabMergerDeps,
+  params: {
+    gitlabBaseUrl: string
+    gitlabApiToken: string
+    projectId: string
+    mrIid: number
+  },
+): Promise<MergeRequestState | null> {
+  const url = new URL(params.gitlabBaseUrl)
+  url.pathname = joinUrlPath(
+    url.pathname,
+    '/api/v4/projects',
+    params.projectId,
+    'merge_requests',
+    String(params.mrIid),
+  )
+
+  const resp = await deps.httpClient.request<{ state?: string }>({
+    url: url.toString(),
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${params.gitlabApiToken}`,
+      Accept: 'application/json',
+    },
+    timeoutMs: 15_000,
+  })
+
+  const state = resp.json<{ state?: string }>()?.state
+  if (state === 'opened' || state === 'closed' || state === 'merged') return state
+  return null
 }
 
 /**

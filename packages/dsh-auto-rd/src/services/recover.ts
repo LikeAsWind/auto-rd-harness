@@ -19,8 +19,8 @@
  *      (context, clarification, ..., etc.): set state back to 'pending'
  *      and bump updatedAt. StoryQueue's next tick picks it up and
  *      dispatches from the new "current" stage via StoryRunner.runStory.
- *   3. Stories in terminal states (completed, failed, blocked) are left
- *      alone.
+ *   3. Stories in terminal states (delivery_ready, mr_opened, completed,
+ *      failed, blocked, pending) are left alone.
  *
  * Notes:
  *   - We do NOT attempt to cold-resume an existing mainSessionId in M1,
@@ -34,6 +34,8 @@ import type { StoryState } from '../domain/schema.js'
 import type { TrajectoryRecorder } from './trajectory.js'
 
 const TERMINAL_STATES: ReadonlySet<StoryState> = new Set<StoryState>([
+  'delivery_ready',
+  'mr_opened',
   'completed',
   'failed',
   'blocked',

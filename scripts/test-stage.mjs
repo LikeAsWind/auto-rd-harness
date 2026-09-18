@@ -158,8 +158,8 @@ check('reachability: verify bucket is hit', allStates.some((s) => stateToBucket(
     currentPhaseLabel('verifying'),
     currentPhaseLabel('reviewing'),
     currentPhaseLabel('final_verifying'),
-    currentPhaseLabel('mr_creating'),
-    currentPhaseLabel('tapd_syncing'),
+    currentPhaseLabel('delivery_ready'),
+    currentPhaseLabel('mr_opened'),
   ]
   for (const lbl of userFacing) {
     check(`label non-internal: "${lbl}"`, lbl !== null && STAGE_KEYS.every((k) => lbl !== k))

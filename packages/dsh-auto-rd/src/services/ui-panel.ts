@@ -182,7 +182,7 @@ export interface PanelModel {
   health: PanelHealth
 }
 
-const TERMINAL_STATES = new Set(['completed', 'failed'])
+const TERMINAL_STATES = new Set(['delivery_ready', 'mr_opened', 'completed', 'failed'])
 
 /**
  * Compute the "what is missing" checklist from the current config.
@@ -533,6 +533,10 @@ export function stateBadge(state: string): string {
   switch (state) {
     case 'completed':
       return '\u2713'
+    case 'mr_opened':
+      return '\u2197'
+    case 'delivery_ready':
+      return '\u2713'
     case 'failed':
       return '\u2717'
     case 'blocked':
@@ -545,8 +549,6 @@ export function stateBadge(state: string): string {
     case 'verifying':
     case 'reviewing':
     case 'final_verifying':
-    case 'mr_creating':
-    case 'tapd_syncing':
       return '\u21BB'
     default:
       return '\u00B7'

@@ -18,6 +18,7 @@ const root = resolve(__dirname, '..')
 const SUITES = [
   ['pattern audit', 'scripts/audit-patterns.mjs'],
   ['clarify', 'scripts/test-clarify.mjs'],
+  ['resolution', 'scripts/test-resolution.mjs'],
   ['ui panel', 'scripts/test-ui-panel.mjs'],
   ['panel route', 'scripts/test-panel-route.mjs'],
   ['client half', 'scripts/test-client-half.mjs'],
