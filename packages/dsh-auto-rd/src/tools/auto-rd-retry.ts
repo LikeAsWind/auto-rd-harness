@@ -7,8 +7,10 @@
  *   - retry: from 'blocked' / 'failed' / 'completed' (the last is
  *     unusual but possible if a TAPD sync went sideways after the
  *     story was already marked completed) -> set state='pending',
- *     reset retryCount=0. The StoryQueue picks the story up on its
- *     next scan.
+ *     reset retryCount=0 AND clear the runner's ledger guards
+ *     (loopCount=0, totalSteps=0) so a story parked by the loop /
+ *     drift guard actually resumes instead of re-blocking on its next
+ *     scan. The StoryQueue picks the story up on its next scan.
  *
  *   - skip: terminal 'failed' state, with the human's note recorded
  *     in blockedReason. There is no recovery from skip -- it's a
@@ -46,7 +48,7 @@ export function autoRdRetryTool(deps: AutoRdRetryToolDeps) {
   return {
     name: 'auto_rd_retry',
     description:
-      'Manually retry or skip a blocked/failed story. action="retry" sets state to pending and resets retryCount; "skip" sets state to failed with the note; "reset_to_pending" sets state to pending without resetting retryCount.',
+      'Manually retry or skip a blocked/failed story. action="retry" sets state to pending, resets retryCount, and clears the runner loop/drift guards (loopCount/totalSteps); "skip" sets state to failed with the note; "reset_to_pending" sets state to pending without resetting retryCount.',
     parameters: {
       type: 'object',
       required: ['storyId', 'action'],
@@ -88,9 +90,20 @@ export function autoRdRetryTool(deps: AutoRdRetryToolDeps) {
         story.state = 'pending'
         story.retryCount = 0
         story.blockedReason = undefined
+        // The rollback-loop / drift guards (loopCount >= 5, totalSteps >= 40)
+        // park a story as 'blocked' for manual review. 'retry' IS that manual
+        // review: the human has looked at blockedReason and decided to run the
+        // story again, so the guards must be released too. Without this, a
+        // story parked at loopCount=5 would re-block on the very next
+        // StoryQueue scan because the runner checks the guard before any
+        // stage runs.
+        story.loopCount = 0
+        story.totalSteps = 0
       } else if (args.action === 'reset_to_pending') {
         story.state = 'pending'
-        // retryCount untouched on purpose.
+        // retryCount untouched on purpose (breaker trip — keep the count).
+        // loopCount / totalSteps also untouched: reset_to_pending is the
+        // "preserve the ledger" variant, not the manual-review reset.
       } else {
         // skip — reason is code-prefixed per the runner's convention (§12.1).
         story.state = 'failed'

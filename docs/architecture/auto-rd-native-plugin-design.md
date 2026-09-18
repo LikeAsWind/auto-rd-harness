@@ -1596,7 +1596,7 @@ priority: 'background'——不打断用户当前对话
 返回：`{ ok: boolean, ... }`，不抛错（DSH 处理 throw 差）
 
 `mark_reviewed` 行为：
-- `approve`：state → `pending`，retryCount → 0，blockedReason 清除
+- `approve`：state → `pending`，retryCount → 0，blockedReason 清除，并清零 `loopCount` / `totalSteps`（与 `auto_rd_retry(retry)` 一致）
 - `request_changes`：append 到 blockedReason，state 不变
 - `skip`：state → `failed`，record decision
 
@@ -1610,9 +1610,9 @@ priority: 'background'——不打断用户当前对话
 ```
 
 `action` 区别：
-- `retry`：state → pending，retryCount = 0（vs `reset_to_pending` 不重置 retryCount）
+- `retry`：state → pending，retryCount = 0，**并清零 runner 的护栏计数器 `loopCount = 0`、`totalSteps = 0`**——这是人工复核循环护栏（loopCount ≥ 5 / totalSteps ≥ 40 触发的 `blocked`）的恢复路径，否则下次扫描会在任何 stage 运行前再次触发护栏重新 blocked。
 - `skip`：terminal failed
-- `reset_to_pending`：state → pending，retryCount 不变（breaker trip 后想保留计数）
+- `reset_to_pending`：state → pending，retryCount 不变（breaker trip 后想保留计数）；`loopCount` / `totalSteps` 也保持不变（保留账本语义）
 
 ### 7.4 System Prompt Section
 

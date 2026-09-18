@@ -984,7 +984,16 @@ async function runCriticHandler(
   writeFileSync(join(req.artifactsDir, '04-critique.md'), report, 'utf-8')
 
   // [CRITIQUE_BLOCKED] rolls the story back to clarification (design §6.7).
-  if (critique.systemic.length > 0 && critique.coverage.length === 0) {
+  //
+  // BUT: a story with zero RAW acceptance criteria is NOT a systemic gap —
+  // the spec stage generates criteria from title + description + the selected
+  // proposal, and `clarify.ts` records `missing_acceptance_criteria` as
+  // advisory-only. `coverage.length === 0` is exactly that case, and
+  // `critique.systemic` then carries only the "no acceptance criteria"
+  // sentinel string. Blocking on it sends clarify → resolve → brainstorm →
+  // critic in an unbounded loop that trips the runner's loopCount guard.
+  // Only roll back when a real, supplied criterion is uncovered by all three.
+  if (critique.coverage.length > 0 && critique.systemic.length > 0) {
     return {
       status: 'blocked',
       reason: `critique found a systemic gap: ${critique.systemic[0]}`,

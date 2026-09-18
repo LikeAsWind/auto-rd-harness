@@ -154,10 +154,15 @@ export function autoRdTriggerTool(deps: AutoRdTriggerToolDeps) {
       if (args.decision === 'approve') {
         // Approve releases a blocked story back to 'pending' so the
         // queue picks it up again. retryCount is reset so the breaker
-        // doesn't fire on the very first re-attempt.
+        // doesn't fire on the very first re-attempt, and the runner's
+        // ledger guards (loopCount/totalSteps) are cleared so a story
+        // parked by the loop/drift guard actually resumes instead of
+        // re-blocking on its next scan.
         story.state = 'pending'
         story.blockedReason = undefined
         story.retryCount = 0
+        story.loopCount = 0
+        story.totalSteps = 0
       } else if (args.decision === 'request_changes') {
         // Reasons are code-prefixed per the runner's convention (§12.1).
         story.blockedReason = `review: requested changes${noteSuffix}`
