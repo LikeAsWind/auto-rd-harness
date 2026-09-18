@@ -27,7 +27,7 @@ import type { Logger } from '../utils/logger.js'
 import { WorkspaceManager } from './workspace-manager.js'
 import { AgentProvider } from './agent-provider.js'
 import { parsePlannerMarkdown, type ParsedPlannerTask } from './planner-parser.js'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   pushBranch,
@@ -64,6 +64,13 @@ export interface StoryRunnerDeps {
    * display title to the story title after creation.
    */
   sessionTitle?: import('../types/dsh-services.js').SessionTitleService
+  /**
+   * Optional DSH live agent registry (`ctx.agents`). Used to resolve
+   * the story's parent Agent when spawning role subagents (Block A).
+   * Absent in headless profiles — role dispatch falls back to the
+   * deterministic handler path.
+   */
+  agents?: import('../types/dsh-services.js').AgentsService
   /**
    * DSH credentials service. The runner resolves TAPD and GitLab
    * tokens at the moment of an HTTP call rather than reading them
@@ -151,6 +158,58 @@ export class StoryRunner {
     )
 
     while (!isTerminalState(story!.state)) {
+      // ---- Ledger guardrails (design §5) ----
+      // These are checked BEFORE any stage runs so a story that has
+      // drifted (too many role steps) or rolled back too many times parks
+      // itself instead of looping forever. The main agent cannot override
+      // them — they live in host code.
+      if (story!.totalSteps >= 40) {
+        const prev = story!.state
+        story!.state = 'blocked'
+        story!.blockedReason = `runner: totalSteps >= 40 (${story!.totalSteps}); orchestration drift — manual review required`
+        story!.updatedAt = new Date().toISOString()
+        await stories.put(story!.id, story!)
+        if (this.deps.trajectory) {
+          void this.deps.trajectory.append({
+            storyId: story!.id,
+            kind: 'state_transition',
+            label: `${prev} → blocked (totalSteps guard)`,
+            payload: {
+              from: prev,
+              to: 'blocked',
+              totalSteps: story!.totalSteps,
+              loopCount: story!.loopCount,
+              failure: 'totalSteps >= 40',
+              retry: story!.retryCount,
+            },
+          })
+        }
+        break
+      }
+      if (story!.loopCount >= 5) {
+        const prev = story!.state
+        story!.state = 'blocked'
+        story!.blockedReason = `runner: loopCount >= 5 (${story!.loopCount}); rollback loop unbound — manual review required`
+        story!.updatedAt = new Date().toISOString()
+        await stories.put(story!.id, story!)
+        if (this.deps.trajectory) {
+          void this.deps.trajectory.append({
+            storyId: story!.id,
+            kind: 'state_transition',
+            label: `${prev} → blocked (loopCount guard)`,
+            payload: {
+              from: prev,
+              to: 'blocked',
+              totalSteps: story!.totalSteps,
+              loopCount: story!.loopCount,
+              failure: 'loopCount >= 5',
+              retry: story!.retryCount,
+            },
+          })
+        }
+        break
+      }
+
       const handler = STAGE_HANDLERS[story!.state]
       if (!handler) {
         story!.state = 'failed'
@@ -160,23 +219,90 @@ export class StoryRunner {
         break
       }
 
+      // ---- Handoff-break detection (design §3/§4) ----
+      // Before the current role runs, confirm its input artifacts exist on
+      // disk. A missing input means the previous role never wrote what this
+      // role needs; roll back to the producer instead of charging forward.
+      // This is counted as a rollback (loopCount) and NEVER silent.
+      const role = STATE_TO_ROLE[story!.state]
+      if (role) {
+        try {
+          const artifactsDir = await ensureArtifacts(story!, this.deps)
+          const rollback = handoffBreakRollback(artifactsDir, role)
+          if (rollback) {
+            story!.loopCount += 1
+            const missing = missingInputArtifacts(artifactsDir, contractFor(role)!)
+            story!.blockedReason = `runner: handoff break before ${role} — missing input artifact(s): ${missing.join(', ')}`
+            story!.updatedAt = new Date().toISOString()
+            await stories.put(story!.id, story!)
+            if (this.deps.trajectory) {
+              void this.deps.trajectory.append({
+                storyId: story!.id,
+                kind: 'state_transition',
+                label: `${story!.state} → ${rollback} (handoff break)`,
+                payload: {
+                  from: story!.state,
+                  to: rollback,
+                  totalSteps: story!.totalSteps,
+                  loopCount: story!.loopCount,
+                  failure: `missing input artifact(s): ${missing.join(', ')}`,
+                  retry: story!.retryCount,
+                },
+              })
+            }
+            this.deps.logger.warn(
+              `Story ${storyId} handoff break ${story!.state} → ${rollback}: missing ${missing.join(', ')}`,
+            )
+            story!.state = rollback
+            story!.updatedAt = new Date().toISOString()
+            await stories.put(story!.id, story!)
+            continue
+          }
+        } catch (handoffErr) {
+          // A failure to even inspect the artifacts dir is not a handoff
+          // break — let the stage's own error path handle it.
+          this.deps.logger.warn(
+            `Story ${storyId} handoff check failed: ${(handoffErr as Error).message}`,
+          )
+        }
+      }
+
       const previousState = story!.state
       let next: StoryState
+      let stageFailure: string | undefined
       try {
+        // Count this as one role step (design §2.2 `totalSteps`).
+        story!.totalSteps += 1
         next = await handler(story!, this.deps)
       } catch (err) {
+        stageFailure = (err as Error).message
         story!.retryCount += 1
         if (story!.retryCount >= 3) {
           story!.state = 'failed'
-          story!.blockedReason = `runner: stage ${previousState} failed 3 times: ${(err as Error).message}`
+          story!.blockedReason = `runner: stage ${previousState} failed 3 times: ${stageFailure}`
         } else {
           // Stay in the same state and let StoryQueue retry.
           this.deps.logger.warn(
-            `Story ${storyId} stage ${previousState} threw (attempt ${story!.retryCount}/3): ${(err as Error).message}`,
+            `Story ${storyId} stage ${previousState} threw (attempt ${story!.retryCount}/3): ${stageFailure}`,
           )
         }
         story!.updatedAt = new Date().toISOString()
         await stories.put(story!.id, story!)
+        if (this.deps.trajectory) {
+          void this.deps.trajectory.append({
+            storyId: story!.id,
+            kind: 'state_transition',
+            label: `${previousState} → ${story!.state} (error)`,
+            payload: {
+              from: previousState,
+              to: story!.state,
+              totalSteps: story!.totalSteps,
+              loopCount: story!.loopCount,
+              failure: stageFailure,
+              retry: story!.retryCount,
+            },
+          })
+        }
         break
       }
 
@@ -186,6 +312,79 @@ export class StoryRunner {
         break
       }
 
+      // ---- Output-artifact validation (design §3/§4) ----
+      // A role may report success without writing its output (a subagent
+      // that stopped 'completed' but produced no artifact, or a deterministic
+      // handler whose write failed). Never silent: roll back to the role's
+      // producer and count the handoff break against loopCount. Only for
+      // FORWARD progress — a rollback/failed verdict legitimately writes no
+      // output, so it is exempt.
+      if (!isRollbackTransition(previousState, next) && next !== 'failed' && next !== 'blocked') {
+        const outRole = STATE_TO_ROLE[previousState]
+        const outContract = outRole ? contractFor(outRole) : undefined
+        if (outRole && outContract) {
+          try {
+            const outDir = await ensureArtifacts(story!, this.deps)
+            if (!outputArtifactPresent(outDir, outContract)) {
+              const producer = PREVIOUS_ROLE_STATE[outRole]
+              story!.blockedReason = `runner: ${outRole} reported success but did not write ${outContract.writes}`
+              story!.updatedAt = new Date().toISOString()
+              await stories.put(story!.id, story!)
+              if (this.deps.trajectory) {
+                void this.deps.trajectory.append({
+                  storyId: story!.id,
+                  kind: 'state_transition',
+                  label: `${previousState} → ${producer ?? 'failed'} (missing output artifact)`,
+                  payload: {
+                    from: previousState,
+                    to: producer ?? 'failed',
+                    totalSteps: story!.totalSteps,
+                    loopCount: story!.loopCount,
+                    failure: `missing output artifact: ${outContract.writes}`,
+                    retry: story!.retryCount,
+                  },
+                })
+              }
+              this.deps.logger.warn(
+                `Story ${storyId} missing output ${outContract.writes} after ${outRole}; rolling back`,
+              )
+              if (producer) {
+                story!.loopCount += 1
+                story!.state = producer
+                story!.updatedAt = new Date().toISOString()
+                await stories.put(story!.id, story!)
+                continue
+              }
+              // No producer to roll back to (first role in the chain) —
+              // the pipeline cannot proceed without its root artifact.
+              story!.state = 'failed'
+              story!.blockedReason = `runner: ${outRole} produced no ${outContract.writes} and has no producer to roll back to`
+              story!.updatedAt = new Date().toISOString()
+              await stories.put(story!.id, story!)
+              break
+            }
+          } catch (outErr) {
+            // Inspecting the artifacts dir failed; the stage error path and
+            // guards remain the backstop, so log and continue rather than
+            // fabricate a handoff break.
+            this.deps.logger.warn(
+              `Story ${storyId} output check failed: ${(outErr as Error).message}`,
+            )
+          }
+        }
+      }
+
+      // ---- loopCount (design §2.2) ----
+      // Every BACKWARD transition (a rollback: critic→clarification, or
+      // testing/verifying/reviewing/final_verifying→fixing) advances the
+      // rollback loop counter. Forward progress leaves it untouched.
+      if (isRollbackTransition(previousState, next)) {
+        story!.loopCount += 1
+        this.deps.logger.warn(
+          `Story ${storyId} rollback ${previousState} → ${next} (loopCount=${story!.loopCount}/5)`,
+        )
+      }
+
       // ---- Trajectory: record the state transition BEFORE persisting
       // so the trajectory carries the exact from/to pair the runner saw.
       if (this.deps.trajectory) {
@@ -193,7 +392,13 @@ export class StoryRunner {
           storyId: story!.id,
           kind: 'state_transition',
           label: `${previousState} → ${next}`,
-          payload: { from: previousState, to: next, retryCount: story!.retryCount },
+          payload: {
+            from: previousState,
+            to: next,
+            totalSteps: story!.totalSteps,
+            loopCount: story!.loopCount,
+            retry: story!.retryCount,
+          },
         })
       }
 
@@ -220,10 +425,30 @@ export class StoryRunner {
     if (!sessions || typeof sessions.create !== 'function') return
 
     try {
+      // Block A: if the story does not already hang under a workspace
+      // session, resolve the CURRENT initiator as the workspace session
+      // parent so the story session joins the live session tree. This is
+      // what turns a bare `mainSessionId` into an actual parent/child edge
+      // the subagent runtime can walk.
+      if (!story.parentSessionId && this.deps.agents) {
+        const parent = this.deps.agents.currentInitiator()
+        if (parent) story.parentSessionId = String(parent.id)
+      }
+
       const handle = sessions.create(undefined, {
-        meta: { cwd: story.worktreePath, origin: 'subagent' },
+        meta: {
+          cwd: story.worktreePath,
+          origin: 'subagent',
+          // Block A: bind the story session to the rd-pipeline preset and
+          // hang it under the workspace session in the session tree.
+          agentPreset: 'rd-pipeline',
+          parentSession: story.parentSessionId,
+        },
       })
       story.mainSessionId = handle.id
+      // Persist the preset id the session was composed from so a resumed
+      // session cannot replay under a different composition (design §2.2).
+      story.agentPreset = 'rd-pipeline'
       story.updatedAt = new Date().toISOString()
       await this.deps.storage.stories().put(story.id, story)
 
@@ -256,6 +481,172 @@ function isTerminalState(state: StoryState): boolean {
   return state === 'completed' || state === 'failed' || state === 'blocked'
 }
 
+/**
+ * True when a transition is a ROLLBACK (the story moves backwards in the
+ * fixed orchestration order), which advances `loopCount`. The only legal
+ * backward edges in the 19-state machine are:
+ *
+ *   critic → clarification          (systemic design gap)
+ *   testing/verifying/reviewing/final_verifying → fixing   (fix loop)
+ */
+function isRollbackTransition(from: StoryState, to: StoryState): boolean {
+  if (from === 'critic' && to === 'clarification') return true
+  const fixLoopStates: StoryState[] = ['testing', 'verifying', 'reviewing', 'final_verifying']
+  return fixLoopStates.includes(from) && to === 'fixing'
+}
+
+// ---- Artifact contract (design §3) ------------------------------------
+//
+// The role handoff interface is the artifacts directory, not session
+// history (O-3). Each row declares the fixed input files a role may read
+// and the fixed output file it must write. The runner validates the INPUT
+// set before a role is spawned; a missing input is a handoff break, which
+// rolls back to the producing role instead of silently charging forward.
+
+interface ArtifactContractRow {
+  /** Role/persona name, matching `req.agentName` where unambiguous. */
+  role: string
+  /** Fixed input filenames the role may read. */
+  reads: string[]
+  /** Fixed output filename the role must write. */
+  writes: string
+}
+
+const ARTIFACT_CONTRACT: ArtifactContractRow[] = [
+  { role: 'context', reads: [], writes: '01-context.md' },
+  { role: 'clarification', reads: ['01-context.md'], writes: '02-clarification.md' },
+  { role: 'brainstorm', reads: ['01-context.md', '02-clarification.md'], writes: '03-proposal-{minimal,clean,novel}.md' },
+  { role: 'critic', reads: ['03-proposal-minimal.md', '03-proposal-clean.md', '03-proposal-novel.md'], writes: '04-critique.md' },
+  { role: 'decision', reads: ['04-critique.md'], writes: '05-decision.md' },
+  { role: 'spec', reads: ['05-decision.md'], writes: '06-spec.md' },
+  { role: 'planner', reads: ['06-spec.md'], writes: '07-tasks.md' },
+  { role: 'implementation', reads: ['07-tasks.md', '06-spec.md'], writes: '08-impl-<taskId>.md' },
+  { role: 'test', reads: ['08-impl-<taskId>.md'], writes: '09-test-report.md' },
+  { role: 'fix', reads: ['08-impl-<taskId>.md', '09-test-report.md'], writes: '10-fix-report-attempt-<n>.md' },
+  { role: 'verification', reads: ['08-impl-<taskId>.md', '06-spec.md'], writes: '11-verify-report.md' },
+  { role: 'review', reads: [], writes: '12-review-<taskId>-<axis>.md' },
+  { role: 'final-verify', reads: [], writes: '13-final-verify-<axis>.md' },
+  { role: 'mr_creating', reads: [], writes: '99-mr.md' },
+  { role: 'tapd_syncing', reads: ['99-mr.md'], writes: '98-tapd-sync.md' },
+]
+
+/** Resolve a contract row by role. Output filenames may carry the `<>` /
+ * `{}` placeholders the fixed file uses for per-task / per-axis variants. */
+function contractFor(role: string): ArtifactContractRow | undefined {
+  return ARTIFACT_CONTRACT.find((r) => r.role === role)
+}
+
+/** Escape regex metacharacters so a fixed artifact name is matched literally. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Compile a contract filename (which may carry `<...>` / `{...}` placeholders
+ * for per-task / per-axis / per-attempt variants) into an anchored regex whose
+ * placeholders match any non-empty filename run. `08-impl-<taskId>.md` matches
+ * `08-impl-T001.md`; `12-review-<taskId>-<axis>.md` matches
+ * `12-review-T001-standards.md`.
+ */
+function artifactPatternToRegExp(pattern: string): RegExp {
+  const source = pattern
+    .split(/<[^>]+>|\{[^}]+\}/)
+    .map(escapeRegExp)
+    .join('[^/\\\\]+')
+  return new RegExp(`^${source}$`)
+}
+
+/**
+ * The exact filenames in `reads` that are MISSING from the artifacts dir.
+ * A non-empty result is a handoff break (design §4): the previous role did
+ * not leave the input this role needs. A placeholder name is satisfied by
+ * "at least one file matching the family" (see `artifactPatternToRegExp`).
+ */
+function missingInputArtifacts(artifactsDir: string, contract: ArtifactContractRow): string[] {
+  if (contract.reads.length === 0) return []
+  const present = existsSync(artifactsDir) ? readdirSync(artifactsDir) : []
+  return contract.reads.filter((f) => {
+    if (present.includes(f)) return false
+    const re = artifactPatternToRegExp(f)
+    return !present.some((p) => re.test(p))
+  })
+}
+
+/**
+ * The "previous role" state for every contract role — the role that produced
+ * this role's INPUT. This is the §4 rollback target ("产物文件缺失 → 上一个
+ * 角色") for a handoff break, whether the break is a missing INPUT (detected
+ * before the role runs) or a missing OUTPUT (detected after a role reports
+ * success without writing its artifact). `null` marks the first role in the
+ * chain, which has no producer to roll back to.
+ */
+const PREVIOUS_ROLE_STATE: Record<string, StoryState | null> = {
+  context: null,
+  clarification: 'context',
+  brainstorm: 'clarification',
+  critic: 'brainstorm',
+  decision: 'critic',
+  spec: 'decision',
+  planner: 'spec',
+  implementation: 'planning',
+  test: 'implementing',
+  fix: 'testing',
+  verification: 'testing',
+  review: 'verifying',
+  'final-verify': 'reviewing',
+  mr_creating: 'final_verifying',
+  tapd_syncing: 'mr_creating',
+}
+
+/**
+ * Validate a role's INPUT artifacts before spawning it. Returns the state
+ * to roll back to when a handoff break is found, or `null` when inputs are
+ * intact.
+ */
+function handoffBreakRollback(
+  artifactsDir: string,
+  role: string,
+): StoryState | null {
+  const contract = contractFor(role)
+  if (!contract) return null
+  const missing = missingInputArtifacts(artifactsDir, contract)
+  if (missing.length === 0) return null
+  return PREVIOUS_ROLE_STATE[role] ?? null
+}
+
+/** Map the 19 story states onto the artifact-contract role names. */
+const STATE_TO_ROLE: Partial<Record<StoryState, string>> = {
+  context: 'context',
+  clarification: 'clarification',
+  brainstorm: 'brainstorm',
+  critic: 'critic',
+  decision: 'decision',
+  spec: 'spec',
+  planning: 'planner',
+  implementing: 'implementation',
+  testing: 'test',
+  fixing: 'fix',
+  verifying: 'verification',
+  reviewing: 'review',
+  final_verifying: 'final-verify',
+  mr_creating: 'mr_creating',
+  tapd_syncing: 'tapd_syncing',
+}
+
+/**
+ * True when the contract's OUTPUT artifact exists on disk (family match, so
+ * per-task / per-axis / per-attempt placeholders are accepted). Used to detect
+ * a role that reported success but never wrote its output — never silent
+ * (design §3/§4).
+ */
+function outputArtifactPresent(artifactsDir: string, contract: ArtifactContractRow): boolean {
+  if (contract.writes.length === 0) return true
+  if (!existsSync(artifactsDir)) return false
+  const present = readdirSync(artifactsDir)
+  if (present.includes(contract.writes)) return true
+  return present.some((p) => artifactPatternToRegExp(contract.writes).test(p))
+}
+
 // ---- Stage Handlers (M2) ----
 
 /**
@@ -284,6 +675,8 @@ function storyInput(story: StoryRecord) {
       title: story.title,
       description: story.description,
       acceptanceCriteria: story.acceptanceCriteria,
+      // Block A: the main session id is the parent Agent for role-spawn.
+      mainSessionId: story.mainSessionId,
     },
   }
 }
@@ -300,8 +693,8 @@ function recordArtifact(
   story.artifacts = {
     ...story.artifacts,
     [key]: {
-      // The kind is informational; we map agent names to artifact kinds the
-      // schema already supports (see ArtifactRefSchema in domain/schema.ts).
+      // The kind is informational; every one of the 13 artifact kinds in
+      // ArtifactRefSchema is reachable from a stage here.
       kind: key as
         | 'context'
         | 'clarification'
@@ -309,7 +702,13 @@ function recordArtifact(
         | 'critique'
         | 'decision'
         | 'spec'
-        | 'plan',
+        | 'plan'
+        | 'implementation'
+        | 'test'
+        | 'fix'
+        | 'verification'
+        | 'review'
+        | 'final_verify',
       filename,
       summary,
       createdAt: new Date().toISOString(),
@@ -671,6 +1070,9 @@ async function runImplementingStage(
 
     task.attemptCount += 1
     task.updatedAt = new Date().toISOString()
+    // Block A: persist the child subagent session id onto the TaskRecord so
+    // the implementation session lineage is recoverable (design §2.2).
+    if (result.childId) task.implementationSessionId = result.childId
     if (result.status === 'success') {
       task.status = 'completed'
       task.implementationResult = result.summary
@@ -790,7 +1192,9 @@ async function runFixingStage(
   recordArtifact(
     story,
     'fix',
-    '10-fix-report.md',
+    // Unify with the handler's on-disk name (design §10 item 3): the fix
+    // report is per-attempt, never a bare `10-fix-report.md`.
+    `10-fix-report-attempt-${attempt}.md`,
     result.status === 'success' ? result.summary ?? '' : `attempt ${attempt} failed: ${result.reason}`,
   )
   return 'testing'
@@ -892,6 +1296,11 @@ async function runReviewingStage(
   }
 
   const summary = verdicts.map((v) => `${v.axis}:${v.status}`).join(' | ')
+  // Family pattern (same convention as brainstorm's
+  // `03-proposal-{minimal,clean,novel}.md`): `artifactPatternToRegExp`
+  // matches it against BOTH on-disk per-axis files written by the
+  // ReviewHandler (`12-review-<taskId>-<axis>.md`), so the ledger and the
+  // disk stay consistent without needing a second artifact kind.
   recordArtifact(story, 'review', `12-review-${targetTaskId}-{standards,spec}.md`, summary)
 
   if (rejected) {
@@ -935,12 +1344,11 @@ async function runFinalVerifyingStage(
     if (status !== 'success') rejected = true
   }
 
-  recordArtifact(
-    story,
-    'final_verify',
-    '13-final-verify-{standards,spec}.md',
-    verdicts.join(' | '),
-  )
+  // Family pattern (same convention as brainstorm): the FinalVerifyHandler
+  // writes one file per axis (`13-final-verify-<axis>.md`); recording the
+  // `{standards,spec}` family keeps the ledger consistent with the disk
+  // files that `artifactPatternToRegExp` will match.
+  recordArtifact(story, 'final_verify', '13-final-verify-{standards,spec}.md', verdicts.join(' | '))
 
   if (rejected) {
     deps.logger.warn(`FinalVerify: rejected (${verdicts.filter((v) => !v.endsWith(':success')).join(', ')})`)

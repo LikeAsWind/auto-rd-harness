@@ -62,8 +62,10 @@ import { Logger } from './utils/logger.js'
  *     a client-realm concern (see src/client/client.js). Declaring it
  *     here would have blocked the plugin from ever mounting.
  *   - `workspaceRegistry`, `timer`, `fs`, `shell`, `subprocess`,
- *     `agents` and `sessionPersistence` were REMOVED because nothing in
+ *     and `sessionPersistence` were REMOVED because nothing in
  *     the plugin reads them; they were dead wait-conditions.
+ *   - `agents` was re-added (Block A) so the runner can resolve the
+ *     story's parent Agent when spawning role subagents.
  *   - `webServer` is OPTIONAL. The web profile ships
  *     `@deepseek-ai/dsh-host-webserver` and exposes the host HTTP server;
  *     the headless / sdk / acp profiles do not. Listing it here would
@@ -78,6 +80,7 @@ import { Logger } from './utils/logger.js'
 export const inject = [
   'storageDomain',
   'subagents',
+  'agents',
   'tools',
   'systemPrompt',
   'sessions',
@@ -464,6 +467,12 @@ function startServices(
   const sessionTitle = ctx.get('sessionTitle' as never) as
     | import('./types/dsh-services.js').SessionTitleService
     | undefined
+  // Live agent registry (`ctx.agents`) — the runner needs it to resolve
+  // the story's parent Agent when spawning role subagents. Declared in
+  // `inject`; may still be absent in headless profiles.
+  const agents = ctx.get('agents' as never) as
+    | import('./types/dsh-services.js').AgentsService
+    | undefined
   const runner = new StoryRunner(ctx, {
     storage,
     logger,
@@ -473,6 +482,7 @@ function startServices(
     trajectory,
     sessions,
     sessionTitle,
+    agents,
     credentials,
   })
   const queue = new StoryQueue(ctx, { storage, logger, config, runner })

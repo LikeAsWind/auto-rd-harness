@@ -79,34 +79,105 @@ export interface StorageDomainService {
 // ---- agents / subagents ----------------------------------------------
 
 /**
- * An initiating Agent. `subagents.sendMessage` requires a real Agent as
- * its sender, and `agents.currentInitiator()` is the supported way to
- * obtain one for the current asynchronous driver chain (it is
- * process-local, so a bare timer callback has no initiator).
+ * Live Agent handle: a session-backed identity. This mirrors the real
+ * `Agent` from `@deepseek-ai/dsh-agent` (`{ readonly id: SessionId }`),
+ * whose `id` is a branded string. We persist it into `mainSessionId`
+ * and use it as the `parent` in a `SubagentStartRequest`.
  */
 export interface AgentRef {
-  readonly id?: string
+  readonly id: string
 }
 
+/**
+ * `ctx.agents` — the live agent registry (`AgentRegistry`). Creation is
+ * owned by the loop's factory; the runner only READS the parent agent it
+ * bound via `ensureSession`, so we declare the lookup surface only.
+ */
 export interface AgentsService {
   currentInitiator(): AgentRef | undefined
   requireInitiator(): AgentRef
   get(id: string): AgentRef | undefined
 }
 
+/** Start-time capability flags reported by a subagent provider. */
+export interface SubagentCapabilities {
+  readonly agentOptions: boolean
+  readonly outputSchema: boolean
+  readonly depthLimit: boolean
+  readonly toolFilter: boolean
+  readonly persona: boolean
+}
+
+/** Per-scope filter over global tools (`ToolRestriction` in dsh-tools). */
+export interface ToolRestriction {
+  readonly allow?: readonly string[]
+  readonly deny?: readonly string[]
+}
+
+/**
+ * A `SubagentStartRequest`, exactly as `ctx.subagents.start` consumes it.
+ * `prompt` is the child's user message (ContentBlock[]); `parent` and
+ * `signal` are REQUIRED. `persona` / `toolFilter` / `maxDepth` /
+ * `outputSchema` are capability-gated — a provider without the matching
+ * flag rejects the start with `UNSUPPORTED_CAPABILITY`, so callers must
+ * feature-detect via `getProvider(name).capabilities` first.
+ */
+export interface SubagentStartRequest {
+  readonly label?: string
+  readonly prompt: ContentBlock[]
+  readonly parent: AgentRef
+  readonly signal: AbortSignal
+  readonly persona?: string
+  readonly toolFilter?: ToolRestriction
+  readonly maxDepth?: number
+}
+
+/** Terminal stop reason of a finished subagent run. */
+export type SubagentStopReason = 'completed' | 'aborted' | 'error' | 'max-tokens' | 'refusal'
+
+/** The settled result of a one-shot subagent run. */
+export interface SubagentResult {
+  readonly output: ContentBlock[]
+  readonly stopReason: SubagentStopReason
+  readonly structured?: unknown
+  readonly diagnostic?: unknown
+}
+
+/** An owned, published one-shot run returned by `ctx.subagents.start`. */
+export interface SubagentRun {
+  /** The child's durable session id — persist this, do not discard it. */
+  readonly id: string
+  readonly result: Promise<SubagentResult>
+  dispose(): Promise<void>
+}
+
+/** The provider surface `ctx.subagents.getProvider(name)` returns. */
+export interface SubagentProviderRef {
+  readonly name: string
+  readonly capabilities: SubagentCapabilities
+}
+
+/**
+ * `ctx.subagents` — the subagent capability seam (`SubagentRuntime`).
+ * `start(name, request)` where `name` is a provider string (e.g.
+ * `'spawn'`) and `request` a validated `SubagentStartRequest`.
+ * `sendMessage` steers a model/host-authored message into an adjacent
+ * continuable session, with `sender` an exact live Agent.
+ */
+export interface SubagentSendMessageOptions {
+  readonly signal: AbortSignal
+}
+
 export interface SubagentsService {
-  /**
-   * Send a message from `sender` into `targetId`.
-   *
-   * The first parameter is an Agent, NOT a provider name — passing a
-   * string here fails at runtime.
-   */
+  start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
+  getProvider(name: string): SubagentProviderRef | undefined
+  list(): string[]
   sendMessage(
     sender: AgentRef,
     targetId: string,
-    content: Array<{ type: 'text'; text: string }>,
-    options?: Record<string, unknown>,
-  ): Promise<unknown>
+    content: ContentBlock[],
+    options: SubagentSendMessageOptions,
+  ): Promise<string>
 }
 
 // ---- sessions --------------------------------------------------------
@@ -266,12 +337,12 @@ export interface SystemPromptService {
 // ---- Subagent handlers (internal) ------------------------------------
 
 /**
- * The narrow shape AgentProvider uses to launch a subagent run. The
- * real service also offers continuable children and discovery; we only
- * use the one-shot start.
+ * The narrow shape AgentProvider uses to launch a one-shot subagent run.
+ * Kept as a local alias so the dispatch path compiles in isolation; the
+ * real `ctx.subagents` satisfies this via `SubagentsService` above.
  */
 export interface SubagentsStartService {
-  start(name: string, request: Record<string, unknown>): Promise<unknown>
+  start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 }
 
 // ---- credentials -----------------------------------------------------

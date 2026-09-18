@@ -81,11 +81,13 @@ const PLUGIN_PATCH = join(PKG_DIR, 'cordis.patch.yml');
 const BUNDLE_NAME = '@yangzhitong/dsh-auto-rd';
 const BLOCK_BEGIN = '# >>> auto-rd (managed by scripts/install-to-dsh.mjs) >>>';
 const BLOCK_END   = '# <<< auto-rd <<<';
+const PRESET_DIR_REL = 'agent-presets/rd-pipeline';
+const PRESET_ID = 'rd-pipeline';
 
 const HELP = `install-to-dsh — wire @yangzhitong/dsh-auto-rd into a local DSH profile
 
 Usage:
-  node scripts/install-to-dsh.mjs [--profile <dir>] [--dry-run] [--uninstall] [--help]
+  node scripts/install-to-dsh.mjs [--profile <dir>] [--dry-run] [--uninstall] [--preset-only] [--help]
 
 Defaults:
   profile   $DSH_HOME/profiles or ~/.dsh/profiles
@@ -94,17 +96,23 @@ Defaults:
   uninstall removes the bundle from dsh.profile.bundles and runs pnpm/npm/yarn remove
             (also strips a legacy managed block from cordis.patch.yml if present)
 
+--preset-only  copy just the rd-pipeline agent preset into the DSH user root
+               (~/.dsh/.agent-presets/rd-pipeline/) with NO build/pack/pm call.
+               Use this when the shell is unavailable or the profile is managed
+               out-of-band; it is the only step the new-session picker needs.
+
 This script never sees or prints your tokens. Set these env vars in the
 shell that launches DSH:
   DSH_TAPD_API_TOKEN, DSH_GITLAB_API_TOKEN`;
 
 function parseArgs(argv) {
-  const out = { profile: null, dryRun: false, uninstall: false, help: false };
+  const out = { profile: null, dryRun: false, uninstall: false, presetOnly: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') out.profile = argv[++i];
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--uninstall') out.uninstall = true;
+    else if (a === '--preset-only') out.presetOnly = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else throw new Error(`unknown flag: ${a}`);
   }
@@ -342,12 +350,67 @@ function upsertManagedBlock(original, entryYaml) {
   return { text, changed: true, action: 'replaced' };
 }
 
+/**
+ * Resolve the DSH home directory (the parent that holds both `profiles`
+ * and `.agent-presets`). Mirrors `defaultProfileDir` but returns the
+ * home root rather than a profile bundle dir.
+ */
+function resolveDshHome() {
+  if (process.env.DSH_HOME) return process.env.DSH_HOME;
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) throw new Error('cannot resolve DSH home: set DSH_HOME or HOME/USERPROFILE');
+  return join(home, '.dsh');
+}
+
+/**
+ * Deliver the `rd-pipeline` agent preset into the USER root
+ * (`${DSH_HOME:-$HOME/.dsh}/.agent-presets/rd-pipeline/`).
+ *
+ * The preset ships inside the package (`agent-presets/rd-pipeline/`), but
+ * DSH's roster only scans the user root and the shipped root beside the
+ * deployment config — not arbitrary bundle directories. Copying it into the
+ * user root is the delivery path §10 item 1 calls for. Idempotent: a re-run
+ * overwrites the two files with the freshly built source.
+ */
+function installPreset(dryRun) {
+  const src = join(PKG_DIR, PRESET_DIR_REL);
+  if (!existsSync(src)) {
+    process.stdout.write(`[preset] skipped: source preset not found at ${src}\n`);
+    return;
+  }
+  const dst = join(resolveDshHome(), '.agent-presets', PRESET_ID);
+  if (dryRun) {
+    process.stdout.write(`(dry-run) would copy ${src} -> ${dst}\n`);
+    return;
+  }
+  mkdirSync(dst, { recursive: true });
+  for (const name of ['agent.cordis.yml', 'preset.yml']) {
+    const s = join(src, name);
+    const d = join(dst, name);
+    if (existsSync(s)) copyFileSync(s, d);
+  }
+  process.stdout.write(`[preset] copied ${PRESET_ID} preset -> ${dst}\n`);
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(HELP + '\n');
     return;
   }
+
+  // --preset-only: deliver just the `rd-pipeline` agent preset into the
+  // user root, with no build, pack, or package-manager call. This is the
+  // only step that a broken shell (or a machine where the profile is
+  // managed out-of-band) still needs, and it is pure copyFileSync — no
+  // subprocess. It exists so the preset shows up in the new-session
+  // picker even when the rest of the install cannot run.
+  if (args.presetOnly) {
+    installPreset(args.dryRun);
+    process.stdout.write('Restart DSH (or reopen the new-session list) to see 研发流水线.\n');
+    return;
+  }
+
   const profileDir = resolve(args.profile || defaultProfileDir());
   ensureProfile(profileDir);
 
@@ -391,8 +454,14 @@ function main() {
     if (existsSync(cacheDir)) {
       rmSync(cacheDir, { recursive: true, force: true });
       process.stdout.write(`[uninstall] removed local tarball cache: ${cacheDir}\n`);
+    }
 
-      process.stdout.write('Done. Restart DSH to pick up the change.\n');
+    // 5. Drop the delivered `rd-pipeline` preset from the user root (see
+    //    installPreset). Best-effort: the user may have hand-edited it.
+    const presetDir = join(resolveDshHome(), '.agent-presets', PRESET_ID);
+    if (!args.dryRun && existsSync(presetDir)) {
+      rmSync(presetDir, { recursive: true, force: true });
+      process.stdout.write(`[uninstall] removed preset ${PRESET_ID} -> ${presetDir}\n`);
     }
 
     process.stdout.write('Done. Restart DSH to pick up the change.\n');
@@ -524,6 +593,7 @@ function main() {
   }
 
   // Next steps
+  installPreset(args.dryRun);
   process.stdout.write(`[5/5] Next steps:\n`);
   process.stdout.write(`       edit ${patchFile} to set tapdApiToken, gitlabApiToken, modules:\n`);
   process.stdout.write(`       (defaults are wired; tokens stay in the launching shell's env:\n`);

@@ -158,8 +158,29 @@ export const StoryRecordSchema = z.object({
   branch: z.string().describe('Git branch name, e.g. auto-rd/TAPD-12345'),
   worktreePath: z.string().optional().describe('Absolute path to git worktree; null until created'),
   mainSessionId: z.string().optional().describe('Top-level session id; null until created'),
+  /**
+   * Id of the agent preset the story's top-level session was composed
+   * from (`rd-pipeline` once Block B lands). Persisted so a resumed
+   * session cannot silently replay history under a different composition.
+   */
+  agentPreset: z.string().optional(),
+  /**
+   * Durable session lineage: the session this story's main session was
+   * spawned under, when the runner was driven by a parent orchestrator.
+   */
+  parentSessionId: z.string().optional(),
   artifacts: z.record(z.string(),ArtifactRefSchema).default({}),
   retryCount: z.number().int().min(0).default(0),
+  /**
+   * Total role-spawn steps consumed by this story. Guardrail: >= 40 →
+   * blocked (orchestration drift).
+   */
+  totalSteps: z.number().int().min(0).default(0),
+  /**
+   * Cross-stage rollback loop count (fix ↔ verify cycles). Guardrail:
+   * >= 5 → blocked.
+   */
+  loopCount: z.number().int().min(0).default(0),
   blockedReason: z.string().optional(),
   mrUrl: z.string().optional(),
 
@@ -272,7 +293,7 @@ export const AUTORD_DOMAIN_NAME = 'auto_rd'
  * (§10) re-runs after the rebuild so any in-flight stories get a
  * clean slate to start over.
  */
-export const AUTORD_DOMAIN_VERSION = 5
+export const AUTORD_DOMAIN_VERSION = 6
 
 export function buildAutoRdDomainTables() {
   return {

@@ -1,7 +1,8 @@
-// Clarify tests — the HARD-GATE (B-4) ambiguity detector.
+// Clarify tests — the ambiguity detector.
 //
 // Covers:
-//   - missing acceptance criteria -> blocking
+//   - missing acceptance criteria -> ADVISORY ONLY (no longer a hard gate;
+//     the spec stage generates criteria — AC 语义修正, design §7)
 //   - empty / very short description -> blocking
 //   - vague terms in a criterion -> blocking, with the term recorded
 //   - untestable (too short) criterion -> blocking
@@ -58,25 +59,40 @@ const GOOD = {
 }
 
 // ---- Missing acceptance criteria ---------------------------------
+//
+// AC 语义修正 (design §7): a story with no supplied acceptance criteria
+// is NOT parked — the criteria are generated at the spec stage. The
+// detector records an ADVISORY finding (never blocking) so the ledger
+// still shows it.
 
 {
   const r = clarifyStory({ ...GOOD, acceptanceCriteria: undefined })
-  check('no AC: unbounded', r.classification === 'unbounded')
+  check('no AC: still bounded', r.classification === 'bounded', r.classification)
   check(
-    'no AC: finding kind is missing_acceptance_criteria',
-    r.blocking.some((f) => f.kind === 'missing_acceptance_criteria'),
+    'no AC: zero blocking findings',
+    r.blocking.length === 0,
     JSON.stringify(r.blocking.map((f) => f.kind)),
   )
   check(
-    'no AC: question asks for acceptance criteria',
-    /acceptance criteria/i.test(r.blocking[0].question),
-    r.blocking[0].question,
+    'no AC: advisory finding is missing_acceptance_criteria',
+    r.advisory.some((f) => f.kind === 'missing_acceptance_criteria'),
+    JSON.stringify(r.advisory.map((f) => f.kind)),
+  )
+  check(
+    'no AC: advisory mentions generation at the spec stage',
+    /generated/i.test(r.advisory.find((f) => f.kind === 'missing_acceptance_criteria')?.question ?? ''),
+    r.advisory.find((f) => f.kind === 'missing_acceptance_criteria')?.question,
   )
 }
 
 {
   const r = clarifyStory({ ...GOOD, acceptanceCriteria: '   ' })
-  check('blank AC: unbounded', r.classification === 'unbounded')
+  check('blank AC: still bounded', r.classification === 'bounded', r.classification)
+  check(
+    'blank AC: advisory (not blocking)',
+    r.blocking.length === 0 && r.advisory.some((f) => f.kind === 'missing_acceptance_criteria'),
+    JSON.stringify({ blocking: r.blocking, advisory: r.advisory }),
+  )
 }
 
 // ---- Description length ------------------------------------------

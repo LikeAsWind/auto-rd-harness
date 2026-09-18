@@ -31,10 +31,19 @@
  * - SD-3: No-Subagents Contract (subagents must not spawn further subagents)
  */
 import { join } from 'node:path'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config.js'
 import type { Logger } from '../utils/logger.js'
+import type {
+  AgentRef,
+  AgentsService,
+  ContentBlock,
+  SubagentProviderRef,
+  SubagentResult,
+  SubagentRun,
+  SubagentStartRequest,
+} from '../types/dsh-services.js'
 import { ContextAgent } from '../agents/context.js'
 import { ClarificationAgent } from '../agents/clarification.js'
 import { BrainstormAgent, type BrainstormVariation } from '../agents/brainstorm.js'
@@ -60,7 +69,7 @@ import {
 import { probeProject } from './project-probe.js'
 import { buildPlan } from './plan-builder.js'
 import { clarifyStory } from './clarify.js'
-import { buildSpec } from './spec-builder.js'
+import { buildSpec, generateAcceptanceCriteria } from './spec-builder.js'
 import {
   buildProposals,
   critiqueProposals,
@@ -77,6 +86,39 @@ import {
  * produce per-axis reports).
  */
 export type ReviewAxis = 'standards' | 'spec'
+
+/**
+ * Read the GENERATED acceptance criteria from `06-spec.md` (AC 语义修正,
+ * design §7). The verify / review / final-verify stages must check the
+ * implementation against the criteria the Spec stage produced — NOT the
+ * raw `story.acceptanceCriteria`, which may be empty and is no longer a
+ * Clarification hard-gate.
+ *
+ * Extraction is tolerant: it reads the `## Behavior` numbered list. When
+ * the file is missing or unreadable, it falls back to re-generating the
+ * criteria from the story's title + description (same source the Spec
+ * builder uses) so a verify stage never silently has nothing to check.
+ */
+function readGeneratedAcceptanceCriteria(
+  artifactsDir: string,
+  story: { title: string; description?: string },
+): string[] {
+  try {
+    const markdown = readFileSync(join(artifactsDir, '06-spec.md'), 'utf-8')
+    const behavior = markdown.split(/\n## /).find((s) => /^Behavior\b/.test(s))
+    if (behavior) {
+      const lines = behavior
+        .split('\n')
+        .slice(1)
+        .map((l) => l.replace(/^\d+\.\s*/, '').trim())
+        .filter((l) => l.length > 0 && !l.startsWith('_'))
+      if (lines.length > 0) return lines
+    }
+  } catch {
+    // Fall through to regeneration.
+  }
+  return generateAcceptanceCriteria({ title: story.title, description: story.description ?? '' })
+}
 
 export interface AgentDispatchRequest {
   agentName: string
@@ -106,9 +148,9 @@ export interface AgentDispatchRequest {
 }
 
 export type AgentDispatchResult =
-  | { status: 'success'; summary?: string }
-  | { status: 'blocked'; reason: string }
-  | { status: 'failed'; reason: string }
+  | { status: 'success'; summary?: string; childId?: string }
+  | { status: 'blocked'; reason: string; childId?: string }
+  | { status: 'failed'; reason: string; childId?: string }
 
 type AgentHandler = (
   req: AgentDispatchRequest,
@@ -134,22 +176,22 @@ export interface AgentProviderDeps {
 /**
  * The minimum shape of DSH's `subagents` service that we depend on.
  *
- * We only use a tiny surface: a single `start` that takes a label and a
- * request bag and returns a child session id (or throws). This keeps us
- * decoupled from the upstream type definitions and lets us compile in
- * isolation. If the real service offers more, we ignore it.
+ * `start(name, request)` mirrors the real `SubagentRuntime.start` where
+ * `name` is a provider string (e.g. `'spawn'`) and `request` is a
+ * validated `SubagentStartRequest` (`prompt` ContentBlock[], required
+ * `parent` + `signal`, capability-gated `persona`/`toolFilter`/`maxDepth`).
+ * The returned run carries the child's durable session id and a promise
+ * that resolves (never rejects) with the child's terminal result.
  */
 interface SubagentsService {
-  start(args: {
-    provider?: string
-    label: string
-    request: Record<string, unknown>
-  }): Promise<{ childId?: string }>
+  start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
+  getProvider(name: string): SubagentProviderRef | undefined
 }
 
 export class AgentProvider {
   private readonly registry = new Map<string, RegistryEntry>()
   private readonly subagents: SubagentsService | null
+  private readonly agents: AgentsService | null
   private brainstormSpecByVariation: Partial<Record<BrainstormVariation, AgentSpec>> | null = null
   private brainstormHandler: AgentHandler | null = null
   /**
@@ -174,6 +216,7 @@ export class AgentProvider {
     // services — it returns undefined rather than throwing when the service
     // is not registered in this fiber.
     this.subagents = this.tryGetSubagents()
+    this.agents = this.tryGetAgents()
     if (this.subagents) {
       this.deps.logger.info('AgentProvider: ctx.subagents detected — real dispatch path active')
     } else {
@@ -181,6 +224,26 @@ export class AgentProvider {
         'AgentProvider: ctx.subagents unavailable — using the deterministic handler path',
       )
     }
+    if (this.agents) {
+      this.deps.logger.info('AgentProvider: ctx.agents detected — parent Agent resolution active')
+    } else {
+      this.deps.logger.warn(
+        'AgentProvider: ctx.agents unavailable — role spawns will not bind a parent Agent',
+      )
+    }
+  }
+
+  private tryGetAgents(): AgentsService | null {
+    try {
+      const svc = (this.ctx as unknown as { get?: (k: string) => unknown }).get?.(
+        'agents',
+      ) as AgentsService | undefined
+      if (svc && typeof (svc as AgentsService).get === 'function') return svc
+    } catch {
+      // ctx.get may throw if the service is not whitelisted in `inject:`.
+      // Treat that as "not available" and skip parent binding.
+    }
+    return null
   }
 
   private tryGetSubagents(): SubagentsService | null {
@@ -256,45 +319,19 @@ export class AgentProvider {
       'utf-8',
     )
 
-    // Real path: hand off to DSH's subagents service. We don't await a
-    // session finish — we just record that a subagent was launched. The
-    // state machine remains the source of truth for advancement; the
-    // agent's artifact is what we trust, and the deterministic handler below
-    // produces it synchronously. Future milestones will wire the actual
-    // subagent result into the same artifact file.
-    if (this.subagents) {
-      try {
-        await this.subagents.start({
-          provider: 'spawn',
-          label: req.label,
-          request: {
-            persona: spec.persona,
-            toolFilter: spec.toolFilter,
-            worktreePath: req.worktreePath,
-            artifactsDir: req.artifactsDir,
-            inputs: req.inputs,
-            variation: req.variation,
-          },
-        })
-        this.deps.logger.info(`Subagent launched for ${req.agentName}${req.variation ? ` (${req.variation})` : ''}${req.axis ? ` (${req.axis})` : ''}${req.taskId ? ` (${req.taskId})` : ''}: ${req.label}`)
-      } catch (err) {
-        this.deps.logger.error(
-          `Subagent start failed for ${req.agentName}: ${(err as Error).message}; using the deterministic handler`,
-        )
-      }
-    }
-
-    // ---- Trajectory logging ----
-    // Record the dispatch event before running the handler so the
-    // trajectory captures the exact inputs that were sent. The
-    // storyId is read from `req.inputs.story.id` (every agent input
-    // bag carries a story snippet by contract).
     const storyId = (req.inputs as { story?: { id?: string } } | undefined)?.story?.id
+    const qualifier =
+      `${spec.name}` +
+      `${req.variation ? `/${req.variation}` : ''}` +
+      `${req.axis ? `/${req.axis}` : ''}` +
+      `${req.taskId ? `/${req.taskId}` : ''}`
+
+    // ---- Trajectory logging (dispatch) ----
     if (this.deps.trajectory && storyId) {
       void this.deps.trajectory.append({
         storyId,
         kind: 'agent_dispatch',
-        label: `${spec.name}${req.variation ? `/${req.variation}` : ''}${req.axis ? `/${req.axis}` : ''}${req.taskId ? `/${req.taskId}` : ''}: ${req.label}`,
+        label: `${qualifier}: ${req.label}`,
         payload: {
           agent: spec.name,
           variation: req.variation,
@@ -308,19 +345,149 @@ export class AgentProvider {
       })
     }
 
-    const result = await handler(req, this.deps)
-
-    // Record the handler result for the same story.
-    if (this.deps.trajectory && storyId) {
-      void this.deps.trajectory.append({
-        storyId,
-        kind: 'agent_result',
-        label: `${spec.name}${req.variation ? `/${req.variation}` : ''}${req.axis ? `/${req.axis}` : ''}${req.taskId ? `/${req.taskId}` : ''}: ${result.status}`,
-        payload: { agent: spec.name, result },
-      })
+    // ---- Model-backed path (Block A) ----
+    // Spawn a REAL subagent carrying the persona + tool filter, bind it to
+    // the story's main-session Agent as parent, cap recursion at depth 1,
+    // AWAIT its terminal result, and KEEP the child session id. The child
+    // writes the stage artifact through its own tools; the deterministic
+    // handler runs ONLY when no subagent service is available (standalone
+    // / headless build — the "advance without a model" guarantee).
+    const parent = this.resolveParent(req)
+    if (this.subagents && parent) {
+      try {
+        const result = await this.runSubagentOnce(req, spec, parent, qualifier)
+        this.logTrajectoryResult(storyId, qualifier, result)
+        return result
+      } catch (err) {
+        this.deps.logger.error(
+          `Subagent run failed for ${req.agentName}: ${(err as Error).message}; falling back to the deterministic handler`,
+        )
+      }
+    } else if (this.subagents && !parent) {
+      this.deps.logger.warn(
+        `No parent Agent resolvable for ${req.agentName} (mainSessionId missing or ctx.agents unavailable); using the deterministic handler`,
+      )
     }
 
+    // ---- Deterministic fallback ----
+    const result = await handler(req, this.deps)
+    this.logTrajectoryResult(storyId, qualifier, result)
     return result
+  }
+
+  /**
+   * Resolve the parent Agent for a role spawn: the story's main session
+   * agent (recorded into `StoryRecord.mainSessionId` by `ensureSession`),
+   * then the live initiator as a last resort. Returns undefined when
+   * neither the registry nor a main-session id is available.
+   */
+  private resolveParent(req: AgentDispatchRequest): AgentRef | undefined {
+    const mainSessionId = (req.inputs as { story?: { mainSessionId?: string } } | undefined)?.story
+      ?.mainSessionId
+    if (this.agents && mainSessionId) {
+      const parent = this.agents.get(mainSessionId)
+      if (parent) return parent
+      this.deps.logger.warn(
+        `mainSessionId=${mainSessionId} not found in the agent registry; falling back to the current initiator`,
+      )
+    }
+    if (this.agents) {
+      try {
+        return this.agents.currentInitiator()
+      } catch {
+        return undefined
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * Build the child's user prompt from the dispatch request. The persona
+   * (system prompt) is carried separately via `SubagentStartRequest.persona`;
+   * this is the concrete task instance: which role, which artifacts dir,
+   * which worktree, and any per-dispatch parameters.
+   */
+  private buildSubagentPrompt(req: AgentDispatchRequest, qualifier: string): ContentBlock[] {
+    const instance: Record<string, unknown> = {
+      role: qualifier,
+      worktreePath: req.worktreePath,
+      artifactsDir: req.artifactsDir,
+      task: 'Produce your stage artifact under the artifacts dir per your persona, then stop.',
+    }
+    if (req.variation) instance.variation = req.variation
+    if (req.axis) instance.axis = req.axis
+    if (req.taskId) instance.taskId = req.taskId
+    if (req.inputs && Object.keys(req.inputs).length > 0) instance.inputs = req.inputs
+    return [{ type: 'text', text: JSON.stringify(instance) }]
+  }
+
+  /**
+   * Feature-detect the provider's capabilities, build a valid
+   * `SubagentStartRequest`, spawn, await the terminal result, and map the
+   * stop reason onto our `AgentDispatchResult`. The child session id is
+   * surfaced on the result so callers (the runner) persist it rather than
+   * discarding it.
+   */
+  private async runSubagentOnce(
+    req: AgentDispatchRequest,
+    spec: AgentSpec,
+    parent: AgentRef,
+    qualifier: string,
+  ): Promise<AgentDispatchResult> {
+    const provider = this.subagents!.getProvider('spawn')
+    const caps = provider?.capabilities
+
+    const prompt = this.buildSubagentPrompt(req, qualifier)
+    // Capability-gated fields. A provider without the matching flag rejects
+    // the start with UNSUPPORTED_CAPABILITY, so pass each only when the
+    // provider advertises it (built with conditional spread because the
+    // request type's fields are readonly).
+    const request: SubagentStartRequest = {
+      label: req.label,
+      prompt,
+      parent,
+      signal: new AbortController().signal,
+      ...(caps?.persona ? { persona: spec.persona } : {}),
+      ...(caps?.toolFilter && spec.toolFilter ? { toolFilter: spec.toolFilter } : {}),
+      // maxDepth:1 — role children must NOT recursively spawn (SD-3).
+      ...(caps?.depthLimit ? { maxDepth: 1 } : {}),
+    }
+
+    const run: SubagentRun = await this.subagents!.start('spawn', request)
+    this.deps.logger.info(
+      `Subagent spawned for ${qualifier}: child=${run.id} label=${req.label}`,
+    )
+
+    const child: SubagentResult = await run.result
+    const childId = String(run.id)
+    const outputText = child.output
+      .filter((b) => b.type === 'text')
+      .map((b) => String(b.text ?? ''))
+      .join('\n')
+      .trim()
+
+    if (child.stopReason === 'completed') {
+      return { status: 'success', summary: outputText || `Subagent ${qualifier} completed`, childId }
+    }
+    return {
+      status: 'failed',
+      reason: `subagent ${qualifier} stopped with reason=${child.stopReason}${outputText ? `: ${outputText.slice(0, 200)}` : ''}`,
+      childId,
+    }
+  }
+
+  private logTrajectoryResult(
+    storyId: string | undefined,
+    qualifier: string,
+    result: AgentDispatchResult,
+  ): void {
+    if (!this.deps.trajectory || !storyId) return
+    void this.deps.trajectory.append({
+      storyId,
+      kind: 'agent_result',
+      label: `${qualifier}: ${result.status}`,
+      payload: { agent: qualifier, result },
+    })
   }
 
   /**
@@ -932,11 +1099,15 @@ async function runSpecHandler(
 
   writeFileSync(join(req.artifactsDir, '06-spec.md'), spec.markdown, 'utf-8')
 
+  // AC 语义修正 (design §7): buildSpec now guarantees a non-empty
+  // criteria set — raw AC when supplied, otherwise generated from
+  // title + description. Zero criteria is therefore unreachable here;
+  // keep the guard as a defensive assertion that the contract is never
+  // silently empty.
   if (spec.criteria.length === 0) {
-    // The Clarification gate should have caught this. If a story reached
-    // Spec with no criteria, the spec is unverifiable — say so loudly
-    // rather than emitting a spec that cannot fail.
-    deps.logger.warn(`SpecAgent: story ${story.id} reached spec with zero acceptance criteria`)
+    deps.logger.warn(
+      `SpecAgent: story ${story.id} produced an empty criteria set despite generation — spec is unverifiable`,
+    )
   }
 
   return {
@@ -1112,7 +1283,7 @@ async function runTestHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string; acceptanceCriteria?: string }
+  const story = req.inputs.story as { id: string; title: string; acceptanceCriteria?: string; description?: string }
   deps.logger.info(`TestAgent running for story ${story.id}`)
 
   // ---- Real test execution ----
@@ -1132,6 +1303,20 @@ async function runTestHandler(
   const acRow = story.acceptanceCriteria
     ? `| ${story.acceptanceCriteria.slice(0, 60)} | ${result.command || '<skipped>'} | ${result.passed ? '✅' : '❌'} | exit=${result.exitCode ?? 'n/a'} |`
     : `| (no AC) | ${result.command || '<skipped>'} | ${result.passed ? '✅' : '❌'} | exit=${result.exitCode ?? 'n/a'} |`
+
+  // AC 语义修正 (design §7): the test stage reads the GENERATED criteria
+  // from `06-spec.md`, not the raw story AC, so a story that arrived with
+  // no AC still gets a real per-criterion coverage table.
+  const generatedAc = readGeneratedAcceptanceCriteria(req.artifactsDir, {
+    title: story.title,
+    description: (story as { description?: string }).description,
+  })
+  const acRows = generatedAc
+    .map(
+      (c) =>
+        `| ${c.slice(0, 60)} | ${result.command || '<skipped>'} | ${result.passed ? '✅' : '❌'} | exit=${result.exitCode ?? 'n/a'} |`,
+    )
+    .join('\n') || acRow
 
   const verdict = result.passed ? 'PASS' : 'FAIL'
   const sentinel = result.passed ? '[TEST_PASS]' : '[TEST_FAIL]'
@@ -1157,7 +1342,7 @@ async function runTestHandler(
     `## AC Coverage`,
     `| AC | Test | Result | Evidence |`,
     `|----|------|--------|----------|`,
-    acRow,
+    acRows,
     ``,
     `## Failures`,
     result.passed || result.skippedReason
@@ -1288,7 +1473,7 @@ async function runVerificationHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
+  const story = req.inputs.story as { id: string; title: string; description?: string }
   deps.logger.info(`VerificationAgent running for story ${story.id}`)
 
   // ---- Real whole-branch verification ----
@@ -1298,6 +1483,12 @@ async function runVerificationHandler(
   // diff and the suite are gathered for real here.
   const diff = await readWorktreeDiff(req.worktreePath)
   const testRun = await runWorktreeTests(req.worktreePath)
+  // AC 语义修正 (design §7): verify against the GENERATED criteria from
+  // `06-spec.md`, not the raw story AC (which may be empty).
+  const generatedAc = readGeneratedAcceptanceCriteria(req.artifactsDir, {
+    title: story.title,
+    description: story.description,
+  })
 
   // ---- Deterministic whole-branch checks ----
   const checks: Array<{ name: string; status: 'PASS' | 'FAIL' | 'SKIP'; evidence: string }> = []
@@ -1328,6 +1519,10 @@ async function runVerificationHandler(
 
   const failed = checks.filter((c) => c.status === 'FAIL')
   const skipped = checks.filter((c) => c.status === 'SKIP')
+
+  // Per-AC detail: list the GENERATED criteria (from 06-spec.md) so the
+  // report names what the verify stage actually checked against.
+  const acLines = generatedAc.map((c) => `- ${c}`).join('\n') || '_none_'
 
   // Verdict mapping (design §5): PASS -> reviewing, PARTIAL -> fixing,
   // REJECT -> blocked.
@@ -1361,6 +1556,9 @@ async function runVerificationHandler(
     diff.filesChanged.length > 0
       ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
       : '_no files changed_',
+    ``,
+    `## Acceptance Criteria Verified`,
+    acLines,
     ``,
     `## Runs (fresh)`,
     `| Check | Result | Evidence |`,
@@ -1425,7 +1623,7 @@ async function runReviewHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
+  const story = req.inputs.story as { id: string; title: string; description?: string }
   const axis = req.axis ?? 'standards'
   const taskId = req.taskId ?? 'T001'
   deps.logger.info(`ReviewAgent running for story ${story.id} axis=${axis} task=${taskId}`)
@@ -1435,6 +1633,14 @@ async function runReviewHandler(
   // [REVIEW_*_CHANGES] verdict after reading the diff; we just
   // gather the material.
   const diff = await readWorktreeDiff(req.worktreePath)
+  // AC 语义修正 (design §7): review against the GENERATED criteria, not
+  // the raw story AC. For the `spec` axis these are the acceptance
+  // obligations the Spec stage derived.
+  const generatedAc = readGeneratedAcceptanceCriteria(req.artifactsDir, {
+    title: story.title,
+    description: story.description,
+  })
+  const acLines = generatedAc.map((c) => `- ${c}`).join('\n') || '_none_'
 
   const report = [
     `# Review — ${taskId} — ${axis}`,
@@ -1449,6 +1655,9 @@ async function runReviewHandler(
     diff.filesChanged.length > 0
       ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
       : '_no files changed_',
+    ``,
+    `## Acceptance Criteria Under Review`,
+    acLines,
     ``,
     `## Commits`,
     diff.logText.trim()
@@ -1491,11 +1700,18 @@ async function runFinalVerifyHandler(
   req: AgentDispatchRequest,
   deps: AgentProviderDeps,
 ): Promise<AgentDispatchResult> {
-  const story = req.inputs.story as { id: string; title: string }
+  const story = req.inputs.story as { id: string; title: string; description?: string }
   const axis = req.axis ?? 'standards'
   deps.logger.info(`FinalVerifyAgent running for story ${story.id} axis=${axis}`)
 
   const diff = await readWorktreeDiff(req.worktreePath)
+  // AC 语义修正 (design §7): final-verify checks against the GENERATED
+  // criteria from `06-spec.md`.
+  const generatedAc = readGeneratedAcceptanceCriteria(req.artifactsDir, {
+    title: story.title,
+    description: story.description,
+  })
+  const acLines = generatedAc.map((c) => `- ${c}`).join('\n') || '_none_'
   // Fresh re-run of the test suite for the final verification (whole-branch).
   // We don't fail on the test outcome here — final-verifier only fails when
   // the diff itself is suspicious or unreadable. The test report stays in
@@ -1514,6 +1730,9 @@ async function runFinalVerifyHandler(
     diff.filesChanged.length > 0
       ? diff.filesChanged.map((f) => `- \`${f}\``).join('\n')
       : '_no files changed_',
+    ``,
+    `## Acceptance Criteria Verified`,
+    acLines,
     ``,
     `## Commits`,
     diff.logText.trim()

@@ -124,7 +124,12 @@ export function buildSpec(
   probe: ProjectProbeResult | null,
   opts: SpecOptions = {},
 ): BuiltSpec {
-  const criteria = splitCriteria(story.acceptanceCriteria)
+  // AC 语义修正 (design §7): generate criteria when the story supplied
+  // none. `splitCriteria` returns [] for missing raw AC, and
+  // `generateAcceptanceCriteria` always produces a non-empty set, so the
+  // Behavior section is never left with the "unverifiable" placeholder.
+  const raw = splitCriteria(story.acceptanceCriteria)
+  const criteria = raw.length > 0 ? raw : generateAcceptanceCriteria(story)
   const classified = classifyCriteria(criteria)
   const coveredCategories = (Object.keys(classified.byCategory) as CriterionCategory[]).filter(
     (c) => classified.byCategory[c].length > 0,
@@ -140,6 +145,65 @@ function splitCriteria(ac: string | undefined): string[] {
   // Reuse the PlanBuilder splitter so the Spec and Planning stages agree
   // on criterion boundaries.
   return splitAcceptanceCriteria(ac)
+}
+
+/**
+ * Derive acceptance criteria from the story's title + description when
+ * none were supplied (AC 语义修正, design §7). The Spec stage is the
+ * single place where criteria come into existence: a story that reaches
+ * Spec with no raw AC is no longer parked at Clarification, and the
+ * generated criteria become the contract the verify/review/final-verify
+ * stages read from `06-spec.md`.
+ *
+ * The generation is deterministic and grounded in what the story
+ * actually says, so a reviewer can trace every criterion back to the
+ * title/description rather than a fabricated obligation:
+ *
+ *   1. `The change described by the story is implemented.`
+ *   2. One criterion per sentence of the description (trimmed).
+ *   3. A self-check that the implementation is testable.
+ *
+ * The description alone is authoritative; the title supplies the anchor
+ * wording for the first criterion when the description is empty.
+ */
+export function generateAcceptanceCriteria(
+  story: Pick<SpecStory, 'title' | 'description'>,
+): string[] {
+  const description = (story.description ?? '').trim()
+  const title = (story.title ?? '').trim()
+
+  const criteria: string[] = []
+  if (title.length > 0) {
+    criteria.push(`The change described by "${title}" is implemented.`)
+  } else {
+    criteria.push('The change described by the story is implemented.')
+  }
+
+  if (description.length > 0) {
+    // One criterion per sentence; split on '.', ';', and newlines so a
+    // multi-sentence description yields one checkable obligation each.
+    const sentences = description
+      .split(/(?<=[.;。；])\s+|\n+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    for (const sentence of sentences) {
+      // Normalise trailing punctuation so a bare fragment reads as a criterion.
+      const text = sentence.replace(/[.;。；]+$/u, '').trim()
+      if (text.length === 0) continue
+      // Avoid duplicating the anchor criterion when the description is
+      // effectively just the title reworded.
+      if (criteria.includes(`The change described by "${title}" is implemented.`)) {
+        criteria.push(`${text}, and the result is verifiable.`)
+      } else {
+        criteria.push(text)
+      }
+    }
+  }
+
+  // Guarantee the generated set always names testability, which is what
+  // the later verify stages key on.
+  criteria.push('The implementation is covered by passing automated tests.')
+  return criteria
 }
 
 /**
@@ -216,14 +280,13 @@ function renderSpec(
   }
   lines.push('')
 
-  // Behavior
+  // Behavior — criteria are ALWAYS non-empty here (raw AC split, or
+  // generated from title + description when raw AC was missing).
   lines.push('## Behavior')
   if (criteria.length > 0) {
     criteria.forEach((c, i) => lines.push(`${i + 1}. ${c}`))
   } else {
-    lines.push(
-      '_No acceptance criteria were specified. The implementation cannot be verified against this spec._',
-    )
+    lines.push('_No acceptance criteria could be derived from the story._')
   }
   lines.push('')
 

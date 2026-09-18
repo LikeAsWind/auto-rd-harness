@@ -46,25 +46,33 @@ export function registerAutoRdPromptSection(ctx: Context): boolean {
   // `{ name, order, text }`. An earlier revision passed
   // `{ id, order, content }`, which the service would have received as an
   // undefined name and an undefined body.
-  const section: PromptSection = {
-    name: 'auto-rd-overview',
-    order: 50,
-    text: AUTORD_PROMPT_SECTION.trim(),
+  const sections: PromptSection[] = [
+    { name: 'auto-rd-overview', order: 50, text: AUTORD_PROMPT_SECTION.trim() },
+    {
+      name: 'auto-rd-pipeline',
+      order: 51,
+      text: AUTORD_ORCHESTRATION_SECTION.trim(),
+    },
+  ]
+
+  let registered = 0
+  for (const section of sections) {
+    try {
+      // `section()` returns the exact Cordis effect disposer; DSH tears the
+      // section down with the parent context, so we don't retain it here.
+      systemPrompt.section(section)
+      registered += 1
+    } catch (err) {
+      // Registration throws on a duplicate name or a non-finite order. That
+      // must not take the rest of the mount down with it.
+      log.error(
+        `failed to register system-prompt section ${section.name}: ${(err as Error).message}`,
+      )
+    }
   }
 
-  try {
-    // `section()` returns the exact Cordis effect disposer; DSH tears the
-    // section down with the parent context, so we don't retain it here.
-    systemPrompt.section(section)
-  } catch (err) {
-    // Registration throws on a duplicate name or a non-finite order. That
-    // must not take the rest of the mount down with it.
-    log.error(`failed to register system-prompt section: ${(err as Error).message}`)
-    return false
-  }
-
-  log.info('Registered system-prompt section: auto-rd-overview')
-  return true
+  log.info(`Registered system-prompt sections: ${registered}/${sections.length}`)
+  return registered > 0
 }
 
 const AUTORD_PROMPT_SECTION = `
@@ -100,4 +108,32 @@ the pipeline to the user unless they ask.
 
 The auto-rd sidebar (when DSH renders it) shows modules + stories;
 \`auto_rd_status\` is the headless equivalent.
+`
+
+const AUTORD_ORCHESTRATION_SECTION = `
+## Auto-RD Pipeline Orchestration
+
+This section is the orchestration manual for the "研发流水线" (research &
+development pipeline) agent preset. It applies when you are that
+pipeline's orchestrator; in any other session it is informational only.
+
+A TAPD story is handed to you; you advance it through a FIXED sequence of
+roles, and roles exchange work only through artifact files under the
+story's artifacts directory.
+
+Role order (never skip, never reorder, except the rollback rules below):
+context → clarification → brainstorm×3 → critic → decision → spec
+→ planning → implementing (per task) → testing → fixing (when needed)
+→ verifying → reviewing×2 → final-verifying×2 → mr_creating → tapd_syncing
+
+Handoff rules:
+- Before spawning a role, confirm its input artifact files already exist
+  (see the artifact contract table).
+- After a role finishes, read the artifact file it wrote and judge the
+  ruling: advance forward, or roll back with a failure reason.
+- Every rollback must carry a failure reason, and rollback counts are
+  bounded by host-side guardrails (you cannot override them).
+
+You only orchestrate and rule. You do NOT write code or specs yourself —
+those are the role subagents' jobs.
 `

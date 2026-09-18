@@ -218,6 +218,8 @@ export class TapdPoller {
       worktreePath,
       artifacts: {},
       retryCount: 0,
+      totalSteps: 0,
+      loopCount: 0,
       createdAt: now,
       updatedAt: now,
     })

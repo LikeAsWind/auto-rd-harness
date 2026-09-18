@@ -128,7 +128,9 @@ export class StoryNotifierService {
     ].join('\n')
 
     try {
-      await subagents.sendMessage(sender, userSessionId, [{ type: 'text', text }])
+      await subagents.sendMessage(sender, userSessionId, [{ type: 'text', text }], {
+        signal: new AbortController().signal,
+      })
       this.deps.logger.info(`StoryNotifier: pinged session ${userSessionId} for story ${story.id}`)
     } catch (err) {
       // Don't bubble. The story is still blocked; the user just doesn't

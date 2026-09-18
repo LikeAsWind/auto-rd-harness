@@ -16,6 +16,7 @@
   },
   "files": [
     "lib",
+    "agent-presets",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",

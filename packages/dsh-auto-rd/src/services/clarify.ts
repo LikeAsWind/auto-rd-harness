@@ -147,12 +147,20 @@ export function clarifyStory(
   const criteria = splitAcceptanceCriteria(story.acceptanceCriteria)
 
   // 1. Acceptable criteria present at all?
+  //
+  // NO LONGER a hard gate (AC 语义修正, design §7). A story with zero
+  // supplied acceptance criteria is NOT parked here — the Spec stage
+  // generates the criteria from `title + description + selected
+  // proposal` into `06-spec.md`, and the verify/review/final-verify
+  // stages read those GENERATED criteria instead of the raw
+  // `story.acceptanceCriteria`. Missing raw AC is recorded as advisory
+  // so the ledger still shows it, but it no longer blocks progression.
   if (criteria.length === 0) {
-    blocking.push({
+    advisory.push({
       kind: 'missing_acceptance_criteria',
-      question: 'What are the acceptance criteria for this story?',
+      question: 'No acceptance criteria were supplied — they will be generated at the spec stage.',
       detail:
-        'No acceptance criteria were provided, so there is nothing the pipeline can verify the implementation against.',
+        'The spec stage derives acceptance criteria from the title, description, and the selected design proposal. Verification then runs against those generated criteria.',
     })
   }
 
